@@ -1,0 +1,51 @@
+// types and constants of unit "CrystalLUA"
+type
+  ELua          = CrystalLUA.ELua;
+  PLuaArg       = CrystalLUA.PLuaArg;
+  PLuaRecord    = CrystalLUA.PLuaRecord;
+  PLuaRecordInfo= CrystalLUA.PLuaRecordInfo;
+  PLuaTable     = CrystalLUA.PLuaTable;
+  TLua          = CrystalLUA.TLua;
+  TLuaArg       = CrystalLUA.TLuaArg;
+  TLuaArgs      = CrystalLUA.TLuaArgs;
+  TLuaArgType   = CrystalLUA.TLuaArgType;
+  TLuaClassProc = CrystalLUA.TLuaClassProc;
+  TLuaClassProc0= CrystalLUA.TLuaClassProc0;
+  TLuaClassProc1= CrystalLUA.TLuaClassProc1;
+  TLuaClassProc10= CrystalLUA.TLuaClassProc10;
+  TLuaClassProc11= CrystalLUA.TLuaClassProc11;
+  TLuaClassProc12= CrystalLUA.TLuaClassProc12;
+  TLuaClassProc2= CrystalLUA.TLuaClassProc2;
+  TLuaClassProc3= CrystalLUA.TLuaClassProc3;
+  TLuaClassProc4= CrystalLUA.TLuaClassProc4;
+  TLuaClassProc5= CrystalLUA.TLuaClassProc5;
+  TLuaClassProc6= CrystalLUA.TLuaClassProc6;
+  TLuaClassProc7= CrystalLUA.TLuaClassProc7;
+  TLuaClassProc8= CrystalLUA.TLuaClassProc8;
+  TLuaClassProc9= CrystalLUA.TLuaClassProc9;
+  TLuaProc      = CrystalLUA.TLuaProc;
+  TLuaProc0     = CrystalLUA.TLuaProc0;
+  TLuaProc1     = CrystalLUA.TLuaProc1;
+  TLuaProc2     = CrystalLUA.TLuaProc2;
+  TLuaProc3     = CrystalLUA.TLuaProc3;
+  TLuaProc4     = CrystalLUA.TLuaProc4;
+  TLuaProc5     = CrystalLUA.TLuaProc5;
+  TLuaProc6     = CrystalLUA.TLuaProc6;
+  TLuaRecord    = CrystalLUA.TLuaRecord;
+  TLuaRecordInfo= CrystalLUA.TLuaRecordInfo;
+  TLuaTable     = CrystalLUA.TLuaTable;
+
+const
+  ltArray    = CrystalLUA.ltArray;
+  ltBoolean  = CrystalLUA.ltBoolean;
+  ltClass    = CrystalLUA.ltClass;
+  ltDouble   = CrystalLUA.ltDouble;
+  ltEmpty    = CrystalLUA.ltEmpty;
+  ltInteger  = CrystalLUA.ltInteger;
+  ltObject   = CrystalLUA.ltObject;
+  ltPointer  = CrystalLUA.ltPointer;
+  ltRecord   = CrystalLUA.ltRecord;
+  ltSet      = CrystalLUA.ltSet;
+  ltString   = CrystalLUA.ltString;
+  ltTable    = CrystalLUA.ltTable;
+  typeinfoUniversal= CrystalLUA.typeinfoUniversal;

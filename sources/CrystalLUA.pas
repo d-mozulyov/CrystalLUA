@@ -1,7 +1,7 @@
 unit CrystalLUA;
 
 {******************************************************************************}
-{ Copyright (c) 2010-2014 Dmitry Mozulyov (aka Devil)                          }
+{ Copyright (c) 2010-2015 Dmitry Mozulyov                                      }
 {                                                                              }
 { Permission is hereby granted, free of charge, to any person obtaining a copy }
 { of this software and associated documentation files (the "Software"), to deal}
@@ -22,12 +22,9 @@ unit CrystalLUA;
 { THE SOFTWARE.                                                                }
 {                                                                              }
 { email: softforyou@inbox.ru                                                   }
-{ icq: 250481638                                                               }
 { skype: dimandevil                                                            }
-{ site: http://sourceforge.net/projects/crystallua/                            }
+{ repository: https://github.com/d-mozulyov/CrystalLUA                         }
 {******************************************************************************}
-
-
 
 { *********************************************************************** }
 {                                                                         }
@@ -42,8 +39,6 @@ unit CrystalLUA;
 { *********************************************************************** }
 
 
-
-
 // you can define LUA_INITIALIZE to create and destroy Lua:TLua instance automatically
 //{$define LUA_INITIALIZE}
 
@@ -53,8 +48,9 @@ unit CrystalLUA;
 //{$define LUA_ANSI}
 
 // you can disable Classes unit using if you want.
-// it may minimize exe size for simple applications, such as a console 
+// it may minimize exe size for simple applications, such as a console
 //{$define NO_CLASSES}
+
 
 // compiler directives
 {$ifdef FPC}
@@ -75,50 +71,68 @@ unit CrystalLUA;
   {$define CPUX86}
 {$ifend}
 {$if (Defined(FPC)) or (CompilerVersion >= 17)}
-  {$define INLINE_SUPPORT}
+  {$define INLINESUPPORT}
 {$ifend}
 {$if Defined(CPUX86) or Defined(CPUX64)}
    {$define CPUINTEL}
+{$ifend}
+{$if SizeOf(Pointer) = 8}
+  {$define LARGEINT}
+{$else}
+  {$define SMALLINT}
 {$ifend}
 {$if CompilerVersion >= 21}
   {$WEAKLINKRTTI ON}
   {$RTTI EXPLICIT METHODS([]) PROPERTIES([]) FIELDS([])}
 {$ifend}
 {$if (not Defined(FPC)) and (not Defined(NEXTGEN)) and (CompilerVersion >= 20)}
-  {$define INTERNAL_CODEPAGE}
+  {$define INTERNALCODEPAGE}
 {$ifend}
-
-// unicode routine
-{$if Defined(LUA_UNICODE) and Defined(LUA_ANSI)}
-  {$MESSAGE ERROR 'defined both encodings: LUA_UNICODE and LUA_ANSI'}
-{$ifend}
-{$if (not Defined(LUA_UNICODE)) and (not Defined(LUA_ANSI))}
-   {$ifdef UNICODE}
-      {$define LUA_UNICODE}
-   {$else}
-      {$define LUA_ANSI}
-   {$endif}
-{$ifend}
-
-// you should always define NO_CRYSTAL to compile correctly!
-{$define NO_CRYSTAL}
-
-// crystal routine
-{$ifndef NO_CRYSTAL}
-   {$undef NO_CLASSES}
+{$ifdef KOL_MCK}
+  {$define KOL}
 {$endif}
 
-interface
-  uses SysUtils, TypInfo,
-       {$ifdef fpc}Variants,{$endif}
-       {$ifdef NO_CRYSTAL}Types{$ifndef NO_CLASSES},Classes{$endif}{$else}SysUtilsEx{$endif},
-       // Operating System specific
-       {$ifdef MSWINDOWS}Windows{$endif}
-       // ToDo
-       ;
 
+interface
+  uses Types,
+       {$ifdef MSWINDOWS}Windows,{$endif}
+       {$ifdef KOL}
+         KOL, err
+       {$else}
+         SysUtils, Classes
+       {$endif},
+       TypInfo;
 
 type
+  // standard types
+  {$if CompilerVersion < 19}
+  NativeInt = Integer;
+  PNativeInt = PInteger;
+  NativeUInt = Cardinal;
+  PNativeUInt = PCardinal;
+  {$ifend}
+  {$if (not Defined(FPC)) and (CompilerVersion < 15)}
+  UInt64 = Int64;
+  PUInt64 = ^UInt64;
+  {$ifend}
+  {$if CompilerVersion < 23}
+  TExtended80Rec = Extended;
+  PExtended80Rec = ^TExtended80Rec;
+  {$ifend}
+  TBytes = array of Byte;
+
+  // exception class
+  ELua = class(Exception)
+  {$ifdef KOL}
+    constructor Create(const Msg: string);
+    constructor CreateFmt(const Msg: string; const Args: array of const);
+    constructor CreateRes(Ident: NativeUInt); overload;
+    constructor CreateRes(ResStringRec: PResStringRec); overload;
+    constructor CreateResFmt(Ident: NativeUInt; const Args: array of const); overload;
+    constructor CreateResFmt(ResStringRec: PResStringRec; const Args: array of const); overload;
+  {$endif}
+  end;
+
   // CrystalLUA string types      
   {$ifdef LUA_UNICODE}
     {$ifdef UNICODE}
@@ -160,9 +174,6 @@ type
     class procedure Assert(const FmtStr: string; const Args: array of const; const CodeAddr: pointer = nil); overload;
   end;
   {$endif}
-
-  // incorrect TLua instance use exception
-  ELua = class(TExcept);
 
   // incorrect script use exception
   ELuaScript = class(ELua);
@@ -1533,6 +1544,81 @@ var
 
 
 implementation
+
+{ ELua }
+
+{$ifdef KOL}
+constructor ELua.Create(const Msg: string);
+begin
+  inherited Create(e_Custom, Msg);
+end;
+
+constructor ELua.CreateFmt(const Msg: string;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, Msg, Args);
+end;
+
+type
+  PStrData = ^TStrData;
+  TStrData = record
+    Ident: Integer;
+    Buffer: PKOLChar;
+    BufSize: Integer;
+    nChars: Integer;
+  end;
+
+function EnumStringModules(Instance: NativeInt; Data: Pointer): Boolean;
+begin
+  with PStrData(Data)^ do
+  begin
+    nChars := LoadString(Instance, Ident, Buffer, BufSize);
+    Result := nChars = 0;
+  end;
+end;
+
+function FindStringResource(Ident: Integer; Buffer: PKOLChar; BufSize: Integer): Integer;
+var
+  StrData: TStrData;
+begin
+  StrData.Ident := Ident;
+  StrData.Buffer := Buffer;
+  StrData.BufSize := BufSize;
+  StrData.nChars := 0;
+  EnumResourceModules(EnumStringModules, @StrData);
+  Result := StrData.nChars;
+end;
+
+function LoadStr(Ident: Integer): string;
+var
+  Buffer: array[0..1023] of KOLChar;
+begin
+  SetString(Result, Buffer, FindStringResource(Ident, Buffer, SizeOf(Buffer)));
+end;
+
+constructor ELua.CreateRes(Ident: NativeUInt);
+begin
+  inherited Create(e_Custom, LoadStr(Ident));
+end;
+
+constructor ELua.CreateRes(ResStringRec: PResStringRec);
+begin
+  inherited Create(e_Custom, System.LoadResString(ResStringRec));
+end;
+
+constructor ELua.CreateResFmt(Ident: NativeUInt;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, LoadStr(Ident), Args);
+end;
+
+constructor ELua.CreateResFmt(ResStringRec: PResStringRec;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, System.LoadResString(ResStringRec), Args);
+end;
+{$endif}
+
 
 
 
@@ -3817,7 +3903,7 @@ end;
 {$ifdef NO_CRYSTAL}
 // ************************************************************************* //
 // ------------   SysUtilsEx-рутина  ------------------------------------------
-type  
+type
   // дублирование из System. за исключением "X"
   PFieldInfo = ^TFieldInfo;
   TFieldInfo = packed record
@@ -3833,39 +3919,6 @@ type
     Fields: array [0..0] of TFieldInfo;
   end;
 
-
-type
-  TExceptClass = class of TExcept;
-
-procedure __TExceptAssert_1(const Self: TExceptClass; const Message: string; const CodeAddr: pointer);
-begin
-  raise Self.Create(Message) at CodeAddr;
-end;
-
-class procedure TExcept.Assert(const Message: string; const CodeAddr : pointer);
-asm
-  test ecx, ecx
-  jnz __TExceptAssert_1
-  mov ecx, [esp]
-  jmp __TExceptAssert_1
-end;
-
-procedure __TExceptAssert_2(const Self: TExceptClass; const FmtStr: string; const Args: array of const; const CodeAddr : pointer);
-begin
-  raise Self.CreateFmt(FmtStr, Args) at CodeAddr;
-end;
-
-class procedure TExcept.Assert(const FmtStr: string; const Args: array of const; const CodeAddr : pointer);
-asm
-  cmp [esp+8], 0
-  jnz @jmp
-
-  mov ebp, [esp+4]
-  mov [esp+8], ebp
-@jmp:
-  pop ebp
-  jmp __TExceptAssert_2
-end;
 
 function InstancePath(): string;
 var

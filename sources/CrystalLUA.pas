@@ -108,8 +108,10 @@ type
   {$if CompilerVersion < 19}
   NativeInt = Integer;
   PNativeInt = PInteger;
-  NativeUInt = Cardinal;
-  PNativeUInt = PCardinal;
+  {$ifend}
+  {$if CompilerVersion < 22}
+  PNativeInt = ^NativeInt;
+  PNativeUInt = ^NativeUInt;
   {$ifend}
   {$if (not Defined(FPC)) and (CompilerVersion < 15)}
   UInt64 = Int64;
@@ -1563,37 +1565,33 @@ type
   PStrData = ^TStrData;
   TStrData = record
     Ident: Integer;
-    Buffer: PKOLChar;
-    BufSize: Integer;
-    nChars: Integer;
+    Str: string;
   end;
 
-function EnumStringModules(Instance: NativeInt; Data: Pointer): Boolean;
+function EnumStringModules(Instance: Longint; Data: Pointer): Boolean;
+var
+  Buffer: array [0..1023] of Char;
 begin
   with PStrData(Data)^ do
   begin
-    nChars := LoadString(Instance, Ident, Buffer, BufSize);
-    Result := nChars = 0;
+    SetString(Str, Buffer, Windows.LoadString(Instance, Ident, Buffer, sizeof(Buffer)));
+    Result := Str = '';
   end;
 end;
 
-function FindStringResource(Ident: Integer; Buffer: PKOLChar; BufSize: Integer): Integer;
+function FindStringResource(Ident: Integer): string;
 var
   StrData: TStrData;
 begin
   StrData.Ident := Ident;
-  StrData.Buffer := Buffer;
-  StrData.BufSize := BufSize;
-  StrData.nChars := 0;
+  StrData.Str := '';
   EnumResourceModules(EnumStringModules, @StrData);
-  Result := StrData.nChars;
+  Result := StrData.Str;
 end;
 
 function LoadStr(Ident: Integer): string;
-var
-  Buffer: array[0..1023] of KOLChar;
 begin
-  SetString(Result, Buffer, FindStringResource(Ident, Buffer, SizeOf(Buffer)));
+  Result := FindStringResource(Ident);
 end;
 
 constructor ELua.CreateRes(Ident: NativeUInt);

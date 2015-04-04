@@ -114,7 +114,7 @@ type
     {$ifend}
     {$if CompilerVersion < 19}
       NativeInt = Integer;
-      PNativeInt = PInteger;
+      NativeUInt = Cardinal;
     {$ifend}
     {$if CompilerVersion < 22}
       PNativeInt = ^NativeInt;

@@ -149,10 +149,7 @@ type
   PExtended80Rec = ^TExtended80Rec;
   {$ifend}
   TBytes = array of Byte;
-  //PBytes = ^TBytes;
-  {$ifdef NEXTGEN}
-  AnsiString = TBytes;
-  {$endif}
+  PBytes = ^TBytes;
 
   // exception class
   ELua = class(Exception)
@@ -167,7 +164,7 @@ type
   end;
 
   // CrystalLUA string types      
-  {$ifdef LUA_UNICODE}
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
     {$ifdef UNICODE}
       LuaString = UnicodeString;
       PLuaString = PUnicodeString;
@@ -182,7 +179,7 @@ type
     PLuaString = PAnsiString;
     LuaChar = AnsiChar;
     PLuaChar = PAnsiChar;
-  {$endif}
+  {$ifend}
 
   // internal string identifier: utf8 or ansi
   __luaname = type PAnsiChar;
@@ -754,8 +751,25 @@ type
   TLuaUnitDynArray = array of TLuaUnit;
 
 
+{ TLua class
+  Script and registered types/functions manager }
 
   TLua = class(TObject)
+  private
+    // unicode routine
+    FCodePage: Word;
+    FUnicodeTable: array[Byte] of Word;
+    FUTF8Table: array[Byte] of Cardinal;
+
+    procedure SetCodePage(Value: Word);
+    function AnsiFromUnicode(ADest: PAnsiChar; ACodePage: Word; ASource: PWideChar; ALength: Integer): Integer;
+    procedure UnicodeFromAnsi(ADest: PWideChar; ASource: PAnsiChar; ACodePage: Word; ALength: Integer);
+    { class function Utf8FromUnicode(ADest: PAnsiChar; ASource: PWideChar; ALength: Integer): Integer; static; }
+    { class function UnicodeFromUtf8(ADest: PWideChar; ASource: PAnsiChar; ALength: Integer): Integer; static; }
+    function Utf8FromAnsi(ADest: PAnsiChar; ASource: PAnsiChar; ACodePage: Word; ALength: Integer): Integer;
+    function AnsiFromUtf8(ADest: PAnsiChar; ACodePage: Word; ASource: PAnsiChar; ALength: Integer): Integer;
+    function AnsiFromAnsi(ADest: PAnsiChar; ADestCodePage: Word; ASource: PAnsiChar; ASourceCodePage: Word; ALength: Integer): Integer;
+
   private
     // низкоуровневый блок
     FHandle: pointer;
@@ -862,8 +876,8 @@ type
     procedure SetVariable(const Name: string; const Value: Variant);
     function  GetVariableEx(const Name: string): TLuaArg;
     procedure SetVariableEx(const Name: string; const Value: TLuaArg);      *)
-  public           (*
-    constructor Create;
+  public
+    constructor Create;(*
     destructor Destroy; override;
     procedure GarbageCollection();
     procedure SaveNameSpace(const FileName: string); dynamic;
@@ -938,10 +952,10 @@ const
   // фильтр всех операторов
   ALL_OPERATORS: TLuaOperators = [low(TLuaOperator)..high(TLuaOperator)];
 
-     (*
-// вспомогательные функции
-function CreateLua(): TLua;
-function LuaArgs(const Count: integer): TLuaArgs;
+
+// helper functions
+function CreateLua: TLua;
+(*function LuaArgs(const Count: integer): TLuaArgs;
 function LuaArg(const Value: boolean): TLuaArg; overload;
 function LuaArg(const Value: integer): TLuaArg; overload;
 function LuaArg(const Value: double): TLuaArg; overload;
@@ -1001,8 +1015,169 @@ var
   Lua: TLua;
 {$endif}
 
-
 implementation
+
+var
+  CODEPAGE_DEFAULT: Word;
+  UTF8CHAR_SIZE: array[Byte] of Byte;
+
+procedure InitUnicodeLookups;
+type
+  TNativeUIntArray = array[0..256 div SizeOf(NativeUInt) - 1] of NativeUInt;
+var
+  i, X: NativeUInt;
+  NativeArr: ^TNativeUIntArray;
+begin
+  CODEPAGE_DEFAULT := GetACP;
+  NativeArr := Pointer(@UTF8CHAR_SIZE);
+
+  // 0..127
+  X := {$ifdef LARGEINT}$0101010101010101{$else}$01010101{$endif};
+  for i := 0 to 128 div SizeOf(NativeUInt) - 1 do
+  NativeArr[i] := X;
+
+  // 128..191 (64) fail (0)
+  Inc(NativeUInt(NativeArr), 128);
+  X := 0;
+  for i := 0 to 64 div SizeOf(NativeUInt) - 1 do
+  NativeArr[i] := X;
+
+  // 192..223 (32)
+  Inc(NativeUInt(NativeArr), 64);
+  X := {$ifdef LARGEINT}$0202020202020202{$else}$02020202{$endif};
+  for i := 0 to 32 div SizeOf(NativeUInt) - 1 do
+  NativeArr[i] := X;
+
+  // 224..239 (16)
+  Inc(NativeUInt(NativeArr), 32);
+  X := {$ifdef LARGEINT}$0303030303030303{$else}$03030303{$endif};
+  {$ifdef LARGEINT}
+    NativeArr[0] := X;
+    NativeArr[1] := X;
+  {$else}
+    NativeArr[0] := X;
+    NativeArr[1] := X;
+    NativeArr[2] := X;
+    NativeArr[3] := X;
+  {$endif}
+
+  // 240..247 (8)
+  Inc(NativeUInt(NativeArr), 16);
+  {$ifdef LARGEINT}
+    NativeArr[0] := $0404040404040404;
+  {$else}
+    NativeArr[0] := $04040404;
+    NativeArr[1] := $04040404;
+  {$endif}
+
+  // 248..251 (4) --> 5
+  // 252..253 (2) --> 6
+  // 254..255 (2) --> fail (0)
+  {$ifdef LARGEINT}
+    NativeArr[1] := $0000060605050505;
+  {$else}
+    NativeArr[2] := $05050505;
+    NativeArr[3] := $00000606;
+  {$endif}
+end;
+
+var
+  TypInfoGetStrProp: function(Instance: TObject; PropInfo: PPropInfo): string;
+  TypInfoSetStrProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: string);
+  TypInfoGetVariantProp: function(Instance: TObject; PropInfo: PPropInfo): Variant;
+  TypInfoSetVariantProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: Variant);
+  TypInfoGetInterfaceProp: function(Instance: TObject; PropInfo: PPropInfo): IInterface;
+  TypInfoSetInterfaceProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: IInterface);
+
+procedure InitTypInfoProcs;
+begin
+  TypInfoGetStrProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.GetStrProp;
+  TypInfoSetStrProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.SetStrProp;
+  TypInfoGetVariantProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.GetVariantProp;
+  TypInfoSetVariantProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.SetVariantProp;
+  TypInfoGetInterfaceProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.GetInterfaceProp;
+  TypInfoSetInterfaceProp := {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.SetInterfaceProp;
+end;
+
+
+{ ELua }
+
+{$ifdef KOL}
+constructor ELua.Create(const Msg: string);
+begin
+  inherited Create(e_Custom, Msg);
+end;
+
+constructor ELua.CreateFmt(const Msg: string;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, Msg, Args);
+end;
+
+type
+  PStrData = ^TStrData;
+  TStrData = record
+    Ident: Integer;
+    Str: string;
+  end;
+
+function EnumStringModules(Instance: Longint; Data: Pointer): Boolean;
+var
+  Buffer: array [0..1023] of Char;
+begin
+  with PStrData(Data)^ do
+  begin
+    SetString(Str, Buffer, Windows.LoadString(Instance, Ident, Buffer, sizeof(Buffer)));
+    Result := Str = '';
+  end;
+end;
+
+function FindStringResource(Ident: Integer): string;
+var
+  StrData: TStrData;
+begin
+  StrData.Ident := Ident;
+  StrData.Str := '';
+  EnumResourceModules(EnumStringModules, @StrData);
+  Result := StrData.Str;
+end;
+
+function LoadStr(Ident: Integer): string;
+begin
+  Result := FindStringResource(Ident);
+end;
+
+constructor ELua.CreateRes(Ident: NativeUInt);
+begin
+  inherited Create(e_Custom, LoadStr(Ident));
+end;
+
+constructor ELua.CreateRes(ResStringRec: PResStringRec);
+begin
+  inherited Create(e_Custom, System.LoadResString(ResStringRec));
+end;
+
+constructor ELua.CreateResFmt(Ident: NativeUInt;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, LoadStr(Ident), Args);
+end;
+
+constructor ELua.CreateResFmt(ResStringRec: PResStringRec;
+  const Args: array of const);
+begin
+  inherited CreateFmt(e_Custom, System.LoadResString(ResStringRec), Args);
+end;
+{$endif}
+
+
+
+
+
+
+
+{ Lua API routine }
+
 
 
           (*
@@ -2333,13 +2508,13 @@ var
            *)
 
 
-             (*
+
 // ------------   LUA-рутина  -------------------------------------------------
 var
   LuaHandle: THandle;
   LuaPath: string;
-  LuaInitialized: boolean;
-
+  LuaInitialized: Boolean;
+       (*
 type
   Plua_State = pointer;
   lua_CFunction = function(L: Plua_State): integer; cdecl;
@@ -2628,10 +2803,13 @@ begin
     LuaHandle := 0;
   end;
 end;      *)
-            (*
+
 // проинициализировать библиотеку Lua и все необходимые функции
-function InitializeLUA(): boolean;
-var
+function InitializeLua: Boolean;
+begin
+
+end;
+(*var
   Buf: pointer;
 
   function FailLoad(var Proc; const ProcName: pchar): boolean;
@@ -2862,14 +3040,19 @@ type
   TForceVariant = procedure(const Arg: TLuaArg; var Ret: Variant);
   TStackArgument = procedure(const ALua: TLua; const Index: integer; var Ret: string);
                *)
-                 (*
-// безопасный конструктор Lua. без Exception-ов
-function CreateLua(): TLua;
-begin
-  if (not InitializeLUA) then Result := nil
-  else Result := TLua.Create;
-end;
 
+// safe TLua constuctor
+function CreateLua: TLua;
+begin
+  if (not InitializeLua) then
+  begin
+    Result := nil;
+  end else
+  begin
+    Result := TLua.Create;
+  end;
+end;
+              (*
 procedure __LuaArgs(const Count: integer; var Result: TLuaArgs; const ReturnAddr: pointer);
 begin
   if (Count < 0) then
@@ -5683,25 +5866,7 @@ begin
 end;
          *)
            (*
-// блок указателей на нужные TypInfo-функции
-var
-  TypInfoGetStrProp: function(Instance: TObject; PropInfo: PPropInfo): string;
-  TypInfoSetStrProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: string);
-  TypInfoGetVariantProp: function(Instance: TObject; PropInfo: PPropInfo): Variant;
-  TypInfoSetVariantProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: Variant);
-  TypInfoGetInterfaceProp: function(Instance: TObject; PropInfo: PPropInfo): IInterface;
-  TypInfoSetInterfaceProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: IInterface);
-
-
-procedure InitTypInfoProcs();
-begin
-  TypInfoGetStrProp := TypInfo.GetStrProp;
-  TypInfoSetStrProp := TypInfo.SetStrProp;
-  TypInfoGetVariantProp := TypInfo.GetVariantProp;
-  TypInfoSetVariantProp := TypInfo.SetVariantProp;
-  TypInfoGetInterfaceProp := TypInfo.GetInterfaceProp;
-  TypInfoSetInterfaceProp := TypInfo.SetInterfaceProp;
-end;        *)
+     *)
 
 
                                      (*
@@ -6295,19 +6460,33 @@ begin
   Result := 0;
 end;  
                 *)
-                   (*
-// конструктор
+
 constructor TLua.Create();
+var
+  i: Integer;
 begin
-  if (not InitializeLUA) then
-  ELua.Assert('Lua library was not initialized:'#13'"%s"', [LuaPath]);
+  if (not InitializeLua) then
+    raise ELua.CreateFmt('Lua library was not initialized:'#13'"%s"', [LuaPath]);
+
+
+
+  (*
 
   FHandle := lua_open();
   luaL_openlibs(Handle);
 
   // флаг препроцессинга (замены '.' на ':')
-  FPreprocess := true;
+  FPreprocess := true;   *)
 
+  // unicode
+  for i := 0 to 127 do
+  begin
+    FUnicodeTable[i] := i;
+    FUTF8Table[i] := i + $01000;
+  end;
+  SetCodePage(0);
+
+  (*
   // метатаблица для сложных свойств
   mt_properties := internal_register_metatable(nil);
 
@@ -6331,8 +6510,8 @@ begin
   end;
 
   // TLuaReference
-  InternalAddClass(TLuaReference, false, nil);
-end;         *)
+  InternalAddClass(TLuaReference, false, nil);   *)
+end;
                (*
 // деструктор
 destructor TLua.Destroy();
@@ -6361,6 +6540,1113 @@ begin
 
   inherited;
 end;           *)
+
+procedure TLua.SetCodePage(Value: Word);
+var
+  i, X, Y: Integer;
+  Dest, Src, TopSrc: Pointer;
+  Buffer: array[128..255] of AnsiChar;
+begin
+  // code page
+  if (Value = 0) then Value := CODEPAGE_DEFAULT;
+  FCodePage := Value;
+
+  // unicode table (128..255)
+  if (Value = $ffff) then
+  begin
+    Dest := @FUnicodeTable[128];
+    X := 128 + (129 shl 16);
+    for i := 1 to (128 div (SizeOf(Integer) div SizeOf(WideChar))) do
+    begin
+      PInteger(Dest)^ := X;
+      Inc(X, $00010001);
+      Inc(NativeInt(Dest), SizeOf(Integer));
+    end;
+  end else
+  begin
+    Dest := @Buffer;
+    X := 128 + (129 shl 8) + (130 shl 16) + (131 shl 24);
+    for i := 1 to (128 div SizeOf(Integer)) do
+    begin
+      PInteger(Dest)^ := X;
+      Inc(X, $01010101);
+      Inc(NativeInt(Dest), SizeOf(Integer));
+    end;
+
+    {$ifdef MSWINDOWS}
+      MultiByteToWideChar(Value, 0, Pointer(@Buffer), 128, Pointer(@FUnicodeTable[128]), 128);
+    {$else}
+      UnicodeFromLocaleChars(Value, 0, Pointer(@Buffer), 128, Pointer(@FUnicodeTable[128]), 128);
+    {$endif}
+  end;
+
+  // utf8 table (128..255)
+  Src := @FUnicodeTable[128];
+  TopSrc := @FUnicodeTable[High(FUnicodeTable)];
+  Dest := Pointer(@FUTF8Table[128]);
+  Dec(NativeInt(Src), SizeOf(WideChar));
+  Dec(NativeInt(Dest), SizeOf(Cardinal));
+  repeat
+    if (Src = TopSrc) then Break;
+    Inc(NativeInt(Src), SizeOf(WideChar));
+    Inc(NativeInt(Dest), SizeOf(Cardinal));
+
+    X := PWord(Src)^;
+    if (X <= $7ff) then
+    begin
+      if (X > $7f) then
+      begin
+        Y := (X and $3f) shl 8;
+        X := (X shr 6) + $020080c0;
+        Inc(X, Y);
+        PCardinal(Dest)^ := X;
+      end else
+      begin
+        X := X + $01000000;
+        PCardinal(Dest)^ := X;
+      end;
+    end else
+    begin
+      Y := ((X and $3f) shl 16) + ((X and ($3f shl 6)) shl (8-6));
+      X := (X shr 12) + $038080E0;
+      Inc(X, Y);
+      PCardinal(Dest)^ := X;
+    end;
+  until (False);
+end;
+
+function TLua.AnsiFromUnicode(ADest: PAnsiChar; ACodePage: Word; ASource: PWideChar; ALength: Integer): Integer;
+const
+  CHARS_PER_ITERATION = SizeOf(Integer) div SizeOf(WideChar);
+var
+  Dest: PAnsiChar;
+  Source: PWideChar;
+  Count, X: Integer;
+begin
+  Count := ALength;
+  Dest := ADest;
+  Source := ASource;
+
+  if (Count >= CHARS_PER_ITERATION) then
+  repeat
+    X := PInteger(Source)^;
+    if (X and $ff80ff80 <> 0) then Break;
+
+    Inc(X, X shr 8);
+    Dec(Count, CHARS_PER_ITERATION);
+    PWord(Dest)^ := X;
+    Inc(Source, CHARS_PER_ITERATION);
+    Inc(Dest, CHARS_PER_ITERATION);
+  until (Count < CHARS_PER_ITERATION);
+
+  if (Count <> 0) then
+  begin
+    X := PWord(Source)^;
+    if (X and $ff80 = 0) then
+    begin
+      PByte(Dest)^ := X;
+      Dec(Count);
+      Inc(Source);
+      Inc(Dest);
+    end;
+
+    if (Count <> 0) then
+    Inc(Dest,
+      {$ifdef MSWINDOWS}
+        WideCharToMultiByte(ACodePage, 0, Source, Count, Pointer(Dest), Count, nil, nil)
+      {$else}
+        LocaleCharsFromUnicode(ACodePage, 0, Source, Count, Pointer(Dest), Count, nil, nil)
+      {$endif} );
+  end;
+
+  Result := NativeInt(Dest) - NativeInt(ADest);
+end;
+
+procedure TLua.UnicodeFromAnsi(ADest: PWideChar; ASource: PAnsiChar; ACodePage: Word; ALength: Integer);
+const
+  CHARS_PER_ITERATION = SizeOf(Integer) div SizeOf(AnsiChar);
+type
+  TUnicodeTable = array[Byte] of Word;
+var
+  Dest: PWideChar;
+  Source: PAnsiChar;
+  Count, X: Integer;
+  UnicodeTable: ^TUnicodeTable;
+begin
+  if (ACodePage = 0) then ACodePage := CODEPAGE_DEFAULT;
+  if (ACodePage <> FCodePage) then SetCodePage(ACodePage);
+
+  Count := ALength;
+  Dest := ADest;
+  Source := ASource;
+  UnicodeTable := Pointer(@FUnicodeTable);
+
+  if (Count >= CHARS_PER_ITERATION) then
+  repeat
+    X := PInteger(Source)^;
+    if (X and $8080 = 0) then
+    begin
+      if (X and $80808080 = 0) then
+      begin
+        PCardinal(Dest)^ := Byte(X) + (X and $ff00) shl 8;
+        X := X shr 16;
+        Dec(Count, 2);
+        Inc(Source, 2);
+        Inc(Dest, 2);
+      end;
+
+      PCardinal(Dest)^ := Byte(X) + (X and $ff00) shl 8;
+      Dec(Count, 2);
+      Inc(Source, 2);
+      Inc(Dest, 2);
+
+      if (Count < CHARS_PER_ITERATION) then Break;
+    end else
+    begin
+      X := Byte(X);
+      {$ifdef CPUX86}if (X > $7f) then{$endif} X := UnicodeTable[X];
+      PWord(Dest)^ := X;
+
+      Dec(Count);
+      Inc(Source);
+      Inc(Dest);
+      if (Count < CHARS_PER_ITERATION) then Break;
+    end;
+  until (False);
+
+  if (Count <> 0) then
+  repeat
+    X := PByte(Source)^;
+    {$ifdef CPUX86}if (X > $7f) then{$endif} X := UnicodeTable[X];
+    PWord(Dest)^ := X;
+
+    Dec(Count);
+    Inc(Source);
+    Inc(Dest);
+  until (Count = 0);
+end;
+
+function Utf8FromUnicode(ADest: PAnsiChar; ASource: PWideChar; ALength: Integer): Integer;
+label
+  process4, look_first, process_standard, process_character, unknown,
+  small_length, done;
+const
+  MASK_FF80_SMALL = $FF80FF80;
+  MASK_FF80_LARGE = $FF80FF80FF80FF80;
+  UNKNOWN_CHARACTER = Ord('?');
+var
+  X, U, Count: NativeUInt;
+  Dest: PAnsiChar;
+  Source: PWideChar;
+{$ifdef CPUX86}
+const
+  MASK_FF80 = MASK_FF80_SMALL;
+{$else .CPUX64/.CPUARM}
+var
+  MASK_FF80: NativeUInt;
+{$endif}
+begin
+  Count := ALength;
+  Dest := ADest;
+  Source := ASource;
+
+  if (Count = 0) then goto done;
+  Inc(Count, Count);
+  Inc(Count, NativeUInt(Source));
+  Dec(Count, (2 * SizeOf(Cardinal)));
+
+  {$ifNdef CPUX86}
+  MASK_FF80 := {$ifdef LARGEINT}MASK_FF80_LARGE{$else}MASK_FF80_SMALL{$endif};
+  {$endif}
+
+  // conversion loop
+  if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+  {$ifdef SMALLINT}
+    X := Word(Source[0]);
+    U := Word(Source[1]);
+    if ((X or U) and Integer(MASK_FF80) = 0) then
+  {$else}
+    X := PNativeUInt(Source)^;
+    if (X and MASK_FF80 = 0) then
+  {$endif}
+  begin
+    repeat
+    process4:
+      {$ifdef LARGEINT}
+      U := X shr 32;
+      {$endif}
+      X := X + (X shr 8);
+      U := U + (U shr 8);
+      X := Word(X);
+      {$ifdef LARGEINT}
+      U := Word(U);
+      {$endif}
+      U := U shl 16;
+      Inc(X, U);
+
+      Inc(Source, SizeOf(Cardinal));
+      PCardinal(Dest)^ := X;
+      Inc(Dest, SizeOf(Cardinal));
+
+      if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+    {$ifdef SMALLINT}
+      X := Word(Source[0]);
+      U := Word(Source[1]);
+    until ((X or U) and Integer(MASK_FF80) <> 0);
+    {$else}
+      X := PNativeUInt(Source)^;
+    until (X and MASK_FF80 <> 0);
+    {$endif}
+    goto look_first;
+  end else
+  begin
+  look_first:
+    {$ifdef LARGEINT}
+    X := Cardinal(X);
+    {$endif}
+  process_standard:
+    Inc(Source);
+    U := Word(X);
+    if (X and $FF80 = 0) then
+    begin
+      if (X and MASK_FF80 = 0) then
+      begin
+        // ascii_2
+        X := X shr 8;
+        Inc(Source);
+        Inc(X, U);
+        PWord(Dest)^ := X;
+        Inc(Dest, 2);
+      end else
+      begin
+        // ascii_1
+        PByte(Dest)^ := X;
+        Inc(Dest);
+      end;
+    end else
+    if (U < $d800) then
+    begin
+    process_character:
+      if (U <= $7ff) then
+      begin
+        if (U > $7f) then
+        begin
+          X := (U shr 6) + $80C0;
+          U := (U and $3f) shl 8;
+          Inc(X, U);
+          PWord(Dest)^ := X;
+          Inc(Dest, 2);
+        end else
+        begin
+          PByte(Dest)^ := U;
+          Inc(Dest);
+        end;
+      end else
+      begin
+        X := (U and $0fc0) shl 2;
+        Inc(X, (U and $3f) shl 16);
+        U := (U shr 12);
+        Inc(X, $8080E0);
+        Inc(X, U);
+
+        PWord(Dest)^ := X;
+        Inc(Dest, 2);
+        X := X shr 16;
+        PByte(Dest)^ := X;
+        Inc(Dest);
+      end;
+    end else
+    begin
+      if (U >= $e000) then goto process_character;
+      if (U >= $dc00) then
+      begin
+      unknown:
+        PByte(Dest)^ := UNKNOWN_CHARACTER;
+        Inc(Dest);
+      end else
+      begin
+        Inc(Source);
+        X := X shr 16;
+        Dec(U, $d800);
+        Dec(X, $dc00);
+        if (X >= ($e000-$dc00)) then goto unknown;
+
+        U := U shl 10;
+        Inc(X, $10000);
+        Inc(X, U);
+
+        U := (X and $3f) shl 24;
+        U := U + ((X and $0fc0) shl 10);
+        U := U + (X shr 18);
+        X := (X shr 4) and $3f00;
+        Inc(U, Integer($808080F0));
+        Inc(X, U);
+
+        PCardinal(Dest)^ := X;
+        Inc(Dest, 4);
+      end;
+    end;
+  end;
+
+  if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+  {$ifdef SMALLINT}
+    X := Word(Source[0]);
+    U := Word(Source[1]);
+    if ((X or U) and Integer(MASK_FF80) = 0) then goto process4;
+  {$else}
+    X := PNativeUInt(Source)^;
+    if (X and MASK_FF80 = 0) then goto process4;
+  {$endif}
+  goto look_first;
+
+small_length:
+  U := Count{TopSource} + (2 * SizeOf(Cardinal));
+  if (U = NativeUInt(Source)) then goto done;
+  Dec(U, NativeUInt(Source));
+  if (U >= SizeOf(Cardinal)) then
+  begin
+    X := PCardinal(Source)^;
+    goto process_standard;
+  end;
+  U := PWord(Source)^;
+  Inc(Source);
+  if (U < $d800) then goto process_character;
+  if (U >= $e000) then goto process_character;
+  if (U >= $dc00) then goto unknown;
+
+  PByte(Dest)^ := UNKNOWN_CHARACTER;
+  Inc(Dest);
+
+  // result
+done:
+  Result := NativeInt(Dest) - NativeInt(ADest);
+end;
+
+function UnicodeFromUtf8(ADest: PWideChar; ASource: PAnsiChar; ALength: Integer): Integer;
+label
+  process4, look_first, process1_3,
+  ascii_1, ascii_2, ascii_3,
+  process_standard, process_character, unknown,
+  next_iteration, small_length, done;
+const
+  MASK_80_SMALL = $80808080;
+  MAX_UTF8CHAR_SIZE = 6;
+  UNKNOWN_CHARACTER = Ord('?');
+var
+  X, U, Count: NativeUInt;
+  Dest: PWideChar;
+  Source: PAnsiChar;
+{$ifdef CPUINTEL}
+const
+  MASK_80 = MASK_80_SMALL;
+{$else .CPUARM}
+var
+  MASK_80: NativeUInt;
+{$endif}
+begin
+  Count := ALength;
+  Dest := ADest;
+  Source := ASource;
+
+  if (Count = 0) then goto done;
+  Inc(Count, NativeUInt(Source));
+  Dec(Count, MAX_UTF8CHAR_SIZE);
+
+  {$ifdef CPUARM}
+    MASK_80 := MASK_80_SMALL;
+  {$endif}
+
+  // conversion loop
+  if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+  X := PCardinal(Source)^;
+  if (X and Integer(MASK_80) = 0) then
+  begin
+    repeat
+    process4:
+      Inc(Source, SizeOf(Cardinal));
+
+      {$ifNdef LARGEINT}
+        PCardinal(Dest)^ := (X and $7f) + ((X and $7f00) shl 8);
+        X := X shr 16;
+        Inc(Dest, 2);
+        PCardinal(Dest)^ := (X and $7f) + ((X and $7f00) shl 8);
+        Inc(Dest, 2);
+      {$else}
+        PNativeUInt(Dest)^ := (X and $7f) + ((X and $7f00) shl 8) +
+          ((X and $7f0000) shl 16) + ((X and $7f000000) shl 24);
+        Inc(NativeUInt(Dest), SizeOf(NativeUInt));
+      {$endif}
+
+      if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+      X := PCardinal(Source)^;
+    until (X and Integer(MASK_80) <> 0);
+    goto look_first;
+  end else
+  begin
+  look_first:
+    if (X and $80 = 0) then
+    begin
+    process1_3:
+      {$ifNdef LARGEINT}
+        PCardinal(Dest)^ := (X and $7f) + ((X and $7f00) shl 8);
+        Inc(Dest, 2);
+        PCardinal(Dest)^ := ((X shr 16) and $7f);
+      {$else}
+        PNativeUInt(Dest)^ := (X and $7f) + ((X and $7f00) shl 8) +
+          ((X and $7f0000) shl 16);
+      {$endif}
+
+      if (X and $8000 <> 0) then goto ascii_1;
+      if (X and $800000 <> 0) then goto ascii_2;
+      ascii_3:
+        Inc(Source, 3);
+        Inc(Dest, 3{$ifdef SMALLINT}- 2{$endif});
+        goto next_iteration;
+      ascii_2:
+        X := X shr 16;
+        Inc(Source, 2);
+        {$ifdef LARGEINT}Inc(Dest, 2);{$endif}
+        if (UTF8CHAR_SIZE[Byte(X)] <= 2) then goto process_standard;
+        goto next_iteration;
+      ascii_1:
+        X := X shr 8;
+        Inc(Source);
+        Inc(Dest, 1{$ifdef SMALLINT}- 2{$endif});
+        if (UTF8CHAR_SIZE[Byte(X)] <= 3) then goto process_standard;
+        // goto next_iteration;
+    end else
+    begin
+    process_standard:
+      if (X and $C0E0 = $80C0) then
+      begin
+        X := ((X and $1F) shl 6) + ((X shr 8) and $3F);
+        Inc(Source, 2);
+
+      process_character:
+        PWord(Dest)^ := X;
+        Inc(Dest);
+      end else
+      begin
+        U := UTF8CHAR_SIZE[Byte(X)];
+        case (U) of
+          1:
+          begin
+            X := X and $7f;
+            Inc(Source);
+            PWord(Dest)^ := X;
+            Inc(Dest);
+          end;
+          3:
+          begin
+            if (X and $C0C000 = $808000) then
+            begin
+              U := (X and $0F) shl 12;
+              U := U + (X shr 16) and $3F;
+              X := (X and $3F00) shr 2;
+              Inc(Source, 3);
+              Inc(X, U);
+              if (U shr 11 = $1B) then X := $fffd;
+              PWord(Dest)^ := X;
+              Inc(Dest);
+              goto next_iteration;
+            end;
+            goto unknown;
+          end;
+          4:
+          begin
+            if (X and $C0C0C000 = $80808000) then
+            begin
+              U := (X and $07) shl 18;
+              U := U + (X and $3f00) shl 4;
+              U := U + (X shr 10) and $0fc0;
+              X := (X shr 24) and $3f;
+              Inc(X, U);
+
+              U := (X - $10000) shr 10 + $d800;
+              X := (X - $10000) and $3ff + $dc00;
+              X := (X shl 16) + U;
+
+              PCardinal(Dest)^ := X;
+              Inc(Dest, 2);
+              goto next_iteration;
+            end;
+            goto unknown;
+          end;
+        else
+        unknown:
+          PWord(Dest)^ := UNKNOWN_CHARACTER;
+          Inc(Dest);
+          Inc(Source, U);
+          Inc(Source, NativeUInt(U = 0));
+        end;
+      end;
+    end;
+  end;
+
+next_iteration:
+  if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
+  X := PCardinal(Source)^;
+  if (X and Integer(MASK_80) = 0) then goto process4;
+  if (X and $80 = 0) then goto process1_3;
+  goto process_standard;
+
+small_length:
+  U := Count{TopSource} + MAX_UTF8CHAR_SIZE;
+  if (U = NativeUInt(Source)) then goto done;
+  X := PByte(Source)^;
+  if (X <= $7f) then
+  begin
+    PWord(Dest)^ := X;
+    Inc(Source);
+    Inc(Dest);
+    if (NativeUInt(Source) <> Count{TopSource}) then goto small_length;
+    goto done;
+  end;
+  X := UTF8CHAR_SIZE[X];
+  Dec(U, NativeUInt(Source));
+  if (X{char size} > U{available source length}) then
+  begin
+    PWord(Dest)^ := UNKNOWN_CHARACTER;
+    Inc(Dest);
+    goto done;
+  end;
+
+  case X{char size} of
+    2:
+    begin
+      X := PWord(Source)^;
+      goto process_standard;
+    end;
+    3:
+    begin
+      Inc(Source, 2);
+      X := Byte(Source^);
+      Dec(Source, 2);
+      X := (X shl 16) or PWord(Source)^;
+      goto process_standard;
+    end;
+  else
+    // 4..5
+    goto unknown;
+  end;
+
+  // result
+done:
+  Result := (NativeInt(Dest) - NativeInt(ADest)) shr 1;
+end;
+
+function TLua.Utf8FromAnsi(ADest: PAnsiChar; ASource: PAnsiChar; ACodePage: Word; ALength: Integer): Integer;
+label
+  process4, look_first, process1_3,
+  ascii_1, ascii_2, ascii_3,
+  process_not_ascii,
+  small_4, small_3, small_2, small_1,
+  small_length, done;
+const
+  MASK_80_SMALL = $80808080;
+type
+  TUTF8Table = array[Byte] of Cardinal;
+var
+  {$ifdef CPUX86}
+  Store: record
+    TopSource: NativeUInt;
+  end;
+  {$endif}
+
+  X, U, Count: NativeUInt;
+  Dest: PAnsiChar;
+  Source: PAnsiChar;
+  {$ifNdef CPUX86}
+  TopSource: NativeUInt;
+  {$endif}
+  UTF8Table: ^TUTF8Table;
+
+{$ifdef CPUINTEL}
+const
+  MASK_80 = MASK_80_SMALL;
+{$else .CPUARM}
+var
+  MASK_80: NativeUInt;
+{$endif}
+begin
+  if (ACodePage = 0) then ACodePage := CODEPAGE_DEFAULT;
+  if (ACodePage <> FCodePage) then SetCodePage(ACodePage);
+
+  Count := ALength;
+  Dest := ADest;
+  Source := ASource;
+
+  if (Count = 0) then goto done;
+  Inc(Count, NativeUInt(Source));
+  Dec(Count, SizeOf(Cardinal));
+  {$ifdef CPUX86}Store.{$endif}TopSource := Count;
+  UTF8Table := Pointer(@FUTF8Table);
+
+  {$ifdef CPUARM}
+    MASK_80 := MASK_80_SMALL;
+  {$endif}
+
+  // conversion loop
+  if (NativeUInt(Source) > {$ifdef CPUX86}Store.{$endif}TopSource) then goto small_length;
+  X := PCardinal(Source)^;
+  if (X and Integer(MASK_80) = 0) then
+  begin
+    repeat
+    process4:
+      Inc(Source, SizeOf(Cardinal));
+      PCardinal(Dest)^ := X;
+      Inc(Dest, SizeOf(Cardinal));
+
+      if (NativeUInt(Source) > {$ifdef CPUX86}Store.{$endif}TopSource) then goto small_length;
+      X := PCardinal(Source)^;
+    until (X and Integer(MASK_80) <> 0);
+    goto look_first;
+  end else
+  begin
+  look_first:
+    if (X and $80 = 0) then
+    begin
+    process1_3:
+      PCardinal(Dest)^ := X;
+      if (X and $8000 <> 0) then goto ascii_1;
+      if (X and $800000 <> 0) then goto ascii_2;
+      ascii_3:
+        X := X shr 24;
+        Inc(Source, 3);
+        Inc(Dest, 3);
+        goto small_1;
+      ascii_2:
+        X := X shr 16;
+        Inc(Source, 2);
+        Inc(Dest, 2);
+        goto small_2;
+      ascii_1:
+        X := X shr 8;
+        Inc(Source);
+        Inc(Dest);
+        goto small_3;
+    end else
+    begin
+    process_not_ascii:
+      if (X and $8000 = 0) then goto small_1;
+      if (X and $800000 = 0) then goto small_2;
+      if (X and $80000000 = 0) then goto small_3;
+
+      small_4:
+        U := UTF8Table[Byte(X)];
+        X := X shr 8;
+        Inc(Source);
+        PCardinal(Dest)^ := U;
+        U := U shr 24;
+        Inc(Dest, U);
+      small_3:
+        U := UTF8Table[Byte(X)];
+        X := X shr 8;
+        Inc(Source);
+        PCardinal(Dest)^ := U;
+        U := U shr 24;
+        Inc(Dest, U);
+      small_2:
+        U := UTF8Table[Byte(X)];
+        X := X shr 8;
+        Inc(Source);
+        PCardinal(Dest)^ := U;
+        U := U shr 24;
+        Inc(Dest, U);
+      small_1:
+        U := UTF8Table[Byte(X)];
+        Inc(Source);
+        X := U;
+        PWord(Dest)^ := U;
+        U := U shr 24;
+        Inc(Dest, U);
+        if (X >= (3 shl 24)) then
+        begin
+          Dec(Dest);
+          X := X shr 16;
+          PByte(Dest)^ := X;
+          Inc(Dest);
+        end;
+    end;
+  end;
+
+  if (NativeUInt(Source) > {$ifdef CPUX86}Store.{$endif}TopSource) then goto small_length;
+  X := PCardinal(Source)^;
+  if (X and Integer(MASK_80) = 0) then goto process4;
+  if (X and $80 = 0) then goto process1_3;
+  goto process_not_ascii;
+
+small_length:
+  case (NativeUInt(Source) - {$ifdef CPUX86}Store.{$endif}TopSource) of
+   3{1}: begin
+           X := PByte(Source)^;
+           goto small_1;
+         end;
+   2{2}: begin
+           X := PWord(Source)^;
+           goto small_2;
+         end;
+   1{3}: begin
+           Inc(Source, 2);
+           X := Byte(Source^);
+           Dec(Source, 2);
+           X := (X shl 16) or PWord(Source)^;
+           goto small_3;
+         end;
+  end;
+
+  // result
+done:
+  Result := NativeUInt(Dest) - NativeUInt(ADest);
+end;
+
+
+type
+  TUnicodeConvertDesc = record
+    CodePage: Word;
+    Dest: Pointer;
+    Source: Pointer;
+    Count: NativeUInt;
+  end;
+
+function InternalAnsiFromUtf8(const ConvertDesc: TUnicodeConvertDesc): Integer;
+label
+  ascii, ascii_write, unicode_write, non_ascii, unknown;
+type
+  TUnicodeTable = array[Byte] of Word;
+  PUnicodeTable = ^TUnicodeTable;
+const
+  MASK_80_SMALL = $80808080;
+  UNKNOWN_CHARACTER = Ord('?');
+  BUFFER_SIZE = 1024;
+var
+  X, U, Count: NativeUInt;
+  Dest: PAnsiChar;
+  Source: PAnsiChar;
+  BufferDest: PWideChar;
+  BufferCount: NativeUInt;
+  Buffer: array[0..BUFFER_SIZE + 4] of WideChar;
+  Stored: record
+    CodePage: Word;
+    X: NativeUInt;
+    Dest: Pointer;
+  end;
+{$ifdef CPUINTEL}
+const
+  MASK_80 = MASK_80_SMALL;
+{$else .CPUARM}
+var
+  MASK_80: NativeUInt;
+{$endif}
+begin
+  Stored.CodePage := ConvertDesc.CodePage;
+  Dest := ConvertDesc.Dest;
+  Source := ConvertDesc.Source;
+  Count := ConvertDesc.Count;
+  Stored.Dest := Dest;
+
+  BufferDest := @Buffer[0];
+  {$ifdef CPUARM}
+    MASK_80 := MASK_80_SMALL;
+  {$endif}
+
+  repeat
+    if (Count = 0) then Break;
+    if (Count <= SizeOf(Cardinal)) then
+    begin
+      X := PCardinal(Source)^;
+      if (X and $80 = 0) then
+      begin
+      ascii:
+        if (BufferDest = @Buffer[0]) then
+        begin
+        ascii_write:
+          PCardinal(Dest)^ := X;
+          if (X and MASK_80 = 0) then
+          begin
+            Dec(Count, SizeOf(Cardinal));
+            Inc(Source, SizeOf(Cardinal));
+            Inc(Dest, SizeOf(Cardinal));
+          end else
+          begin
+            U := Byte(X and $8080 = 0);
+            X := Byte(X and $808080 = 0);
+            Inc(X, U);
+            Dec(Count);
+            Inc(Source);
+            Inc(Dest);
+            Dec(Count, X);
+            Inc(Source, X);
+            Inc(Dest, X);
+            if (Count = 0) then Break;
+            X := PByte(Source)^;
+            goto non_ascii;
+          end;
+        end else
+        begin
+        unicode_write:
+          Stored.X := X;
+          begin
+            BufferCount := (NativeUInt(BufferDest) - NativeUInt(@Buffer[0])) shr 1;
+            Inc(Dest,
+            {$ifdef MSWINDOWS}
+              WideCharToMultiByte(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+            {$else}
+              LocaleCharsFromUnicode(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+            {$endif} );
+            BufferDest := @Buffer[0];
+          end;
+          X := Stored.X;
+          if (X <> NativeUInt(-1)) then goto ascii_write;
+        end;
+      end else
+      begin
+        goto non_ascii;
+      end;
+    end else
+    begin
+      X := PByte(Source)^;
+      Inc(X, $ffffff00);
+      if (X and $80 = 0) then goto ascii;
+    non_ascii:
+      U := UTF8CHAR_SIZE[Byte(X)];
+      if (U <= Count) then
+      begin
+        case U of
+          2:
+          begin
+            X := PWord(Source)^;
+            Dec(Count, 2);
+            Inc(Source, 2);
+            if (X and $C0E0 <> $80C0) then goto unknown;
+
+            X := ((X and $1F) shl 6) + ((X shr 8) and $3F);
+          end;
+          3:
+          begin
+            Inc(Source, SizeOf(Word));
+            X := PByte(Source)^;
+            Dec(Source, SizeOf(Word));
+            X := X shl 16;
+            Inc(X, PWord(Source)^);
+            Dec(Count, 3);
+            Inc(Source, 3);
+            if (X and $C0C000 <> $808000) then goto unknown;
+
+            U := (X and $0F) shl 12;
+            U := U + (X shr 16) and $3F;
+            X := (X and $3F00) shr 2;
+            Inc(X, U);
+            if (U shr 11 = $1B) then goto unknown;
+          end;
+        else
+          Inc(U, Byte(U = 0));
+          Dec(Count, U);
+          Inc(Source, U);
+        unknown:
+          X := UNKNOWN_CHARACTER;
+        end;
+
+        PWord(BufferDest)^ := X;
+        Inc(BufferDest);
+        X := NativeUInt(-1);
+        if (NativeUInt(BufferDest) >= NativeUInt(@Buffer[BUFFER_SIZE])) then goto unicode_write;
+      end else
+      begin
+        if (BufferDest <> @Buffer[0]) then
+        begin
+          PWord(BufferDest)^ := UNKNOWN_CHARACTER;
+          Inc(BufferDest);
+        end else
+        begin
+          PByte(Dest)^ := UNKNOWN_CHARACTER;
+          Inc(Dest);
+        end;
+        Break;
+      end;
+    end;
+  until (False);
+
+  // last chars
+  if (BufferDest <> @Buffer[0]) then
+  begin
+    BufferCount := (NativeUInt(BufferDest) - NativeUInt(@Buffer[0])) shr 1;
+    Inc(Dest,
+    {$ifdef MSWINDOWS}
+      WideCharToMultiByte(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+    {$else}
+      LocaleCharsFromUnicode(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+    {$endif} );
+  end;
+
+  // result
+  Result := NativeInt(Dest) - NativeInt(Stored.Dest);
+end;
+
+function TLua.AnsiFromUtf8(ADest: PAnsiChar; ACodePage: Word; ASource: PAnsiChar; ALength: Integer): Integer;
+var
+  ConvertDesc: TUnicodeConvertDesc;
+begin
+  if (ACodePage = 0) then ACodePage := CODEPAGE_DEFAULT;
+  ConvertDesc.CodePage := ACodePage;
+  ConvertDesc.Dest := ADest;
+  ConvertDesc.Source := ASource;
+  ConvertDesc.Count := ALength;
+
+  Result := InternalAnsiFromUtf8(ConvertDesc);
+end;
+
+function InternalAnsiFromAnsi(const ConvertDesc: TUnicodeConvertDesc; const UnicodeTable: Pointer): Integer;
+label
+  ascii, ascii_write, unicode_write, non_ascii;
+type
+  TUnicodeTable = array[Byte] of Word;
+  PUnicodeTable = ^TUnicodeTable;
+const
+  MASK_80_SMALL = $80808080;
+  UNKNOWN_CHARACTER = Ord('?');
+  BUFFER_SIZE = 1024;
+var
+  X, U, Count: NativeUInt;
+  Dest: PAnsiChar;
+  Source: PAnsiChar;
+  BufferDest: PWideChar;
+  BufferCount: NativeUInt;
+  Buffer: array[0..BUFFER_SIZE + 4] of WideChar;
+  Stored: record
+    CodePage: Word;
+    X: NativeUInt;
+    Dest: Pointer;
+  end;
+{$ifdef CPUINTEL}
+const
+  MASK_80 = MASK_80_SMALL;
+{$else .CPUARM}
+var
+  MASK_80: NativeUInt;
+{$endif}
+begin
+  Stored.CodePage := ConvertDesc.CodePage;
+  Dest := ConvertDesc.Dest;
+  Source := ConvertDesc.Source;
+  Count := ConvertDesc.Count;
+  Stored.Dest := Dest;
+
+  BufferDest := @Buffer[0];
+  {$ifdef CPUARM}
+    MASK_80 := MASK_80_SMALL;
+  {$endif}
+
+  repeat
+    if (Count = 0) then Break;
+    if (Count <= SizeOf(Cardinal)) then
+    begin
+      X := PCardinal(Source)^;
+      if (X and $80 = 0) then
+      begin
+      ascii:
+        if (BufferDest = @Buffer[0]) then
+        begin
+        ascii_write:
+          PCardinal(Dest)^ := X;
+          if (X and MASK_80 = 0) then
+          begin
+            Dec(Count, SizeOf(Cardinal));
+            Inc(Source, SizeOf(Cardinal));
+            Inc(Dest, SizeOf(Cardinal));
+          end else
+          begin
+            U := Byte(X and $8080 = 0);
+            X := Byte(X and $808080 = 0);
+            Inc(X, U);
+            Dec(Count);
+            Inc(Source);
+            Inc(Dest);
+            Dec(Count, X);
+            Inc(Source, X);
+            Inc(Dest, X);
+            if (Count = 0) then Break;
+            X := PByte(Source)^;
+            goto non_ascii;
+          end;
+        end else
+        begin
+        unicode_write:
+          Stored.X := X;
+          begin
+            BufferCount := (NativeUInt(BufferDest) - NativeUInt(@Buffer[0])) shr 1;
+            Inc(Dest,
+            {$ifdef MSWINDOWS}
+              WideCharToMultiByte(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+            {$else}
+              LocaleCharsFromUnicode(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+            {$endif} );
+            BufferDest := @Buffer[0];
+          end;
+          X := Stored.X;
+          if (X <> NativeUInt(-1)) then goto ascii_write;
+        end;
+      end else
+      begin
+        goto non_ascii;
+      end;
+    end else
+    begin
+      X := PByte(Source)^;
+      Inc(X, $ffffff00);
+      if (X and $80 = 0) then goto ascii;
+    non_ascii:
+      PWord(BufferDest)^ := PUnicodeTable(UnicodeTable)[Byte(X)];
+      Inc(BufferDest);
+      Inc(Source);
+      Dec(Count);
+      X := NativeUInt(-1);
+      if (NativeUInt(BufferDest) >= NativeUInt(@Buffer[BUFFER_SIZE])) then goto unicode_write;
+    end;
+  until (False);
+
+  // last chars
+  if (BufferDest <> @Buffer[0]) then
+  begin
+    BufferCount := (NativeUInt(BufferDest) - NativeUInt(@Buffer[0])) shr 1;
+    Inc(Dest,
+    {$ifdef MSWINDOWS}
+      WideCharToMultiByte(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+    {$else}
+      LocaleCharsFromUnicode(Stored.CodePage, 0, Pointer(@Buffer[0]), BufferCount, Pointer(Dest), BufferCount, nil, nil)
+    {$endif} );
+  end;
+
+  // result
+  Result := NativeInt(Dest) - NativeInt(Stored.Dest);
+end;
+
+function TLua.AnsiFromAnsi(ADest: PAnsiChar; ADestCodePage: Word; ASource: PAnsiChar;
+  ASourceCodePage: Word; ALength: Integer): Integer;
+var
+  ConvertDesc: TUnicodeConvertDesc;
+  SourceCodePage: Word;
+begin
+  ConvertDesc.Dest := ADest;
+  ConvertDesc.Source := ASource;
+  ConvertDesc.Count := ALength;
+
+  if (ADestCodePage = 0) then ADestCodePage := CODEPAGE_DEFAULT;
+  SourceCodePage := ASourceCodePage;
+  if (SourceCodePage = 0) then SourceCodePage := CODEPAGE_DEFAULT;
+
+  if (ADestCodePage = SourceCodePage) then
+  begin
+    System.Move(ConvertDesc.Source^, ConvertDesc.Dest^, ConvertDesc.Count);
+    Result := ConvertDesc.Count;
+  end else
+  begin
+    ConvertDesc.CodePage := ADestCodePage;
+    if (SourceCodePage <> FCodePage) then SetCodePage(SourceCodePage);
+    Result := InternalAnsiFromAnsi(ConvertDesc, @Self.FUnicodeTable);
+  end;
+end;
+
                  (*
 procedure __TLuaGarbageCollection(const Self: TLua; const ReturnAddr: pointer);
 var
@@ -13656,15 +14942,16 @@ begin
 end;     *)
 
 
-         (*
+
 initialization
-  InitTypInfoProcs();
-  {$ifdef LUA_INITIALIZE} Lua := CreateLua(); {$endif}
+  InitUnicodeLookups;
+  InitTypInfoProcs;
+  {$ifdef LUA_INITIALIZE}Lua := CreateLua;{$endif}
 
 finalization
-  {$ifdef LUA_INITIALIZE} FreeAndNil(Lua); {$endif}
-  FreeLuaHandle();
-  CFunctionDumps := nil;
-              *)
+  {$ifdef LUA_INITIALIZE}FreeAndNil(Lua);{$endif}
+ // FreeLuaHandle();
+ // CFunctionDumps := nil;
+
 
 end.

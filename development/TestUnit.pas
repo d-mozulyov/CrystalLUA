@@ -18,6 +18,9 @@ procedure ShowMessage(const StrFmt: string; const Args: array of const); overloa
 
 implementation
 
+var
+  Lua: TLua;
+
 
 procedure RUN;
 begin
@@ -45,6 +48,10 @@ begin
 end;
 
 initialization
+  LuaLibraryPath := '..\dll\' + LuaLibraryPath;
+  Lua := CreateLua;
 
+finalization
+  Lua.Free;
 
 end.

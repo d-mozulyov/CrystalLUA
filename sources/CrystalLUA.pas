@@ -186,9 +186,9 @@ type
   // internal character pointer: utf8 or ansi
   __luadata = type PAnsiChar;
   // internal character storage: utf8 or ansi
-  __luabuffer = type AnsiString;
+  __luabuffer = type {$ifdef NEXTGEN}TBytes{$else}AnsiString{$endif};
   // internal memory offset
-  __luapointer = type Integer;
+  //__luapointer = type Integer;
   
 
 type
@@ -1009,6 +1009,18 @@ function LuaClassProc(const Proc: TLuaClassProc27): TLuaClassProc; overload;
 function LuaClassProcPtr(const Proc: pointer): TLuaClassProc;
        *)
 
+
+var
+  { user defined library path, used at the first TLua class constructor }
+  LuaLibraryPath: string =
+    {$if Defined(CPUX86)}
+      'lua.dll'
+    {$elseif Defined(CPUX64)}
+      'lua64.dll'
+    {$else}
+      {$MESSAGE ERROR 'Planform not yet supported'}
+    {$ifend}
+  ;
 
 {$ifdef LUA_INITIALIZE}
 var
@@ -2514,36 +2526,32 @@ var
   LuaHandle: THandle;
   LuaPath: string;
   LuaInitialized: Boolean;
-       (*
+
 type
-  Plua_State = pointer;
-  lua_CFunction = function(L: Plua_State): integer; cdecl;
-  size_t = cardinal;
+  Plua_State = Pointer;
+  lua_CFunction = function(L: Plua_State): Integer; cdecl;
   lua_Number = Double;
-  lua_Integer = Integer;
+  lua_Integer = NativeInt;
+  size_t = NativeUInt;
+  Psize_t = ^size_t;
 
-  lua_Debug = record           { activation record }
+  lua_Debug = record
     event: Integer;
-    name: PChar;               { (n) }
-    namewhat: PChar;           { (n) `global', `local', `field', `method' }
-    what: PChar;               { (S) `Lua', `C', `main', `tail'}
-    source: PChar;             { (S) }
-    currentline: Integer;      { (l) }
-    nups: Integer;             { (u) number of upvalues }
-    linedefined: Integer;      { (S) }
-    short_src: array[0..60{LUA_IDSIZE} - 1] of Char; { (S) }
-    { private part }
-    i_ci: Integer;              { active function }
-
-    // это сделано во избежание. lua_getstack портит первый байт MANY_FIELDS точно!
-    MANY_FIELDS: array[0..3] of byte;
+    name: __luaname;                 { (n) }
+    namewhat: __luaname;             { (n) `global', `local', `field', `method' }
+    what: __luaname;                 { (S) `Lua', `C', `main', `tail'}
+    source: __luaname;               { (S) }
+    currentline: Integer;            { (l) }
+    nups: Integer;                   { (u) number of upvalues }
+    linedefined: Integer;            { (S) }
+    short_src: array[0..59] of Byte; { (S) }
+    i_ci: Integer;
+    gap: array[0..7] of Byte;        { lua_getstack bug fix }
   end;
   Plua_Debug = ^lua_Debug;
-             *)
 
-           (*
 var
-  LUA_VERSION_52: boolean = false;
+  LUA_VERSION_52: Boolean = False;
   LUA_REGISTRYINDEX: integer = -10000;
 
 const
@@ -2560,18 +2568,18 @@ const
   LUA_TUSERDATA      = 7;
 
 var
-  lua_open: function(): Plua_State;
-  luaL_openlibs: procedure(L: Plua_State);cdecl;
+  lua_open: function: Plua_State; cdecl;
+  luaL_openlibs: procedure(L: Plua_State); cdecl;
   lua_close: procedure(L: Plua_State); cdecl;
-  lua_gc: function(L: Plua_State; what: Integer; data: Integer):Integer;cdecl;
-  luaL_loadbuffer: function(L: Plua_State; const buff: PChar; size: Integer; const name: PChar): Integer; cdecl;
-  luaL_loadbufferx: function(L: Plua_State; const buff: PChar; size: Integer; const name, mode: PChar): Integer; cdecl;
+  lua_gc: function(L: Plua_State; what: Integer; data: Integer): Integer; cdecl;
+  luaL_loadbuffer: function(L: Plua_State; const buff: __luadata; size: size_t; const name: __luaname): Integer; cdecl;
+  luaL_loadbufferx: function(L: Plua_State; const buff: __luadata; size: size_t; const name, mode: __luaname): Integer; cdecl;
   lua_pcall: function(L: Plua_State; nargs, nresults, errf: Integer): Integer; cdecl;
   lua_pcallk: function(L: Plua_State; nargs, nresults, errf, ctx: Integer; k: lua_CFunction): Integer; cdecl;
   lua_error: function(L: Plua_State): Integer; cdecl;
   lua_next: function(L: Plua_State; idx: Integer): Integer; cdecl;
   lua_getstack: function(L: Plua_State; level: Integer; ar: Plua_Debug): Integer; cdecl;
-  lua_getinfo: function(L: Plua_State; const what: PChar; ar: Plua_Debug): Integer; cdecl;
+  lua_getinfo: function(L: Plua_State; const what: __luaname; ar: Plua_Debug): Integer; cdecl;
 
   lua_type: function(L: Plua_State; idx: Integer): Integer; cdecl;
   lua_gettop: function(L: Plua_State): Integer; cdecl;
@@ -2583,15 +2591,15 @@ var
   lua_pushboolean: procedure(L: Plua_State; b: LongBool); cdecl;
   lua_pushinteger: procedure(L: Plua_State; n: lua_Integer); cdecl;
   lua_pushnumber: procedure(L: Plua_State; n: lua_Number); cdecl;
-  lua_pushlstring: procedure(L: Plua_State; const s: PChar; l_: size_t); cdecl;
+  lua_pushlstring: procedure(L: Plua_State; const s: __luadata; l_: size_t); cdecl;
   lua_pushcclosure: procedure(L: Plua_State; fn: lua_CFunction; n: Integer); cdecl;
   lua_pushlightuserdata: procedure(L: Plua_State; p: Pointer); cdecl;
-  lua_newuserdata: function(L: Plua_State; sz: Integer): Pointer; cdecl;
+  lua_newuserdata: function(L: Plua_State; sz: size_t): Pointer; cdecl;
   lua_pushvalue: procedure(L: Plua_State; Idx: Integer); cdecl;
   lua_toboolean: function(L: Plua_State; idx: Integer): LongBool; cdecl;
   lua_tonumber: function(L: Plua_State; idx: Integer): lua_Number; cdecl;
-  lua_tonumberx: function(L: Plua_State; idx: Integer; isnum: pinteger): lua_Number; cdecl;
-  lua_tolstring: function(L: Plua_State; idx: Integer; len: pinteger): PChar; cdecl;
+  lua_tonumberx: function(L: Plua_State; idx: Integer; isnum: PInteger): lua_Number; cdecl;
+  lua_tolstring: function(L: Plua_State; idx: Integer; len: Psize_t): __luadata; cdecl;
   lua_tocfunction: function(L: Plua_State; idx: Integer): lua_CFunction; cdecl;
   lua_touserdata: function(L: Plua_State; idx: Integer): Pointer; cdecl;
   lua_objlen: function(L: Plua_State; idx: Integer): size_t; cdecl;
@@ -2603,8 +2611,8 @@ var
   lua_createtable: procedure(L: Plua_State; narr: Integer; nrec: Integer); cdecl; { old newtable }
   lua_setmetatable: function(L: Plua_State; objindex: Integer): Integer; cdecl;
 
-// для 5.2
-function luaL_loadbuffer_52(L: Plua_State; const buff: PChar; size: Integer; const name: PChar): Integer; cdecl;
+// for 5.2+ versions
+function luaL_loadbuffer_52(L: Plua_State; const buff: __luadata; size: size_t; const name: __luaname): Integer; cdecl;
 begin
   Result := luaL_loadbufferx(L, buff, size, name, nil);
 end;
@@ -2618,7 +2626,144 @@ function lua_tonumber_52(L: Plua_State; idx: Integer): lua_Number; cdecl;
 begin
   Result := lua_tonumberx(L, idx, nil);
 end;
-       *)
+
+function LoadLuaLibrary: THandle;
+var
+  S: string;
+  Buffer: array[0..1024] of Char;
+  BufferPtr: PChar;
+begin
+  if (LuaPath = '') then
+  begin
+    if (FileExists(LuaLibraryPath)) then
+    begin
+      LuaPath := ExpandFileName(LuaLibraryPath);
+    end else
+    begin
+      BufferPtr := @Buffer[0];
+      SetString(S, BufferPtr, GetModuleFileName(hInstance, BufferPtr, High(Buffer)));
+      LuaPath := ExtractFilePath(S) + ExtractFileName(LuaLibraryPath);
+    end;
+
+    LuaHandle := LoadLibrary(PChar(LuaPath));
+  end;
+
+  Result := LuaHandle;
+end;
+
+procedure FreeLuaLibrary;
+begin
+  if (LuaHandle <> 0) then
+  begin
+    FreeLibrary(LuaHandle);
+    LuaHandle := 0;
+  end;
+end;
+
+// initialize Lua library, load and emulate API
+function InitializeLua: Boolean;
+var
+  Buffer: Pointer;
+
+  function FailLoad(var Proc; const ProcName: PChar): Boolean;
+  begin
+    Pointer(Proc) := GetProcAddress(LuaHandle, ProcName);
+    Result := (Pointer(Proc) = nil);
+  end;
+
+begin
+  Result := False;
+  if (not LuaInitialized) then
+  begin
+    if (LoadLuaLibrary = 0) then Exit;
+
+    LUA_VERSION_52 := not FailLoad(Buffer, 'lua_tounsignedx');
+    if (LUA_VERSION_52) then LUA_REGISTRYINDEX := (-1000000 - 1000);
+
+    if FailLoad(@lua_open, 'luaL_newstate') then Exit;
+    if FailLoad(@luaL_openlibs, 'luaL_openlibs') then Exit;
+    if FailLoad(@lua_close, 'lua_close') then Exit;
+    if FailLoad(@lua_gc, 'lua_gc') then Exit;
+    if (LUA_VERSION_52) then
+    begin
+      if FailLoad(@luaL_loadbufferx, 'luaL_loadbufferx') then Exit;
+      luaL_loadbuffer := luaL_loadbuffer_52;
+    end else
+    begin
+      if FailLoad(@luaL_loadbuffer, 'luaL_loadbuffer') then Exit;
+    end;
+    if (LUA_VERSION_52) then
+    begin
+      if FailLoad(@lua_pcallk, 'lua_pcallk') then Exit;
+      lua_pcall := lua_pcall_52;
+    end else
+    begin
+      if FailLoad(@lua_pcall, 'lua_pcall') then Exit;
+    end;
+    if FailLoad(@lua_error, 'lua_error') then Exit;
+    if FailLoad(@lua_next, 'lua_next') then Exit;
+    if FailLoad(@lua_getstack, 'lua_getstack') then Exit;
+    if FailLoad(@lua_getinfo, 'lua_getinfo') then Exit;
+
+    if FailLoad(@lua_type, 'lua_type') then Exit;
+    if FailLoad(@lua_gettop, 'lua_gettop') then Exit;
+    if FailLoad(@lua_settop, 'lua_settop') then Exit;
+    if FailLoad(@lua_remove, 'lua_remove') then Exit;
+    if FailLoad(@lua_insert, 'lua_insert') then Exit;
+
+    if FailLoad(@lua_pushnil, 'lua_pushnil') then Exit;
+    if FailLoad(@lua_pushboolean, 'lua_pushboolean') then Exit;
+    if FailLoad(@lua_pushinteger, 'lua_pushinteger') then Exit;
+    if FailLoad(@lua_pushnumber, 'lua_pushnumber') then Exit;
+    if FailLoad(@lua_pushlstring, 'lua_pushlstring') then Exit;
+    if FailLoad(@lua_pushcclosure, 'lua_pushcclosure') then Exit;
+    if FailLoad(@lua_pushlightuserdata, 'lua_pushlightuserdata') then Exit;
+    if FailLoad(@lua_newuserdata, 'lua_newuserdata') then Exit;
+    if FailLoad(@lua_pushvalue, 'lua_pushvalue') then Exit;
+    if FailLoad(@lua_toboolean, 'lua_toboolean') then Exit;
+    if (LUA_VERSION_52) then
+    begin
+      if FailLoad(@lua_tonumberx, 'lua_tonumberx') then Exit;
+      lua_tonumber := lua_tonumber_52;
+    end else
+    begin
+      if FailLoad(@lua_tonumber, 'lua_tonumber') then Exit;
+    end;
+    if FailLoad(@lua_tolstring, 'lua_tolstring') then Exit;
+    if FailLoad(@lua_tocfunction, 'lua_tocfunction') then Exit;
+    if FailLoad(@lua_touserdata, 'lua_touserdata') then Exit;
+    if (LUA_VERSION_52) then
+    begin
+      if FailLoad(@lua_objlen, 'lua_rawlen') then Exit;
+    end else
+    begin
+      if FailLoad(@lua_objlen, 'lua_objlen') then Exit;
+    end;
+
+    if FailLoad(@lua_rawgeti, 'lua_rawgeti') then Exit;
+    if FailLoad(@lua_rawseti, 'lua_rawseti') then Exit;
+    if FailLoad(@lua_rawget, 'lua_rawget') then Exit;
+    if FailLoad(@lua_rawset, 'lua_rawset') then Exit;
+    if FailLoad(@lua_createtable, 'lua_createtable') then Exit;
+    if FailLoad(@lua_setmetatable, 'lua_setmetatable') then Exit;
+
+    LuaInitialized := True;
+  end;
+
+  Result := True;
+end;
+
+// safe TLua constuctor
+function CreateLua: TLua;
+begin
+  if (not InitializeLua) then
+  begin
+    Result := nil;
+  end else
+  begin
+    Result := TLua.Create;
+  end;
+end;
 
           (*
 // коррекция пустой строки
@@ -2773,131 +2918,6 @@ asm
 end;
        *)
 
-          (*
-
-// загрузить библиотеку
-function LoadLuaHandle(): THandle;
-const
-  lib_name = 'lua.dll';
-begin
-  if (LuaPath = '') then
-  begin
-    // Path
-    if (FileExists(lib_name)) then LuaPath := ExpandFileName(lib_name)
-    else LuaPath := IncludePathDelimiter(ExtractFilePath(InstancePath)) + lib_name;
-
-    // загрузить
-    LuaHandle := LoadLibrary(pchar(LuaPath));
-  end;
-
-  // результат
-  Result := LuaHandle;  
-end;      *)
-            (*
-// освободить библиотеку (делается при finalization модуля)
-procedure FreeLuaHandle();
-begin
-  if (LuaHandle <> 0) then
-  begin
-    FreeLibrary(LuaHandle);
-    LuaHandle := 0;
-  end;
-end;      *)
-
-// проинициализировать библиотеку Lua и все необходимые функции
-function InitializeLua: Boolean;
-begin
-
-end;
-(*var
-  Buf: pointer;
-
-  function FailLoad(var Proc; const ProcName: pchar): boolean;
-  begin
-    pointer(Proc) := GetProcAddress(LuaHandle, ProcName);
-    Result := (pointer(Proc) = nil);
-  end;
-
-begin
-  Result := false;
-  if (not LuaInitialized) then
-  begin
-    if (LoadLuaHandle() = 0) then exit;
-    LUA_VERSION_52 := not FailLoad(Buf, 'lua_tounsignedx');
-    if (LUA_VERSION_52) then LUA_REGISTRYINDEX := (-1000000 - 1000);
-
-    if FailLoad(@lua_open, 'luaL_newstate') then exit;
-    if FailLoad(@luaL_openlibs, 'luaL_openlibs') then exit;
-    if FailLoad(@lua_close, 'lua_close') then exit;
-    if FailLoad(@lua_gc, 'lua_gc') then exit;
-    if (LUA_VERSION_52) then
-    begin
-      if FailLoad(@luaL_loadbufferx, 'luaL_loadbufferx') then exit;
-      luaL_loadbuffer := luaL_loadbuffer_52;
-    end else
-    begin
-      if FailLoad(@luaL_loadbuffer, 'luaL_loadbuffer') then exit;
-    end;
-    if (LUA_VERSION_52) then
-    begin
-      if FailLoad(@lua_pcallk, 'lua_pcallk') then exit;
-      lua_pcall := lua_pcall_52;      
-    end else
-    begin
-      if FailLoad(@lua_pcall, 'lua_pcall') then exit;
-    end;
-    if FailLoad(@lua_error, 'lua_error') then exit;
-    if FailLoad(@lua_next, 'lua_next') then exit;
-    if FailLoad(@lua_getstack, 'lua_getstack') then exit;
-    if FailLoad(@lua_getinfo, 'lua_getinfo') then exit;
-
-    if FailLoad(@lua_type, 'lua_type') then exit;
-    if FailLoad(@lua_gettop, 'lua_gettop') then exit;
-    if FailLoad(@lua_settop, 'lua_settop') then exit;
-    if FailLoad(@lua_remove, 'lua_remove') then exit;
-    if FailLoad(@lua_insert, 'lua_insert') then exit;
-
-    if FailLoad(@lua_pushnil, 'lua_pushnil') then exit;
-    if FailLoad(@lua_pushboolean, 'lua_pushboolean') then exit;
-    if FailLoad(@lua_pushinteger, 'lua_pushinteger') then exit;
-    if FailLoad(@lua_pushnumber, 'lua_pushnumber') then exit;
-    if FailLoad(@lua_pushlstring, 'lua_pushlstring') then exit;
-    if FailLoad(@lua_pushcclosure, 'lua_pushcclosure') then exit;
-    if FailLoad(@lua_pushlightuserdata, 'lua_pushlightuserdata') then exit;
-    if FailLoad(@lua_newuserdata, 'lua_newuserdata') then exit;
-    if FailLoad(@lua_pushvalue, 'lua_pushvalue') then exit;
-    if FailLoad(@lua_toboolean, 'lua_toboolean') then exit;
-    if (LUA_VERSION_52) then
-    begin
-      if FailLoad(@lua_tonumberx, 'lua_tonumberx') then exit;
-      lua_tonumber := lua_tonumber_52;
-    end else
-    begin
-      if FailLoad(@lua_tonumber, 'lua_tonumber') then exit;
-    end;
-    if FailLoad(@lua_tolstring, 'lua_tolstring') then exit;
-    if FailLoad(@lua_tocfunction, 'lua_tocfunction') then exit;
-    if FailLoad(@lua_touserdata, 'lua_touserdata') then exit;
-    if (LUA_VERSION_52) then
-    begin
-      if FailLoad(@lua_objlen, 'lua_rawlen') then exit;
-    end else
-    begin
-      if FailLoad(@lua_objlen, 'lua_objlen') then exit;
-    end;
-
-    if FailLoad(@lua_rawgeti, 'lua_rawgeti') then exit;
-    if FailLoad(@lua_rawseti, 'lua_rawseti') then exit;
-    if FailLoad(@lua_rawget, 'lua_rawget') then exit;
-    if FailLoad(@lua_rawset, 'lua_rawset') then exit;
-    if FailLoad(@lua_createtable, 'lua_createtable') then exit;
-    if FailLoad(@lua_setmetatable, 'lua_setmetatable') then exit;
-
-
-    LuaInitialized := true;
-  end;
-  Result := true;
-end;    *)
                      (*
 // расшифровка имени луа-типа
 // pchar, это чтобы функции работали быстрее, не создавали разных LStrClr и HandleFinally
@@ -3041,17 +3061,6 @@ type
   TStackArgument = procedure(const ALua: TLua; const Index: integer; var Ret: string);
                *)
 
-// safe TLua constuctor
-function CreateLua: TLua;
-begin
-  if (not InitializeLua) then
-  begin
-    Result := nil;
-  end else
-  begin
-    Result := TLua.Create;
-  end;
-end;
               (*
 procedure __LuaArgs(const Count: integer; var Result: TLuaArgs; const ReturnAddr: pointer);
 begin
@@ -6409,12 +6418,12 @@ end;       *)
 function __TLuaGetProcAddress(const Self: TClass; const ProcName: pchar;
          const throw_exception: boolean; const ReturnAddr: pointer): pointer;
 begin
-  if (LoadLuaHandle = 0) and (throw_exception) then
+  if (LoadLuaLibrary = 0) and (throw_exception) then
   ELua.Assert('Lua library not found'#13'"%s"', [LuaPath], ReturnAddr);
 
   // загрузить функции
-  if (LuaHandle = 0) then Result := nil
-  else Result := {$ifdef NO_CRYSTAL}Windows{$else}SysUtilsEx{$endif}.GetProcAddress(LuaHandle, ProcName);
+  if (LuaLibrary = 0) then Result := nil
+  else Result := {$ifdef NO_CRYSTAL}Windows{$else}SysUtilsEx{$endif}.GetProcAddress(LuaLibrary, ProcName);
 
   // если не найдена
   if (Result = nil) and (throw_exception) then
@@ -14950,8 +14959,7 @@ initialization
 
 finalization
   {$ifdef LUA_INITIALIZE}FreeAndNil(Lua);{$endif}
- // FreeLuaHandle();
- // CFunctionDumps := nil;
+  FreeLuaLibrary;
 
 
 end.

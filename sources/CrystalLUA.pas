@@ -190,6 +190,11 @@ type
   // internal memory offset (optional pointer in 32-bit platforms)
   __luapointer = type Integer;
   
+  // internal containers
+  __TLuaList = array[1..24{$ifdef LARGEINT}* 2{$endif}] of Byte;
+  __TLuaDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
+  __TLuaCFunctionHeap = array[1..8{$ifdef LARGEINT}* 2{$endif}] of Byte;
+
 
 type
   TLua = class;
@@ -1427,6 +1432,329 @@ begin
   {$endif}
 end;
 
+
+{ RTTI routine }
+
+type
+  PFieldInfo = ^TFieldInfo;
+  TFieldInfo = packed record
+    TypeInfo: PPTypeInfo;
+    Offset: Cardinal;
+    {$ifdef LARGEINT}
+    _Padding: Integer;
+    {$endif}
+  end;
+
+  PFieldTable = ^TFieldTable;
+  TFieldTable = packed record
+    X: Word;
+    Size: Cardinal;
+    Count: Cardinal;
+    Fields: array [0..0] of TFieldInfo;
+  end;
+
+  PDynArrayRec = ^TDynArrayRec;
+  TDynArrayRec = packed record
+    {$ifdef LARGEINT}
+    _Padding: Integer;
+    {$endif}
+    RefCnt: Integer;
+    Length: NativeInt;
+  end;
+
+function IsManagedTypeInfo(Value: PTypeInfo): Boolean;
+var
+  i: Cardinal;
+  {$ifdef WEAKREF}
+  WeakMode: Boolean;
+  {$endif}
+  FieldTable: PFieldTable;
+begin
+  Result := False;
+
+  if Assigned(Value) then
+  case Value.Kind of
+    tkVariant,
+    {$ifdef AUTOREFCOUNT}
+    tkClass,
+    {$endif}
+    {$ifdef WEAKINSTREF}
+    tkMethod,
+    {$endif}
+    {$ifdef FPC}
+    tkAString,
+    {$endif}
+    tkWString, tkLString, {$ifdef UNICODE}tkUString,{$endif} tkInterface, tkDynArray:
+    begin
+      Result := True;
+      Exit;
+    end;
+    tkArray{static array}:
+    begin
+      FieldTable := PFieldTable(NativeUInt(Value) + PByte(@Value.Name)^);
+      if (FieldTable.Fields[0].TypeInfo <> nil) then
+        Result := IsManagedTypeInfo(FieldTable.Fields[0].TypeInfo^);
+    end;
+    tkRecord:
+    begin
+      FieldTable := PFieldTable(NativeUInt(Value) + PByte(@Value.Name)^);
+      if FieldTable.Count > 0 then
+      begin
+        {$ifdef WEAKREF}
+        WeakMode := False;
+        {$endif}
+        for i := 0 to FieldTable.Count - 1 do
+        begin
+         {$ifdef WEAKREF}
+          if FieldTable.Fields[i].TypeInfo = nil then
+          begin
+            WeakMode := True;
+            Continue;
+          end;
+          if (not WeakMode) then
+          begin
+          {$endif}
+            if (IsManagedTypeInfo(FieldTable.Fields[i].TypeInfo^)) then
+            begin
+              Result := True;
+              Exit;
+            end;
+          {$ifdef WEAKREF}
+          end else
+          begin
+            Result := True;
+            Exit;
+          end;
+          {$endif}
+        end;
+      end;
+    end;
+  end;
+end;
+
+
+{$if Defined(FPC)}
+function fpc_Copy_internal(Src, Dest, TypeInfo: Pointer): SizeInt; [external name 'FPC_COPY'];
+procedure CopyRecord(const Dest, Source, TypeInfo: Pointer); inline;
+begin
+  fpc_Copy_internal(Source, Dest, TypeInfo);
+end;
+{$elseif Defined(CPUINTEL)}
+procedure CopyRecord(const Dest, Source, TypeInfo: Pointer);
+asm
+  jmp System.@CopyRecord
+end;
+{$else}
+procedure CopyRecord(const Dest, Source, TypeInfo: Pointer); inline;
+begin
+  System.CopyArray(Dest, Source, TypeInfo, 1);
+end;
+{$ifend}
+
+procedure CopyObject(const Dest, Src: TObject);
+var
+  InitTable: Pointer;
+  BaseSize, DestSize: NativeInt;
+  BaseClass, DestClass, SrcClass: TClass;
+begin
+  if (Dest = nil) or (Src = nil) then Exit;
+
+  DestClass := TClass(Pointer(Dest)^);
+  SrcClass := TClass(Pointer(Src)^);
+
+  if (DestClass = SrcClass) then BaseClass := DestClass
+  else
+  if (DestClass.InheritsFrom(SrcClass)) then BaseClass := SrcClass
+  else
+  if (SrcClass.InheritsFrom(DestClass)) then BaseClass := DestClass
+  else
+  begin
+    BaseClass := DestClass;
+
+    while (BaseClass <> nil) and (not SrcClass.InheritsFrom(BaseClass)) do
+    begin
+      BaseClass := BaseClass.ClassParent;
+    end;
+
+    if (BaseClass = nil) then Exit;
+  end;
+
+  DestSize := BaseClass.InstanceSize;
+  while (BaseClass <> TObject) do
+  begin
+    InitTable := PPointer(Integer(BaseClass) + vmtInitTable)^;
+    if (InitTable <> nil) then
+    begin
+      CopyRecord(Pointer(Dest), Pointer(Src), InitTable);
+      Break;
+    end;
+    BaseClass := BaseClass.ClassParent;
+  end;
+
+  BaseSize := BaseClass.InstanceSize;
+  if (BaseSize <> DestSize) then
+  begin
+    System.Move(Pointer(NativeInt(Src) + BaseSize)^,
+      Pointer(NativeInt(Dest) + BaseSize)^, DestSize - BaseSize);
+  end;
+end;
+
+{$if Defined(FPC)}
+procedure CopyArray(const Dest, Source: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+var
+  ItemDest, ItemSrc: Pointer;
+  ItemSize, i: NativeInt;
+begin
+  ItemDest := Dest;
+  ItemSrc := Source;
+
+  case TypeInfo.Kind of
+    tkVariant: ItemSize := SizeOf(Variant);
+    tkLString, tkWString, tkInterface, tkDynArray, tkAString: ItemSize := SizeOf(Pointer);
+      tkArray, tkRecord, tkObject: ItemSize := PFieldTable(NativeUInt(TypeInfo) + PByte(@TypeInfo.Name)^).Size;
+  else
+    Exit;
+  end;
+
+  for i := 1 to Count do
+  begin
+    fpc_Copy_internal(ItemSrc, ItemDest, TypeInfo);
+
+    Inc(NativeInt(ItemDest), ItemSize);
+    Inc(NativeInt(ItemSrc), ItemSize);
+  end;
+end;
+{$elseif (CompilerVersion <= 20)}
+procedure CopyArray(const Dest, Source: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+asm
+  cmp byte ptr [ecx], tkArray
+  jne @1
+  push eax
+  push edx
+    movzx edx, [ecx + TTypeInfo.Name]
+    mov eax, [ecx + edx + 6]
+    mov ecx, [ecx + edx + 10]
+    mul Count
+    mov ecx, [ecx]
+    mov Count, eax
+  pop edx
+  pop eax
+  @1:
+
+  pop ebp
+  jmp System.@CopyArray
+end;
+{$ifend}
+
+{$if Defined(FPC)}
+procedure int_Initialize(Data, TypeInfo: Pointer); [external name 'FPC_INITIALIZE'];
+procedure InitializeArray(const Item: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+var
+  ItemPtr: Pointer;
+  ItemSize, i: NativeInt;
+begin
+  ItemPtr := Item;
+
+  case TypeInfo.Kind of
+    tkVariant: ItemSize := SizeOf(Variant);
+    tkLString, tkWString, tkInterface, tkDynArray, tkAString: ItemSize := SizeOf(Pointer);
+      tkArray, tkRecord, tkObject: ItemSize := PFieldTable(NativeUInt(TypeInfo) + PByte(@TypeInfo.Name)^).Size;
+  else
+    Exit;
+  end;
+
+  for i := 1 to Count do
+  begin
+    int_Initialize(ItemPtr, TypeInfo);
+    Inc(NativeInt(ItemPtr), ItemSize);
+  end;
+end;
+{$elseif (CompilerVersion <= 20)}
+procedure InitializeArray(const Item: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+asm
+  jmp System.@InitializeArray
+end;
+{$ifend}
+
+{$if Defined(FPC)}
+procedure int_Finalize(Data, TypeInfo: Pointer); [external name 'FPC_FINALIZE'];
+procedure FinalizeArray(const Item: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+var
+  ItemPtr: Pointer;
+  ItemSize, i: NativeInt;
+begin
+  ItemPtr := Item;
+
+  case TypeInfo.Kind of
+    tkVariant: ItemSize := SizeOf(Variant);
+    tkLString, tkWString, tkInterface, tkDynArray, tkAString: ItemSize := SizeOf(Pointer);
+      tkArray, tkRecord, tkObject: ItemSize := PFieldTable(NativeUInt(TypeInfo) + PByte(@TypeInfo.Name)^).Size;
+  else
+    Exit;
+  end;
+
+  for i := 1 to Count do
+  begin
+    int_Finalize(ItemPtr, TypeInfo);
+    Inc(NativeInt(ItemPtr), ItemSize);
+  end;
+end;
+{$elseif (CompilerVersion <= 20)}
+procedure FinalizeArray(const Item: Pointer; const TypeInfo: PTypeInfo; const Count: NativeInt);
+asm
+  jmp System.@FinalizeArray
+end;
+{$ifend}
+
+function DynArrayLength(P: Pointer): NativeInt;
+begin
+  Result := NativeInt(P);
+  if (Result <> 0) then
+  begin
+    Dec(Result, SizeOf(NativeInt));
+    Result := PNativeInt(Result)^;
+    {$ifdef FPC}
+      Inc(Result);
+    {$endif}
+  end;
+end;
+
+{$if Defined(FPC)}
+procedure fpc_dynarray_incr_ref(P: Pointer); [external name 'FPC_DYNARRAY_INCR_REF'];
+procedure DynArrayAddRef(P: Pointer); inline;
+begin
+  fpc_dynarray_incr_ref(P);
+end;
+{$elseif Defined(CPUINTEL)}
+procedure DynArrayAddRef(P: Pointer);
+asm
+  jmp System.@DynArrayAddRef
+end;
+{$else}
+procedure DynArrayAddRef(P: Pointer);
+var
+  Rec: PDynArrayRec;
+begin
+  if (P <> nil) then
+  begin
+    Rec := P;
+    Dec(Rec);
+    if (Rec.RefCnt >= 0) then
+    begin
+      AtomicIncrement(Rec.RefCnt);
+    end;
+  end;
+end;
+{$ifend}
+
+{$ifdef FPC}
+procedure fpc_dynarray_clear (var P: Pointer; TypeInfo: Pointer); external name 'FPC_DYNARRAY_CLEAR';
+procedure DynArrayClear(var P: Pointer; TypeInfo: Pointer); inline;
+begin
+  fpc_dynarray_clear(P, TypeInfo);
+end;
+{$endif}
+
 var
   TypInfoGetStrProp: function(Instance: TObject; PropInfo: PPropInfo): string;
   TypInfoSetStrProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: string);
@@ -1479,7 +1807,7 @@ type
 
     procedure Init;
     function Alloc: Pointer;
-    function Release(const P: Pointer): Boolean;
+    function Free(const P: Pointer): Boolean;
   end;
 
   PLuaCFunctionBlock = ^TLuaCFunctionBlock;
@@ -1498,14 +1826,15 @@ type
     Next: PLuaCFunctionBlock;
   end;
 
-  TLuaCFunctionHeap = class
+  TLuaCFunctionHeap = object
   public
+    {$WARNINGS OFF}
+    FakeField: NativeUInt;
+    {$WARNINGS ON}
     Blocks: PLuaCFunctionBlock;
 
-    destructor Destroy; override;
-
     function Alloc(const Lua: TLua; const P1, P2: __luapointer; const Callback: Pointer): Pointer;
-    procedure Release(const LuaCFunction: Pointer);
+    procedure Free(const LuaCFunction: Pointer);
     procedure Clear;
   end;
 
@@ -1618,7 +1947,7 @@ begin
   end;
 end;
 
-function TLuaCFunctionPage.Release(const P: Pointer): Boolean;
+function TLuaCFunctionPage.Free(const P: Pointer): Boolean;
 var
   Count: Cardinal;
 begin
@@ -1628,12 +1957,6 @@ begin
   Count := Allocated - 1;
   Allocated := Count;
   Result := (Count = 0);
-end;
-
-destructor TLuaCFunctionHeap.Destroy;
-begin
-  Clear;
-  inherited;
 end;
 
 procedure TLuaCFunctionHeap.Clear;
@@ -1725,7 +2048,7 @@ begin
   PLuaCFunctionData(Result).Init(Lua, P1, P2, Callback);
 end;
 
-procedure TLuaCFunctionHeap.Release(const LuaCFunction: Pointer);
+procedure TLuaCFunctionHeap.Free(const LuaCFunction: Pointer);
 var
   Index: NativeInt;
   Page: PLuaCFunctionPage;
@@ -1735,7 +2058,7 @@ begin
   Page := Pointer(NativeInt(LuaCFunction) and MEMORY_PAGE_CLEAR);
   Block := Pointer(NativeInt(Page) and MEMORY_BLOCK_CLEAR);
   Index := NativeInt(NativeUInt(Page) div MEMORY_PAGE_SIZE) and 15;
-  if (not Page.Release(LuaCFunction)) then
+  if (not Page.Free(LuaCFunction)) then
   begin
     Block.Empties := Block.Empties or (1 shl Index);
     Exit;
@@ -1776,110 +2099,324 @@ begin
   until (False);
 end;
 
-          (*
-{$ifdef NO_CRYSTAL}
-// ************************************************************************* //
-// ------------   SysUtilsEx-рутина  ------------------------------------------
-type  
-  // дублирование из System. за исключением "X"
-  PFieldInfo = ^TFieldInfo;
-  TFieldInfo = packed record
-    TypeInfo: PPTypeInfo;
-    Offset: Cardinal;
-  end;
 
-  PFieldTable = ^TFieldTable;
-  TFieldTable = packed record
-    {X: Word; убираетс€ дл€ того чтобы FieldTable поровн€лс€ с GetTypeData}
-    Size: Cardinal;
-    Count: Cardinal;
-    Fields: array [0..0] of TFieldInfo;
-  end;
+{ Containers }
 
-
-const LowerChars : array[char] of char = (
-#$00,#$01,#$02,#$03,#$04,#$05,#$06,#$07,#$08,#$09,#$0A,#$0B,#$0C,#$0D,#$0E,#$0F,
-#$10,#$11,#$12,#$13,#$14,#$15,#$16,#$17,#$18,#$19,#$1A,#$1B,#$1C,#$1D,#$1E,#$1F,
-#$20,#$21,#$22,#$23,#$24,#$25,#$26,#$27,#$28,#$29,#$2A,#$2B,#$2C,#$2D,#$2E,#$2F,
-#$30,#$31,#$32,#$33,#$34,#$35,#$36,#$37,#$38,#$39,#$3A,#$3B,#$3C,#$3D,#$3E,#$3F,
-#$40,#$61,#$62,#$63,#$64,#$65,#$66,#$67,#$68,#$69,#$6A,#$6B,#$6C,#$6D,#$6E,#$6F,
-#$70,#$71,#$72,#$73,#$74,#$75,#$76,#$77,#$78,#$79,#$7A,#$5B,#$5C,#$5D,#$5E,#$5F,
-#$60,#$61,#$62,#$63,#$64,#$65,#$66,#$67,#$68,#$69,#$6A,#$6B,#$6C,#$6D,#$6E,#$6F,
-#$70,#$71,#$72,#$73,#$74,#$75,#$76,#$77,#$78,#$79,#$7A,#$7B,#$7C,#$7D,#$7E,#$7F,
-#$90,#$83,#$82,#$83,#$84,#$85,#$86,#$87,#$88,#$89,#$9A,#$8B,#$9C,#$9D,#$9E,#$9F,
-#$90,#$91,#$92,#$93,#$94,#$95,#$96,#$97,#$98,#$99,#$9A,#$9B,#$9C,#$9D,#$9E,#$9F,
-#$A0,#$A2,#$A2,#$BC,#$A4,#$B4,#$A6,#$A7,#$B8,#$A9,#$BA,#$AB,#$AC,#$AD,#$AE,#$BF,
-#$B0,#$B1,#$B3,#$B3,#$B4,#$B5,#$B6,#$B7,#$B8,#$B9,#$BA,#$BB,#$BC,#$BE,#$BE,#$BF,
-#$E0,#$E1,#$E2,#$E3,#$E4,#$E5,#$E6,#$E7,#$E8,#$E9,#$EA,#$EB,#$EC,#$ED,#$EE,#$EF,
-#$F0,#$F1,#$F2,#$F3,#$F4,#$F5,#$F6,#$F7,#$F8,#$F9,#$FA,#$FB,#$FC,#$FD,#$FE,#$FF,
-#$E0,#$E1,#$E2,#$E3,#$E4,#$E5,#$E6,#$E7,#$E8,#$E9,#$EA,#$EB,#$EC,#$ED,#$EE,#$EF,
-#$F0,#$F1,#$F2,#$F3,#$F4,#$F5,#$F6,#$F7,#$F8,#$F9,#$FA,#$FB,#$FC,#$FD,#$FE,#$FF);
-           *)
-      (*
 type
-  TExceptClass = class of TExcept;
+  TLuaList = object{<T>}
+  private
+    FBytes: TBytes;
+    F: packed record
+      Managed: Boolean;
+      Padding: array[1..SizeOf(NativeUInt) - SizeOf(Boolean)] of Byte;
+    end;
+    FItemSize: NativeInt;
+    FTypeInfo: PTypeInfo;
+    FCapacity: NativeInt;
+    FCount: NativeInt;
 
-procedure __TExceptAssert_1(const Self: TExceptClass; const Message: AnsiString; const CodeAddr: pointer);
-begin
-  raise Self.Create(Message) at CodeAddr;
-end;
+    procedure SetCapacity(const Value: NativeInt);
+    function GetItem(const AIndex: NativeInt): Pointer;
+  public
+    procedure Init(const AItemSize: NativeInt; const ATypeInfo: PTypeInfo);
+    procedure Clear;
+    procedure TrimExcess;
+    function Add: Pointer;
 
-class procedure TExcept.Assert(const Message: AnsiString; const CodeAddr : pointer);
-asm
-  test ecx, ecx
-  jnz __TExceptAssert_1
-  mov ecx, [esp]
-  jmp __TExceptAssert_1
-end;
+    property Bytes: TBytes read FBytes;
+    property Managed: Boolean read F.Managed;
+    property ItemSize: NativeInt read FItemSize;
+    property TypeInfo: PTypeInfo read FTypeInfo;
+    property Capacity: NativeInt read FCapacity write SetCapacity;
+    property Count: NativeInt read FCount;
+    property Items[const AIndex: NativeInt]: Pointer read GetItem;
+  end;
 
-procedure __TExceptAssert_2(const Self: TExceptClass; const FmtStr: AnsiString; const Args: array of const; const CodeAddr : pointer);
-begin
-  raise Self.CreateFmt(FmtStr, Args) at CodeAddr;
-end;
+  PLuaDictionaryItem = ^TLuaDictionaryItem;
+  TLuaDictionaryItem = packed record
+    Key: Pointer;
+    Value: __luapointer;
+    Next: Integer;
+  end;
 
-class procedure TExcept.Assert(const FmtStr: AnsiString; const Args: array of const; const CodeAddr : pointer);
-asm
-  cmp [esp+8], 0
-  jnz @jmp
+  TLuaDictionary = object{<Pointer,__luapointer>}
+  private
+    FItems: array of TLuaDictionaryItem;
+    FHashes: array of Integer;
+    FHashesMask: NativeInt;
+    FCapacity: NativeInt;
+    FCount: NativeInt;
 
-  mov ebp, [esp+4]
-  mov [esp+8], ebp
-@jmp:
-  pop ebp
-  jmp __TExceptAssert_2
-end;    *)
+    procedure Grow;
+    function NewItem(const Key: Pointer): PLuaDictionaryItem;
+    function InternalFind(const Key: Pointer; const ModeCreate: Boolean): PLuaDictionaryItem;
+  public
+    procedure Clear;
+    procedure TrimExcess;
+    function Find(const Key: Pointer): PLuaDictionaryItem; {$ifdef INLINESUPPORT}inline;{$endif}
+    procedure Add(const Key: Pointer; const Value: __luapointer);
 
-          (*
-function InstancePath(): string;
+    property Capacity: NativeInt read FCapacity;
+    property Count: NativeInt read FCount;
+  end;
+
+procedure SwapPtr(var Left, Right: Pointer);
 var
-  PATH: array[0..MAX_PATH] of char;
+  Temp: Pointer;
 begin
-  if (System.IsLibrary) then Result := '' else Result := paramstr(0);
+  Temp := Left;
+  Left := Right;
+  Right := Temp;
+end;
 
-  if (System.IsLibrary) then
+procedure TLuaList.Init(const AItemSize: NativeInt; const ATypeInfo: PTypeInfo);
+begin
+  Clear;
+  SetCapacity(0);
+
+  FItemSize := AItemSize;
+  FTypeInfo := AtypeInfo;
+  F.Managed := IsManagedTypeInfo(ATypeInfo);
+end;
+
+procedure TLuaList.SetCapacity(const Value: NativeInt);
+var
+  NewBytes: TBytes;
+begin
+  if (Value = Count) then
+    Exit;
+  if (Value < Count) then
+    raise ELua.CreateFmt('Invalid capacity value %d, items count: %d', [Value, Count]);
+
+  SetLength(NewBytes, Value * FItemSize);
+  System.Move(Pointer(FBytes)^, Pointer(NewBytes)^, Count * FItemSize);
+  FBytes := NewBytes;
+  FCapacity := Value;
+end;
+
+procedure TLuaList.Clear;
+begin
+  if (Managed) and (Count <> 0) then
+    FinalizeArray(Pointer(FBytes), TypeInfo, Count);
+end;
+
+procedure TLuaList.TrimExcess;
+begin
+  Self.Capacity := Count;
+end;
+
+function TLuaList.Add: Pointer;
+label
+  start;
+var
+  Index, Size: NativeInt;
+begin
+start:
+  Index := FCount;
+  if (Index <> FCapacity) then
   begin
-    GetModuleFileName(hInstance, PATH, MAX_PATH);
-    Result := PATH;
+    Inc(Index);
+    FCount := Index;
+    Dec(Index);
+    Size := FItemSize;
+    Result := @FBytes[Index * Size];
+
+    if (F.Managed) then
+    begin
+      if (Size > 16) and (Assigned(FTypeInfo)) then
+      begin
+        InitializeArray(Result, FTypeInfo, 1);
+      end else
+      begin
+        System.FillChar(Result^, Size, #0);
+      end;
+    end;
+
+    Exit;
+  end else
+  begin
+    if (FCapacity = 0) then
+    begin
+      SetCapacity(4);
+    end else
+    begin
+      SetCapacity(FCapacity * 2);
+    end;
+
+    goto start;
   end;
 end;
 
-function IncludePathDelimiter(const S: string): string;
+function TLuaList.GetItem(const AIndex: NativeInt): Pointer;
+begin
+  if (NativeUInt(AIndex) < NativeUInt(FCount)) then
+  begin
+    Result := @FBytes[AIndex * FItemSize];
+    Exit;
+  end else
+  begin
+    raise ELua.CreateFmt('Invalid item index %d, items count: %d', [AIndex, Count]);
+  end;
+end;
+
+procedure TLuaDictionary.Clear;
+begin
+  FItems := nil;
+  FHashes := nil;
+  FHashesMask := 0;
+  FCapacity := 0;
+  FCount := 0;
+end;
+
+procedure TLuaDictionary.TrimExcess;
+var
+  NewItems: array of TLuaDictionaryItem;
+begin
+  SetLength(NewItems, FCount);
+  System.Move(Pointer(FItems)^, Pointer(NewItems)^, FCount * SizeOf(TLuaDictionaryItem));
+  SwapPtr(Pointer(FItems), Pointer(NewItems));
+  FCapacity := FCount;
+end;
+
+procedure TLuaDictionary.Grow;
+var
+  i: NativeInt;
+  Item: PLuaDictionaryItem;
+  HashCode: Integer;
+  Parent: PInteger;
+  Pow2, NewCapacity: NativeInt;
+  NewHashes: array of Integer;
+begin
+  Pow2 := FHashesMask;
+  if (Pow2 <> 0) then
+  begin
+    Inc(Pow2);
+    NewCapacity := (Pow2 shr 2) + (Pow2 shr 1);
+    if (NewCapacity = Count) then
+    begin
+      Pow2 := Pow2 * 2;
+      SetLength(NewHashes, Pow2);
+      FillChar(Pointer(NewHashes)^, Pow2 * SizeOf(Integer), $ff);
+
+      Item := Pointer(FItems);
+      for i := 0 to Count - 1 do
+      begin
+        {$ifdef LARGEINT}
+          HashCode := (NativeInt(Item.Key) shr 4) xor (NativeInt(Item.Key) shr 32);
+        {$else .SMALLINT}
+          HashCode := NativeInt(Item.Key) shr 4;
+        {$endif}
+        Inc(HashCode, (HashCode shr 16) * -1660269137);
+
+        Parent := @NewHashes[NativeInt(HashCode) and FHashesMask];
+        Item.Next := Parent^;
+        Parent^ := i;
+
+        Inc(Item);
+      end;
+
+      NewCapacity := (Pow2 shr 2) + (Pow2 shr 1);
+      SwapPtr(Pointer(FHashes), Pointer(NewHashes));
+    end;
+    SetLength(FItems, NewCapacity);
+    FCapacity := NewCapacity;
+  end else
+  begin
+    SetLength(FItems, 3);
+    SetLength(FHashes, 4);
+    System.FillChar(Pointer(FHashes)^, 4 * SizeOf(Integer), $ff);
+    FHashesMask := 3;
+    FCapacity := 3;
+  end;
+end;
+
+function TLuaDictionary.NewItem(const Key: Pointer): PLuaDictionaryItem;
+label
+  start;
+var
+  Index: NativeInt;
+  HashCode: Integer;
+  Parent: PInteger;
+begin
+start:
+  Index := FCount;
+  if (Index <> FCapacity) then
+  begin
+    Inc(Index);
+    FCount := Index;
+    Dec(Index);
+
+    {$ifdef LARGEINT}
+      HashCode := (NativeInt(Key) shr 4) xor (NativeInt(Key) shr 32);
+    {$else .SMALLINT}
+      HashCode := NativeInt(Key) shr 4;
+    {$endif}
+    Inc(HashCode, (HashCode shr 16) * -1660269137);
+
+    Parent := @FHashes[NativeInt(HashCode) and FHashesMask];
+    Result := @FItems[Index];
+    Result.Key := Key;
+    Result.Next := Parent^;
+    Parent^ := Index;
+  end else
+  begin
+    Grow;
+    goto start;
+  end;
+end;
+
+function TLuaDictionary.InternalFind(const Key: Pointer; const ModeCreate: Boolean): PLuaDictionaryItem;
+var
+  HashCode: Integer;
+  HashesMask: NativeInt;
+  Index: NativeInt;
+begin
+  {$ifdef LARGEINT}
+    HashCode := (NativeInt(Key) shr 4) xor (NativeInt(Key) shr 32);
+  {$else .SMALLINT}
+    HashCode := NativeInt(Key) shr 4;
+  {$endif}
+  Inc(HashCode, (HashCode shr 16) * -1660269137);
+
+  HashesMask := FHashesMask;
+  if (HashesMask <> 0) then
+  begin
+    Index := FHashes[NativeInt(HashCode) and HashesMask];
+    if (Index >= 0) then
+    repeat
+      Result := @FItems[Index];
+      if (Result.Key = Key) then Exit;
+      Index := Result.Next;
+    until (Index < 0);
+  end;
+
+  if (ModeCreate) then
+  begin
+    Result := NewItem(Key);
+  end else
+  begin
+    Result := nil;
+  end;
+end;
+
+function TLuaDictionary.Find(const Key: Pointer): PLuaDictionaryItem;
+{$ifdef INLINESUPPORT}
+begin
+  Result := InternalFind(Key, False);
+end;
+{$else}
 asm
-  jmp SysUtils.IncludeTrailingPathDelimiter
+  xor ecx, ecx
+  jmp TLuaDictionary.InternalFind
+end;
+{$endif}
+
+procedure TLuaDictionary.Add(const Key: Pointer; const Value: __luapointer);
+begin
+  InternalFind(Key, True).Value := Value;
 end;
 
-function SharedFileStream(const FileName: string): TFileStream;
-begin
-  Result := TFileStream.Create(FileName, fmShareDenyNone);
-end;
 
-function  EnumName(tpinfo: PTypeInfo; Value: byte): string;
-begin
-  if (tpinfo = nil) then
-    Result := IntToStr(Value)
-  else
-    Result := TypInfo.GetEnumName(tpinfo, integer(Value));
-end;   *)
 
                (*
 function IsMemoryZeroed(const Memory: pointer; const Size: integer): boolean;
@@ -1923,1185 +2460,6 @@ asm
   xor eax, eax
   pop edi
 end;         *)
-
-                  (*
-function CharPos(const C: char; const S: string): integer;
-asm
-  push ebx
-  push edi
-  //if StrLenght > 0 then
-  test edx,edx
-  jz   @Else1Begin
-  //StrLenght := Length(Str);
-  mov  edi,[edx-$04]
-  //I := 0;
-  xor  ecx,ecx
-  dec  edx
-@RepeatBegin :
-  //Inc(I);
-  inc  ecx
-  //until((Str[I] = Chr) or (I > StrLenght));
-  movzx ebx, byte ptr [edx+ecx]
-  //cmp  al,[edx+ecx]
-  cmp  al, bl
-  jz   @Exit
-  cmp  edi,ecx
-  jne  @RepeatBegin
-@Else1Begin :
-  //Result := 0;
-  xor  eax,eax
-  pop  edi
-  pop  ebx
-  ret
-@Exit :
-  mov  eax,ecx
-  pop  edi
-  pop  ebx
-end;        *)
-              (*
-function CharPosEx(const C: char; const S: string; const StartFrom: dword): integer;
-asm
-  push ebx
-  push edi
-
-  // if (S <> '') and (StartFrom <> 0)
-  test edx,edx
-  jz   @ZeroResult
-  test ecx,ecx
-  jz   @ZeroResult
-
-  mov  edi, [edx-$04] // edi := Length(S)
-  dec  edx // сместить указатель, чтобы потом S[+Position] = символ
-
-  // проверка: выход за границы | StartFrom > Length
-  cmp  ecx, edi
-  jg @ZeroResult
-
-dec ecx // временно декрементировать стартовую позицию
-@RepeatBegin :
-  //Inc(I);
-  inc  ecx
-  //until((Str[I] = Chr) or (I > StrLenght));
-  movzx ebx, byte ptr [edx+ecx]
-  //cmp  al,[edx+ecx]
-  cmp  al, bl
-  jz   @Exit
-  cmp  edi,ecx
-  jne  @RepeatBegin
-@ZeroResult:
-  //Result := 0;
-  xor  eax,eax
-  pop  edi
-  pop  ebx
-  ret
-@Exit :
-  mov  eax,ecx
-  pop  edi
-  pop  ebx
-end;     *)
-           (*
-function  StringHash(const S: string): integer; overload;
-asm
-  test eax, eax
-  jz @exit
-  mov edx, [eax-4]
-  test edx, edx
-  jz @exit
-
-  push ebx
-  push esi
-  mov ebx, edx
-  xor ecx, ecx
-  shl ebx, 12
-
-  test edx, edx
-  jz @no_loop
-
-  @loop:
-    inc ecx
-    movzx esi, byte ptr [eax+edx-1]
-    and ecx, $f
-    movzx esi, byte ptr [LowerChars + esi]
-    ror ebx, cl
-    lea esi, [esi + edx*8]
-    xor ebx, esi
-
-  dec edx
-  jnz @loop
-
-  @no_loop:
-  mov eax, ebx
-  and eax, $7FFFFFFF
-  pop esi
-  pop ebx
-
-  @exit:
-end;      *)
-            (*
-function  StringHash(const S: pchar; const SLength: integer): integer; overload;
-asm
-  test eax, eax
-  jz @exit
-  test edx, edx
-  jg @1
-  xor eax, eax
-  ret
-
-@1:
-  push ebx
-  push esi
-  mov ebx, edx
-  xor ecx, ecx
-  shl ebx, 12
-
-  test edx, edx
-  jz @no_loop
-
-  @loop:
-    inc ecx
-    movzx esi, byte ptr [eax+edx-1]
-    and ecx, $f
-    movzx esi, byte ptr [LowerChars + esi]
-    ror ebx, cl
-    lea esi, [esi + edx*8]
-    xor ebx, esi
-
-  dec edx
-  jnz @loop
-
-  @no_loop:
-  mov eax, ebx
-  and eax, $7FFFFFFF
-  pop esi
-  pop ebx
-
-  @exit:
-end;   *)
-         (*
-
-function SameStrings (const S1, S2 : string) : boolean; overload;
-asm
-   cmp eax, edx
-   je @exit_true
-   test eax, eax
-   jz @exit_false
-   test edx, edx
-   jz @exit_false
-   mov ecx, [eax-4]
-   cmp ecx, [edx-4]
-   jne @exit_false
-
-   push ebx
-   jmp @1
-
-@loop_3:
-   dec ecx
-   mov bl, [eax+ecx]
-   cmp bl, [edx+ecx]
-   jne @exit_false_pop
-@1:test ecx, 3
-   jnz @loop_3
-
-   shr ecx, 2
-   jz @exit_true_pop
-   mov ebx, [eax + ecx*4 - 4]
-   cmp ebx, [edx + ecx*4 - 4]
-   jne @exit_false_pop
-   dec ecx
-   jz @exit_true_pop
-
-   cmp ecx, 7
-   jle @loop_dword
-
-   push esi
-   push edi
-     mov esi, eax
-     mov edi, edx
-     xor eax, eax
-     REPE CMPSD
-     sete al
-   pop edi
-   pop esi
-   pop ebx
-   ret
-
-@loop_dword:
-   mov ebx, [eax + ecx*4 - 4]
-   cmp ebx, [edx + ecx*4 - 4]
-   jne @exit_false_pop
-   dec ecx
-   jnz @loop_dword
-
-@exit_true_pop:
-   pop ebx
-   mov eax, 1
-   ret
-@exit_false_pop:
-   pop ebx
-@exit_false:
-   xor eax, eax
-   ret
-@exit_true:
-   mov eax, 1
-end;   *)
-         (*
-function SameStrings (const S1: string; const S2: pchar; const S2Length: integer) : boolean; overload;
-asm
-   cmp eax, edx
-   je @exit_true
-   test eax, eax
-   jz @exit_false
-   test edx, edx
-   jz @exit_false
-   test ecx, ecx
-   jle @exit_false
-   cmp ecx, [eax-4]
-   jne @exit_false
-
-   push ebx
-   jmp @1
-
-@loop_3:
-   dec ecx
-   mov bl, [eax+ecx]
-   cmp bl, [edx+ecx]
-   jne @exit_false_pop
-@1:test ecx, 3
-   jnz @loop_3
-
-   shr ecx, 2
-   jz @exit_true_pop
-   mov ebx, [eax + ecx*4 - 4]
-   cmp ebx, [edx + ecx*4 - 4]
-   jne @exit_false_pop
-   dec ecx
-   jz @exit_true_pop
-
-   cmp ecx, 7
-   jle @loop_dword
-
-   push esi
-   push edi
-     mov esi, eax
-     mov edi, edx
-     xor eax, eax
-     REPE CMPSD
-     sete al
-   pop edi
-   pop esi
-   pop ebx
-   ret
-
-@loop_dword:
-   mov ebx, [eax + ecx*4 - 4]
-   cmp ebx, [edx + ecx*4 - 4]
-   jne @exit_false_pop
-   dec ecx
-   jnz @loop_dword
-
-@exit_true_pop:
-   pop ebx
-   mov eax, 1
-   ret
-@exit_false_pop:
-   pop ebx
-@exit_false:
-   xor eax, eax
-   ret
-@exit_true:
-   mov eax, 1
-end;
-       *)
-
-         (*
-
-function EqualStrings(const S1, S2 : string) : boolean; overload;
-asm
-   cmp eax, edx
-   je @exit1
-
-   test eax, eax
-   jz @exit0
-
-   test edx, edx
-   jz @exit0
-
-   mov ecx, [eax-4]
-   cmp [edx-4], ecx
-   jne @exit0
-
-   push esi
-   push edi
-   mov esi, eax
-   mov edi, edx
-   dec esi
-   dec edi
-
-   // сам цикл
-   @loop:
-       movzx eax, byte ptr [esi + ecx]
-       cmp byte ptr [edi + ecx], al
-       je @next_iteration
-
-       movzx edx, byte ptr [edi + ecx]
-       movzx eax, byte ptr [LowerChars + eax]
-       cmp byte ptr [LowerChars + edx], al
-       je @next_iteration
-
-       xor eax, eax
-       pop edi
-       pop esi
-       ret
-
-   @next_iteration:
-   dec ecx
-   jnz @loop
-
-   pop edi
-   pop esi
-
-   @exit1:
-      mov eax, 1
-      ret
-   @exit0:
-      xor eax, eax
-end;
-
-function EqualStrings (const S1: string; const S2: pchar; const S2Length: integer) : boolean; overload;
-asm
-   cmp eax, edx
-   je @exit1
-
-   test eax, eax
-   jz @exit0
-
-   test edx, edx
-   jz @exit0
-
-   test ecx, ecx
-   jle @exit0
-
-   cmp ecx, [eax-4]
-   jne @exit0
-
-   push esi
-   push edi
-   mov esi, eax
-   mov edi, edx
-   dec esi
-   dec edi
-
-   // сам цикл
-   @loop:
-       movzx eax, byte ptr [esi + ecx]
-       cmp byte ptr [edi + ecx], al
-       je @next_iteration
-
-       movzx edx, byte ptr [edi + ecx]
-       movzx eax, byte ptr [LowerChars + eax]
-       cmp byte ptr [LowerChars + edx], al
-       je @next_iteration
-
-       xor eax, eax
-       pop edi
-       pop esi
-       ret
-
-   @next_iteration:
-   dec ecx
-   jnz @loop
-
-   pop edi
-   pop esi
-
-   @exit1:
-      mov eax, 1
-      ret
-   @exit0:
-      xor eax, eax
-end; *)
-      (*
-function  IntPos(Value: integer; Arr: pinteger; ArrLength: integer): integer;
-asm
-   test ecx, ecx
-   jnz @find // учитывать знак ?
-   mov eax, -1
-   ret
-
-@find:
-   push edi
-
-   mov edi, edx
-   repne scasd
-   je @calc_result
-      mov eax, -1
-      pop edi
-      ret
-@calc_result:
-
-   {mov eax, edi
-   sub eax, edx
-   shr eax, 2
-   dec eax   }
-
-   neg edx
-   lea eax, [edi + edx - 4]
-   shr eax, 2
-
-   pop edi
-end;  *)
-
-        (*
-function InsortedPlace8(Value: integer; Arr: pointer; ArrLength: integer): integer;
-//const
-//  SIZE = 8;
-asm
-  test ecx, ecx
-  jg @1
-  xor eax, eax
-  ret
-@1:
-  push ebx
-  push ecx
-  push edi
-
-  mov ebx, eax
-  dec ecx
-  xor eax, eax
-
-  // Arr = edx
-  // Value = ebx
-  // L = eax
-  // R = ecx
-  // C = edi
-
-  lea edi, [eax+ecx]
-  shr edi, 1
-
-  // while (L <> C)
-  cmp eax, edi
-  je @endloop
-
-  // cmp Value, Arr[C]
-@loop:
-  //cmp ebx, [edx+edi*SIZE]
-  cmp ebx, [edx+edi*8]
-  jle @4
-    // L := C; C := (L+R) shr 1;
-    mov eax, edi
-    add edi, ecx
-    shr edi, 1
-    cmp eax, edi
-    jne @loop
-    jmp @endloop
-  @4:
-    // R := C; C := (L+R) shr 1;
-    mov ecx, edi
-    add edi, eax
-    shr edi, 1
-    cmp eax, edi
-  jne @loop
-
-@endloop:
-  pop edi
-  pop ecx
-  // while (L < ArrLength) and ( Value > pinteger(integer(Arr)+L*4)^ ) do Inc(L);
-  // Result := L;
-  @while:
-    //cmp ebx, [edx+eax*SIZE]
-    cmp ebx, [edx+eax*8]
-    jle @exit
-    inc eax
-    cmp eax, ecx
-  jl @while
-
-@exit:
-  pop ebx
-end;     *)
-           (*
-
-procedure QuickSort4(Arr: pointer; L, R: integer);
-//const
-//  SIZE = 4;
-var
-  R_: integer;
-asm
-  push ebx // = Value
-  push esi // = I
-  push edi // = J
-           // eax - Arr
-           // edx - L
-           // ecx - Buf
-
-     // R_ := R; I := L;
-     mov R_, ecx
-     mov esi, edx
-
-     @repeat_1:
-       // J := R;
-       mov edi, R_
-       // Value := pinteger(integer(Arr)+((L + J) shr 1)*SIZE)^;
-       lea ebx, [edx + edi]
-       shr ebx, 1
-       //mov ebx, [eax+ebx*SIZE]
-       mov ebx, [eax+ebx*4]
-
-       push edx // edx - дополнительный буфер
-       @repeat_2:
-
-          jmp @1
-          @while_1: // while pinteger(integer(Arr)+I*SIZE)^ < Value do Inc(I);
-             inc esi
-          @1://cmp ebx, [eax+esi*SIZE]
-             cmp ebx, [eax+esi*4]
-          jg @while_1
-
-          jmp @2
-          @while_2: // while pinteger(integer(Arr)+J*SIZE)^ > Value do Dec(J);
-             dec edi
-          @2://cmp ebx, [eax+edi*SIZE]
-             cmp ebx, [eax+edi*4]
-          jl @while_2
-
-          // if I <= J then Arr[I] <--> Arr[J]
-          cmp esi, edi
-          jg @end_repeat_2
-          // swap + inc/dec + jmp @repeat_2
-
-            mov ecx, [eax+esi*4]
-            mov edx, [eax+edi*4]
-            mov [eax+edi*4], ecx
-            mov [eax+esi*4], edx
-
-            inc esi
-            dec edi
-
-            // until I > J
-            cmp esi, edi
-            jle @repeat_2
-          //  
-       @end_repeat_2:
-       pop edx
-
-       // рекурси€: if L < J then QuickSort4(Arr, L, J);
-       cmp edx, edi
-       jnl @after_recursy
-         mov ecx, edi
-         call QuickSort4
-       @after_recursy:
-   // L := I;
-     mov edx, esi
-   // until I >= R;
-     cmp esi, R_
-     jl @repeat_1
-
-  pop edi
-  pop esi
-  pop ebx
-end;
-
-function InsortedPlace4(Value: integer; Arr: pointer; ArrLength: integer): integer;
-//const
-//  SIZE = 4;
-asm
-  test ecx, ecx
-  jg @1
-  xor eax, eax
-  ret
-@1:
-  push ebx
-  push ecx
-  push edi
-
-  mov ebx, eax
-  dec ecx
-  xor eax, eax
-
-  // Arr = edx
-  // Value = ebx
-  // L = eax
-  // R = ecx
-  // C = edi
-
-  lea edi, [eax+ecx]
-  shr edi, 1
-
-  // while (L <> C)
-  cmp eax, edi
-  je @endloop
-
-  // cmp Value, Arr[C]
-@loop:
-  //cmp ebx, [edx+edi*SIZE]
-  cmp ebx, [edx+edi*4]
-  jle @4
-    // L := C; C := (L+R) shr 1;
-    mov eax, edi
-    add edi, ecx
-    shr edi, 1
-    cmp eax, edi
-    jne @loop
-    jmp @endloop
-  @4:
-    // R := C; C := (L+R) shr 1;
-    mov ecx, edi
-    add edi, eax
-    shr edi, 1
-    cmp eax, edi
-  jne @loop
-
-@endloop:
-  pop edi
-  pop ecx
-  // while (L < ArrLength) and ( Value > pinteger(integer(Arr)+L*4)^ ) do Inc(L);
-  // Result := L;
-  @while:
-    //cmp ebx, [edx+eax*SIZE]
-    cmp ebx, [edx+eax*4]
-    jle @exit
-    inc eax
-    cmp eax, ecx
-  jl @while
-
-@exit:
-  pop ebx
-end;
-
-function InsortedPos4(Value: integer; const DynArray): integer;
-asm
-  mov edx, [edx]
-  test edx, edx
-  jz @fail_2
-
-    mov ecx, [edx-4] {!}
-    {$ifdef fpc} inc ecx {$endif}
-    push eax
-
-    call InsortedPlace4
-    cmp eax, ecx  // if (Result >= ArrLength)
-    jge @fail_1
-
-    // if (pinteger( integer(Arr)+Result*4 )^ <> Value)
-    mov ecx, [edx + eax*4]
-    pop edx // value
-    cmp ecx, edx
-    jne @fail_2
-    ret
-
-@fail_1:
-  pop eax
-@fail_2:
-  mov eax, -1
-end;
-
-
-procedure FillDword(var Dest; count: Integer; Value: dword);
-asm
-  test edx, edx
-  jnle @1
-  ret
-@1:
-  push edi
-  mov edi, eax
-  mov eax, ecx
-  mov ecx, edx
-
-  REP  STOSD 
-
-  pop edi
-end;          *)
-
-               (*
-function TypeKindName(const Kind: TTypeKind): string; forward;
-
-function WrongDynType(tpinfo: PTypeInfo): string;
-begin
-  Result := Format('”казанный TypeInfo(%s) не €вл€етс€ динамическим массивом',
-                      [TypeKindName(tpinfo.Kind)]);
-end;
-
-function DynArrayLength(var DynArray): integer;
-asm
-  mov eax, [eax]
-  test eax, eax
-  jz @exit
-    mov eax, [eax-4]
-    {$ifdef fpc} {FreePascal!} inc eax {$endif}
-  @exit:
-end;
-
-function DynArrayInsert(var DynamicArray; const tpinfo: PTypeInfo; Start: integer; const Count: integer = 1): pointer;
-const
-  Length_Start_Count = 'Length = %d, Start = %d, Count = %d';
-var
-  Len, NewLen, elSize: integer;
-  ArrInfo: PTypeData;//PDynArrayTypeInfo absolute tpinfo;
-  DestCpyPtr: pointer;
-  ArrIsStr: boolean;
-begin
-  ArrIsStr := (tpinfo.Kind in [tkLString{$ifdef fpc},tkAString{$endif}, tkWString]);
-  Len := DynArrayLength(DynamicArray);
-  {$ifdef fpc} if (ArrIsStr) and (Len <> 0) then dec(Len); {$endif}
-  if (tpinfo.Kind = tkWString) then Len := Len shr 1;
-  if (ArrIsStr) then dec(Start);
-
-  if (Start < 0) or (Start > Len) or (Count <= 0) then
-    TExcept.Assert(Length_Start_Count, [Len, Start+ord(ArrIsStr), Count]);
-
-  NewLen := Len + Count;
-
-  case (tpinfo.Kind) of
-     tkDynArray: {стандартные действи€, обработка внизу} ;
-      tkLString{$ifdef fpc},tkAString{$endif}: begin
-                   // обычна€ строка
-                   // внимание, здесь используетс€ другой индекс!!!
-                   SetLength(string(DynamicArray), NewLen);
-                   Result := pointer(integer(DynamicArray)+Start);
-
-                   if (Start<>Len) then
-                   //CopyMemory(pointer(integer(Result)+Count), Result, Len-Start);
-                   Move(Result^, pointer(integer(Result)+Count)^, Len-Start);
-
-                   exit;
-                 end;
-
-      tkWString: begin
-                   // WideString
-                   // внимание, здесь используетс€ другой индекс!!!
-                   SetLength(WideString(DynamicArray), NewLen);
-                   Result := pointer(integer(DynamicArray)+Start*sizeof(wchar));
-
-                   if (Start<>Len) then
-                   //CopyMemory(pointer(integer(Result)+Count*sizeof(wchar)), Result, (Len-Start)*sizeof(wchar));
-                   Move(Result^, pointer(integer(Result)+Count*sizeof(wchar))^, (Len-Start)*sizeof(wchar));
-
-                   exit;
-                 end;
-     else
-       TExcept.Assert(WrongDynType(tpinfo));
-  end;
-
-  DynArraySetLength(pointer(DynamicArray), tpinfo, 1{!}, @NewLen);
-
-  ArrInfo := GetTypeData(tpinfo);
-  elSize := ArrInfo.elSize;
-  Result := pointer(integer(DynamicArray)+Start*elSize);
-
-  if (Start <> Len) then
-  begin
-    DestCpyPtr := pointer(integer(Result)+ Count*elSize);
-    //CopyMemory(DestCpyPtr, Result, (Len-Start)*elSize);
-    Move(Result^, DestCpyPtr^, (Len-Start)*elSize);
-
-    if (ArrInfo.elType <> nil) then
-      //ZeroMemory(Result, Count*elSize);
-      FillChar(Result^, Count*elSize, #0);
-  end;
-end;
-        *)
-
-        (*
-{$ifdef fpc}
-Function fpc_Copy_internal (Src, Dest, TypeInfo : Pointer) : SizeInt;[external name 'FPC_COPY'];
-procedure CopyRecord(const dest, source, typeinfo: ptypeinfo);
-asm
-  {внимание! очень плохо работает в FPC !!!}
-  xchg eax, edx
-  jmp fpc_Copy_internal
-end;
-{$else}
-procedure CopyRecord(dest, source, typeinfo: pointer);
-asm
-  jmp System.@CopyRecord
-end;
-{$endif}  *)
-
-(*
-procedure CopyObject(const Dest, Src: TObject);
-var
-  InitTable: pointer;
-  BaseSize, DestSize: integer;
-  BaseClass, DestClass, SrcClass: TClass;
-begin
-  if (Dest = nil) or (Src = nil) then exit; {по идее эксепшн}
-
-
-  DestClass := TClass(pointer(Dest)^);
-  SrcClass := TClass(pointer(Src)^);
-
-  if (DestClass = SrcClass) then BaseClass := DestClass
-  else
-  if (DestClass.InheritsFrom(SrcClass)) then BaseClass := SrcClass
-  else
-  if (SrcClass.InheritsFrom(DestClass)) then BaseClass := DestClass
-  else
-  begin
-    BaseClass := DestClass;
-
-    while (BaseClass <> nil) and (not SrcClass.InheritsFrom(BaseClass)) do
-    begin
-      BaseClass := BaseClass.ClassParent;
-    end;
-
-    if (BaseClass = nil) then exit; {но такого не должно быть}
-  end;
-
-
-  // копирование
-  DestSize := BaseClass.InstanceSize;   
-  while (BaseClass <> TObject) do
-  begin
-    InitTable := PPointer(Integer(BaseClass) + vmtInitTable)^;
-    if (InitTable <> nil) then
-    begin
-      CopyRecord(pointer(Dest), pointer(Src), InitTable);
-      break;
-    end;
-    BaseClass := BaseClass.ClassParent;
-  end;
-
-  BaseSize := BaseClass.InstanceSize;
-  if (BaseSize <> DestSize) then Move(pointer(integer(Src)+BaseSize)^, pointer(integer(Dest)+BaseSize)^, DestSize-BaseSize);
-end;
-     *)
-        (*
-{$ifdef fpc}
-procedure CopyArray(const dest, source: pointer; const typeinfo: ptypeinfo; const count: integer);
-var
-  item_dest, item_src: pointer;
-  item_size, i: integer;
-begin
-  item_dest := dest;
-  item_src := source;
-  
-  case typeinfo.Kind of
-    tkVariant: item_size := sizeof(Variant);
-    tkLString, tkWString, tkInterface, tkDynArray, tkAString: item_size := sizeof(pointer);
-      tkArray, tkRecord, tkObject: item_size := PFieldTable(GetTypeData(typeinfo)).Size;
-  else
-    item_size := 0; // exception
-  end;
-
-  if (item_size <> 0) then
-  for i := 0 to count-1 do
-  begin
-    fpc_Copy_internal(item_src, item_dest, typeinfo);
-
-    inc(Integer(item_dest), item_size);
-    inc(Integer(item_src), item_size);
-  end;
-end;
-{$else}
-procedure CopyArray(const dest, source: pointer; const typeinfo: ptypeinfo; const count: integer);
-asm
-  // если указан статический массив, то домножить count на общее количество элементов в массиве
-  // а в typeinfo - базовый элемент
-  // сделано это дл€ того чтобы не вызывалс€ Exception
-  // по каким то причинам System.CopyArray не приспособлен под аргумент tkArray
-  // наверное потому что System.CopyArray внутренн€€ функци€ и на этапе прекомпил€ции всЄ грамотно просчитываетс€
-  cmp byte ptr [ecx], tkArray
-  jne @1
-  push eax
-  push edx
-    movzx edx, [ecx + TTypeInfo.Name]
-    mov eax, [ecx + edx + 6]
-    mov ecx, [ecx + edx + 10]
-    mul count
-    mov ecx, [ecx]
-    mov count, eax    
-  pop edx
-  pop eax
-  @1:
-
-  push dword ptr [ebp+8]
-  call System.@CopyArray
-end;
-{$endif}
-         *)
-            (*
-{$ifdef fpc}
-Procedure int_Finalize(Data, TypeInfo: Pointer); [external name 'FPC_FINALIZE'];
-procedure Finalize(const Item: pointer; const tpinfo: ptypeinfo; const count: integer=1);
-var
-  item_ptr: pointer;
-  item_size, i: integer;
-begin
-  item_ptr := Item;
-  case tpinfo.Kind of
-    tkVariant: item_size := sizeof(Variant);
-    tkLString, tkWString, tkInterface, tkDynArray, tkAString: item_size := sizeof(pointer);
-      tkArray, tkRecord, tkObject: item_size := PFieldTable(GetTypeData(tpinfo)).Size;
-  else
-    item_size := 0;
-  end;
-
-  if (item_size <> 0) then
-  for i := 0 to count-1 do
-  begin
-    int_Finalize(item_ptr, tpinfo);
-    inc(Integer(item_ptr), item_size);
-  end;
-end;
-{$else}
-procedure Finalize(const Item: pointer; const tpinfo: ptypeinfo; const count: integer=1);
-asm
-  jmp System.@FinalizeArray
-end;
-{$endif}
-       *)
-         (*
-{$ifdef fpc}
-procedure fpc_dynarray_incr_ref(p : pointer); [external name 'FPC_DYNARRAY_INCR_REF'];
-procedure DynArrayAddRef(const DynArray);
-asm
-  mov eax, [eax]
-  jmp fpc_dynarray_incr_ref
-end;
-{$else}
-procedure DynArrayAddRef(const DynArray);
-asm
-  mov eax, [eax]
-  jmp System.@DynArrayAddRef;
-end;
-{$endif}
-         *)
-           (*
-{$ifdef fpc}
-Procedure fpc_dynarray_clear (var p : pointer;ti : pointer);external name 'FPC_DYNARRAY_CLEAR';
-procedure DynArrayClear(var a: pointer; typeinfo: pointer);
-asm
-  jmp fpc_dynarray_clear
-end;
-{$endif}
-        *)
-         (*
-{$ifdef fpc}
-function fpc_dynarray_copy(psrc : pointer;ti : pointer; lowidx,count:tdynarrayindex): pointer;external name 'FPC_DYNARR_COPY';
-procedure DynArrayCopy(var DestArray, SrcArray; tpinfo: ptypeinfo);
-var
-  Dest: pointer absolute DestArray;
-  Src: pointer absolute SrcArray;
-begin
-  if (Dest = Src) then exit;
-  if (Dest <> nil) then fpc_dynarray_clear(Dest, tpinfo);
-  if (Src <> nil) then Dest := fpc_dynarray_copy(Src, tpinfo, 0, DynArrayLength(SrcArray));
-end;
-{$else}
-procedure DynArrayCopy(var DestArray, SrcArray; tpinfo: ptypeinfo);
-asm
-  cmp eax, edx
-  jne @1
-  ret
-  @1:
-
-  push ecx
-  mov ecx, eax
-  mov eax, [edx]
-  pop edx
-
-  jmp System.@DynArrayCopy  
-end;
-{$endif}
-         *)
-          (*
-function IntegerDynArray(const Args: array of Integer): TIntegerDynArray;
-var
-  Len: integer;
-begin
-  Len := Length(Args);
-  if (Len <> 0) then
-  begin
-    SetLength(Result, Len);
-    Move(pointer(@Args)^, pointer(Result)^, Len*sizeof(Args[0]));
-  end;
-end;     *)
-
-(*
-// ------------   Ѕлок дл€ дампов CFunction  ----------------------------------
-const
-  DUMP_SIZE = 32;
-  DUMPS_BLOCK_SIZE = 1024*4; // PageSize
-  DUMPS_IN_BLOCK = DUMPS_BLOCK_SIZE div DUMP_SIZE;
-  CHECK_BUFFER_SIZE = ((DUMPS_IN_BLOCK+31)and -32) div 8;
-
-type              
-  TDumpsBlock = object
-  private
-    {$ifdef WINDOWS}Handle: THandle;{$endif}
-    FMemory: pointer;
-    FCount: integer;
-    CheckBuffer: array[0..CHECK_BUFFER_SIZE-1] of byte;
-  public
-    procedure Initalize();
-
-    function Alloc(): pointer;
-    function Dispose(const Number: integer): boolean;
-
-    property Memory: pointer read FMemory;
-    property Count: integer read FCount;
-  end;
-
-  TDumpManager = object
-  private
-    Blocks: array of TDumpsBlock;
-    FCount: integer;
-  public
-    function  Alloc(): pointer;
-    procedure Dispose(const Value: pointer);
-
-    property Count: integer read FCount;
-  end;
-
-{ TDumpsBlock }
-
-procedure TDumpsBlock.Initalize;
-begin
-  FCount := 0;
-
-  {$ifdef WINDOWS}
-    Handle := HeapCreate($00040000{HEAP_CREATE_ENABLE_EXECUTE}, 0, 0);
-    FMemory := HeapAlloc(Handle, 0, DUMPS_BLOCK_SIZE);
-  {$else}
-    GetMem(FMemory, DUMPS_BLOCK_SIZE);
-  {$endif}
-
-  ZeroMemory(@CheckBuffer, sizeof(CheckBuffer));
-end;
-
-function TDumpsBlock.Alloc: pointer;
-const
-  DUMPS_32 = DUMP_SIZE*32;
-asm
-  mov edx, [eax+TDumpsBlock.FCount]
-  inc dword ptr [eax+TDumpsBlock.FCount]
-  bts [eax+TDumpsBlock.CheckBuffer], edx
-  jc @find
-
-  mov eax, [eax+TDumpsBlock.FMemory]
-  shl edx, 5 //*32 {DUMP_SIZE}
-  add eax, edx
-  ret
-
-@find:
-  push ebx
-
-  // ebx - number
-  // edx - CheckBuffer
-  // eax - результат
-  lea edx, [eax+TDumpsBlock.CheckBuffer]
-  mov eax, [eax+TDumpsBlock.FMemory]
-  mov ecx, [edx]
-
-  @loop:
-    not  ecx // проверка на $FFFFFF
-    test ecx, ecx
-    jnz @after_loop
-
-    add edx, 4
-    add eax, DUMPS_32 // 32 дампа
-  mov ecx, [edx]
-  jmp @loop
-  @after_loop:
-
-  // все нулевые биты стали единичными. занести в ebx номер бита
-  bsf ebx, ecx
-
-  // смещени€, результат, установить бит
-  btr ecx, ebx
-  not ecx
-  shl ebx, 5 //*32 {DUMP_SIZE}
-  mov [edx], ecx
-  add eax, ebx
-
-  pop ebx
-end;
-
-procedure UncheckBit(const Memory: pointer; const Number: integer);
-asm
-  btr [eax], edx
-end;
-
-function TDumpsBlock.Dispose(const Number: integer): boolean;
-begin
-  UncheckBit(@CheckBuffer, Number);
-
-  dec(FCount);
-  Result := (FCount=0);
-
-  if (Result) then
-  begin
-    {$ifdef WINDOWS}
-      HeapFree(Handle, 0, FMemory);
-      HeapDestroy(Handle);
-    {$else}
-      FreeMem(FMemory);
-    {$endif}
-  end;
-end;    *)
-
-          (*
-{ TDumpManager }
-
-function TDumpManager.Alloc: pointer;
-var
-  i: integer;
-  Block: ^TDumpsBlock;
-begin
-  Block := pointer(Blocks);
-  for i := 0 to Count-1 do
-  begin
-    if (Block^.FCount <> DUMPS_IN_BLOCK) then
-    begin
-      Alloc := Block.Alloc;
-      exit;
-    end;
-
-    inc(Block);
-  end;
-
-  // добавление нового блока
-  inc(FCount);
-  SetLength(Blocks, FCount);
-  Block := @Blocks[FCount-1];
-  Block.Initalize();
-  Alloc := Block.Alloc;
-end;
-
-procedure TDumpManager.Dispose(const Value: pointer);
-var
-  i, Number: integer;
-  Block: ^TDumpsBlock;
-begin
-  if (Count <> 0) then
-  begin
-    Block := @Blocks[Count-1];
-    
-    for i := Count-1 downto 0 do
-    begin
-      if (dword(Value) >= dword(Block.Memory)) then
-      begin
-        Number := (integer(Value)-integer(Block.Memory)) shr 5; // div 32
-        if (Number < DUMPS_IN_BLOCK) then
-        begin
-          if (Block.Dispose(Number)) then
-          begin
-            dec(FCount);
-            if (i <> FCount) then Block^ := Blocks[FCount];
-            SetLength(Blocks, FCount);
-          end;
-
-          exit;
-        end;
-      end;
-
-      dec(Block);
-    end;
-  end;
-end;
-
-var
-  CFunctionDumpManager: TDumpManager;
-           *)
 
           (*
 // коррекци€ пустой строки
@@ -3309,70 +2667,7 @@ begin
   end;
 end; *)
 
-       (*
-var
-  // глобальный массив "Lua_CFunction"-дампов
-  CFunctionDumps: array of pointer;
-
-// создать дамп перевызова TLua.CallbackProc с параметрами
-function CreateCFunctionDump(const Lua: TLua; const P1, P2, CallbackProc: pointer): pointer;
-var
-  Dump: pchar absolute Result;
-begin
-  Result := CFunctionDumpManager.Alloc();
-
-  // mov eax, Lua
-  byte(Dump[0]) := $B8;
-  pinteger(@Dump[1])^ := integer(Lua);
-  // mov edx, ClassIndex
-  byte(Dump[5]) := $BA;
-  ppointer(@Dump[6])^ := P1;
-  // mov ecx, ProcIndex
-  byte(Dump[10]) := $B9;
-  ppointer(@Dump[11])^ := P2;
-  // jmp dword ptr [Dump + 21]
-  byte(Dump[15]) := $FF;
-  byte(Dump[16]) := $25;
-  ppointer(@Dump[17])^ := @Dump[21];
-  // [Dump + 21] := CallbackProc
-  ppointer(@Dump[21])^ := CallbackProc;
-end;    *)
-           (*
-// создать дамп "Lua_CFunction" с параметрами и добавить в массив
-function AddLuaCallbackProc(const Lua: TLua; const P1, P2, CallbackProc: pointer): pointer{Lua_CFunction};
-var
-  Len: integer;
-begin
-  Len := Length(CFunctionDumps);
-  SetLength(CFunctionDumps, Len+1);
-  CFunctionDumps[Len] := CreateCFunctionDump(Lua, P1, P2, CallbackProc);
-
-  Result := {Lua_CFunction}(pointer(CFunctionDumps[Len]));
-end;
-
-// удалить все дампы св€занные с конкретным Lua
-procedure DeleteCFunctionDumps(const Lua: TLua);
-var
-  i, Len: integer;
-begin
-  i := 0;
-  Len := Length(CFunctionDumps);
-
-  while (i < Len) do
-  begin
-    if (pinteger(integer(CFunctionDumps[i])+1)^ = integer(Lua)) then
-    begin
-      CFunctionDumpManager.Dispose(CFunctionDumps[i]);
-      CFunctionDumps[i] := CFunctionDumps[Len-1];
-      dec(Len);
-    end else
-    begin
-      inc(i);
-    end;
-  end;
-
-  SetLength(CFunctionDumps, Len);  
-end;    *)
+ 
           (*
 // найти указатель на конечную калбек-функцию, име€ исходную CFunction
 // нужно при анализе луа-аргумента.

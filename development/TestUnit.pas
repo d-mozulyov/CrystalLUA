@@ -48,10 +48,12 @@ begin
 end;
 
 initialization
+  System.ReportMemoryLeaksOnShutdown := True;
   LuaLibraryPath := '..\dll\' + LuaLibraryPath;
   Lua := CreateLua;
 
 finalization
   Lua.Free;
+  System.IsConsole := False;
 
 end.

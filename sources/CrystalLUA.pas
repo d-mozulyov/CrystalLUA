@@ -171,6 +171,7 @@ type
     {$else}
       LuaString = WideString;
       PLuaString = PWideString;
+      {$define LUA_LENGTH_SHIFT}
     {$endif}
     LuaChar = WideChar;
     PLuaChar = PWideChar;
@@ -199,7 +200,7 @@ type
 type
   TLua = class;
   PLuaArg = ^TLuaArg;
-//  PLuaTable = ^TLuaTable;
+  PLuaTable = ^TLuaTable;
 //  PLuaModule = ^TLuaModule;
 
   // incorrect script use exception
@@ -217,7 +218,7 @@ type
   // internal base stucture for records, arrays, sets, etc (inside TLuaArg)
   __lua_difficult_type__ = object
   protected
-    {$hints off}Align: array[0..1] of Byte; {FLuaType + align} {$hints on}
+    FAlign: array[0..1] of Byte; {FLuaType + reserved}
     FIsRef: Boolean;
     FIsConst: Boolean;
   public
@@ -247,7 +248,7 @@ type
   __PLuaType = ^__TLuaType;
 
   // Record instance information: Pointer/IsRef/IsConst/RecordInfo
-  PLuaRecordInfo = Pointer;//^TLuaRecordInfo;
+  PLuaRecordInfo = ^TLuaRecordInfo;
   TLuaRecord = object(__lua_difficult_type__)
   public
     Info: PLuaRecordInfo;
@@ -255,7 +256,7 @@ type
   PLuaRecord = ^TLuaRecord;
 
   // Array instance information: Pointer/IsRef/IsConst/ArrayInfo
-  PLuaArrayInfo = Pointer;//^TLuaArrayInfo;
+  PLuaArrayInfo = ^TLuaArrayInfo;
   TLuaArray = object(__lua_difficult_type__)
   public
     Info: PLuaArrayInfo;
@@ -263,7 +264,7 @@ type
   PLuaArray = ^TLuaArray;
 
   // Set instance information: Pointer/IsRef/IsConst/SetInfo
-  PLuaSetInfo = Pointer;//^TLuaSetInfo;
+  PLuaSetInfo = ^TLuaSetInfo;
   TLuaSet = object(__lua_difficult_type__)
   public
     Info: PLuaSetInfo;
@@ -273,25 +274,35 @@ type
   // universal CrystalLUA argument
   TLuaArg = object
   private
-   // str_data: string;
-  //  FLuaType: TLuaArgType;
-    {$hints off} align: array[0..2] of byte;{ <-- дополнительные данные. нужны например для TLuaTable}{$hints on} 
-  //  Data: array[0..1] of integer;
- (*   procedure Assert(const NeededType: TLuaArgType; const CodeAddr: pointer);
+    FStringValue: LuaString;
+    F: packed record
+      LuaType: TLuaArgType;
+      AdvancedData: array[0..2] of Byte; { used in TLuaRecord/TLuaArray/TLuaTable etc }
+    case Integer of
+      0: (VDouble: Double);
+      1: (VBoolean: Boolean);
+      2: (VPointer: Pointer);
+      3: (VInteger: Integer);
+      4: (VNativeInt: NativeInt);
+      5: (VData: Pointer; VInfo: Pointer);
+    end;
 
-    function  GetLuaTypeName: string;    
-    function  GetEmpty: boolean;
-    procedure SetEmpty(const Value: boolean);
-    function  GetBoolean: boolean;
-    procedure SetBoolean(const Value: boolean);
-    function  GetInteger: integer;
-    procedure SetInteger(const Value: integer);
-    function  GetDouble: double;
-    procedure SetDouble(Value: double);
-    function  GetString: string;
-    procedure SetString(const Value: string);
-    function  GetPointer: pointer;
-    procedure SetPointer(const Value: pointer);
+    function TypeException(const AType: TLuaArgType): ELua;
+    function VariantException: ELua;
+    procedure CheckDifficultSetter(const Value: __lua_difficult_type__; const Name: PChar; const ReturnAddress: Pointer);
+    function  GetLuaTypeName: string;
+    function  GetEmpty: Boolean;
+    procedure SetEmpty(const Value: Boolean);
+    function  GetBoolean: Boolean;
+    procedure SetBoolean(const Value: Boolean);
+    function  GetInteger: Integer;
+    procedure SetInteger(const Value: Integer);
+    function  GetDouble: Double;
+    procedure SetDouble(Value: Double);
+    function  GetString: LuaString;
+    procedure SetString(const Value: LuaString);
+    function  GetPointer: Pointer;
+    procedure SetPointer(const Value: Pointer);
     function  GetVariant: Variant;
     procedure SetVariant(const Value: Variant);
     function  GetClass: TClass;
@@ -304,16 +315,16 @@ type
     procedure SetArray(const Value: TLuaArray);
     function  GetSet: TLuaSet;
     procedure SetSet(const Value: TLuaSet);
-    function  GetTable: PLuaTable;    *)
+    function  GetTable: PLuaTable;
   public
-  (*  property LuaType: TLuaArgType read FLuaType;
+    property LuaType: TLuaArgType read F.LuaType;
     property LuaTypeName: string read GetLuaTypeName;
-    property Empty: boolean read GetEmpty write SetEmpty;
-    property AsBoolean: boolean read GetBoolean write SetBoolean;
-    property AsInteger: integer read GetInteger write SetInteger;
-    property AsDouble: double read GetDouble write SetDouble;
-    property AsString: string read GetString write SetString;
-    property AsPointer: pointer read GetPointer write SetPointer;
+    property Empty: Boolean read GetEmpty write SetEmpty;
+    property AsBoolean: Boolean read GetBoolean write SetBoolean;
+    property AsInteger: Integer read GetInteger write SetInteger;
+    property AsDouble: Double read GetDouble write SetDouble;
+    property AsString: LuaString read GetString write SetString;
+    property AsPointer: Pointer read GetPointer write SetPointer;
     property AsVariant: Variant read GetVariant write SetVariant;
     property AsClass: TClass read GetClass write SetClass;
     property AsObject: TObject read GetObject write SetObject;
@@ -322,18 +333,18 @@ type
     property AsSet: TLuaSet read GetSet write SetSet;
     property AsTable: PLuaTable read GetTable;
 
-    function ForceBoolean: boolean;
-    function ForceInteger: integer;
-    function ForceDouble: double;
-    function ForceString: string;
-    function ForcePointer: pointer;
+    function ForceBoolean: Boolean;
+    function ForceInteger: NativeInt;
+    function ForceDouble: Double;
+    function ForceString: LuaString;
+    function ForcePointer: Pointer;
     function ForceVariant: Variant;
     function ForceClass: TClass;
     function ForceObject: TObject;
     function ForceRecord: TLuaRecord;
     function ForceArray: TLuaArray;
     function ForceSet: TLuaSet;
-    function ForceTable: PLuaTable; *)
+    function ForceTable: PLuaTable;
   end;
   TLuaArgs = array of TLuaArg;
 
@@ -372,17 +383,16 @@ type
     property ValueEx: TLuaArg read GetValueEx write SetValueEx;
   end;
   {$hints on}      *)
-                               (*
+
   // highlevel interface to read and modify Lua-tables
   TLuaTable = object
-  private
-    {$hints off}none: byte; {TLuaArgType = ltTable} {$hints on}
-    {$hints off}
-    {здесь 3 служебных байта} align: array[0..2] of byte;  
-    Lua: TLua;
-    Index_: integer;
-    function  GetLength: integer;
-    function  GetCount: integer;
+  protected
+    FNone: Byte; { TLuaArgType = ltTable }
+    FAdvancedData: array[0..2] of Byte;
+    FLua: TLua;
+    FIndex: Integer;
+    function  GetLength: Integer;
+(*    function  GetCount: integer;
 
     procedure ThrowValueType(const CodeAddr: pointer; const pop: boolean=false);
     function  GetValue(const AIndex: integer): Variant;
@@ -392,23 +402,23 @@ type
     function  GetKeyValue(const Key: string): Variant;
     procedure SetKeyValue(const Key: string; const NewValue: Variant);
     function  GetKeyValueEx(const Key: Variant): TLuaArg;
-    procedure SetKeyValueEx(const Key: Variant; const NewValue: TLuaArg);
+    procedure SetKeyValueEx(const Key: Variant; const NewValue: TLuaArg);  *)
   public
     // перебор элементов
-    function Pairs(var Pair: TLuaPair): boolean; overload;
-    function Pairs(var Pair: TLuaPair; const FromKey: Variant): boolean; overload;
+    (*function Pairs(var Pair: TLuaPair): boolean; overload;
+    function Pairs(var Pair: TLuaPair; const FromKey: Variant): boolean; overload;  *)
 
-    // длинна
-    property Length: integer read GetLength; // длинна (для массивов)
-    property Count: integer read GetCount; // общее количество элементов
+    // length
+    property Length: Integer read GetLength; // длинна (для массивов)
+  (*  property Count: integer read GetCount; // общее количество элементов
 
-    // значения
+    // values
     property Value[const Index: integer]: Variant read GetValue write SetValue;
     property KeyValue[const Key: string]: Variant read GetKeyValue write SetKeyValue;
     property ValueEx[const Index: integer]: TLuaArg read GetValueEx write SetValueEx;
-    property KeyValueEx[const Key: Variant]: TLuaArg read GetKeyValueEx write SetKeyValueEx;
+    property KeyValueEx[const Key: Variant]: TLuaArg read GetKeyValueEx write SetKeyValueEx; *)
   end;
-  {$hints on}       *)
+
                       (*
   // ссылка
   // создана для быстрого оперирования глобальными объектами, заточенными под Lua
@@ -439,48 +449,60 @@ type
   TLuaReferenceDynArray = array of TLuaReference;
   {$hints on}     *)
 
+  __lua_difficult_info__ = object
+  protected
+    FLua: TLua;
+    FTypeIndex: Integer;
+
+    function GetName: LuaString;
+  public
+
+    property Lua: TLua read FLua;
+    property Name: LuaString read GetName;
+  end;
+
   // operators
   TLuaOperator = (loNeg, loAdd, loSub, loMul, loDiv, loMod, loPow, loCompare);
   TLuaOperators = set of TLuaOperator;
-  TLuaOperatorCallback = procedure(var _Result, _X1, _X2; const Kind: TLuaOperator);
+  TLuaOperatorCallback = procedure(var AResult, ALeft, ARight; const Kind: TLuaOperator);
 
-         (*
   // all information (such as name, field, methods)
   // you should use it to operate records between native and script
   // todo Переместить выше ?
-  TLuaRecordInfo = object
+  TLuaRecordInfo = object(__lua_difficult_info__)
   private
-    FLua: TLua; // FType: __TLuaType;
+   (* FLua: TLua; // FType: __TLuaType;
     FClassIndex: integer;
     FTypeInfo: ptypeinfo;
-    FName: string;
-    FSize: integer;
-    FOperators: TLuaOperators;
+    FName: string;  *)
+    FSize: Integer;
+   (* FOperators: TLuaOperators;
     FOperatorCallback: TLuaOperatorCallback;
 
     function  GetFieldsCount: integer;
     procedure InternalRegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer; const CodeAddr: pointer);
     procedure SetOperators(const Value: TLuaOperators);
-    procedure SetOperatorCallback(const Value: TLuaOperatorCallback);
+    procedure SetOperatorCallback(const Value: TLuaOperatorCallback);  *)
   public
-    procedure RegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer); overload;
+   (* procedure RegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer); overload;
     procedure RegField(const FieldName: string; const FieldPointer: pointer; const tpinfo: pointer; const pRecord: pointer = nil); overload;
     procedure RegProc(const ProcName: string; const Proc: TLuaClassProc; const ArgsCount: integer=-1);
+    *)
 
-    property Name: string read FName;
-    property Size: integer read FSize;
-    property FieldsCount: integer read GetFieldsCount;
+   // property Name: string read FName;
+    property Size: Integer read FSize;
+  (*  property FieldsCount: integer read GetFieldsCount;
     property Operators: TLuaOperators read FOperators write SetOperators;
-    property OperatorCallback: TLuaOperatorCallback read FOperatorCallback write SetOperatorCallback;
-  end;    *)
-            (*
+    property OperatorCallback: TLuaOperatorCallback read FOperatorCallback write SetOperatorCallback;  *)
+  end;
+
   // information needed to use arrays between native and script side
   // информация о массиве
-  TLuaArrayInfo = object
+  TLuaArrayInfo = object(__lua_difficult_info__)
   private
     // FType: __TLuaType;
     // основные
-    FName: string;
+   (* FName: string;
     FClassIndex: integer;    
     FIsDynamic: boolean;
     ItemInfo: array[0..31] of byte; // TLuaPropertyInfo;
@@ -495,20 +517,20 @@ type
     // для финализации
     FTypeInfo: ptypeinfo; // конечный элемент финализации (или nil). для массивов c typeinfo - сам дин массив
     FItemsCount: integer; // количество элементов. для массивов c typeinfo - 1
-    FSize: integer; // размер такого массива целиком. для динамических - 4
+    FSize: integer; // размер такого массива целиком. для динамических - 4 *)
   public
-    property Name: string read FName;
+   (* property Name: string read FName;
     property IsDynamic: boolean read FIsDynamic;
     property Bounds: pinteger read FBounds;
-    property Dimention: integer read FDimention;
-  end;        *)
-                        (*
+    property Dimention: integer read FDimention;  *)
+  end;
+
   // information needed to use set between native and script side
   // todo Переместить выше ?
-  TLuaSetInfo = object
+  TLuaSetInfo = object(__lua_difficult_info__)
   private
     // FType: __TLuaType;
-    FName: string;
+  (*  FName: string;
     FClassIndex: integer;
     FTypeInfo: ptypeinfo;
     FSize: integer;
@@ -518,14 +540,14 @@ type
     FRealSize: integer; // это поле нужно только для того чтобы грамотно инвертировать 3х байтные (а sizeof = 4) множества
     FAndMasks: integer; // для коррекции при инфертировании (конечный байт) or (начальный байт shl 8)
 
-    //function  EnumName(const Value: integer): string;
-    function  Description(const X: pointer): string;
+    //function  EnumName(const Value: integer): string; *)
+    function Description(const X: Pointer): LuaString;
   public
-    property Name: string read FName;
+   (* property Name: string read FName;
     property Size: integer read FSize;
     property Low: integer read FLow;
-    property High: integer read FHigh;
-  end;        *)
+    property High: integer read FHigh;  *)
+  end;
 
 
   // внутренняя рутина для калбеков ------------------------------------------
@@ -777,8 +799,8 @@ type
 
   private
     // низкоуровневый блок
-   (* FHandle: pointer;
-    FPreprocess: boolean;
+    FHandle: Pointer;
+   (* FPreprocess: boolean;
     //FBufferArg: TLuaArg;
     FResultBuffer: TLuaResultBuffer;
  //   FReferences: TLuaReferenceDynArray; // список ссылок (LUA_REGISTRYINDEX)
@@ -1774,6 +1796,154 @@ begin
 end;
 
 
+{ Low level helpers }
+
+type
+  HugeByteArray = array[0..High(Integer) div SizeOf(Byte) - 1] of Byte;
+  HugeWordArray = array[0..High(Integer) div SizeOf(Word) - 1] of Word;
+  HugeCardinalArray = array[0..High(Integer) div SizeOf(Cardinal) - 1] of Cardinal;
+  HugeNativeUIntArray = array[0..High(Integer) div SizeOf(NativeUInt) - 1] of NativeUInt;
+
+  PMemoryItems = ^TMemoryItems;
+  TMemoryItems = packed record
+  case Integer of
+    0: (Bytes: HugeByteArray);
+    1: (Words: HugeWordArray);
+    2: (Cardinals: HugeCardinalArray);
+    3: (NativeUInts: HugeNativeUIntArray);
+    4: (A1: array[1..1] of Byte;
+        case Integer of
+          0: (Words1: HugeWordArray);
+          1: (Cardinals1: HugeCardinalArray);
+          2: (NativeUInts1: HugeNativeUIntArray);
+        );
+    5: (A2: array[1..2] of Byte;
+        case Integer of
+          0: (Cardinals2: HugeCardinalArray);
+          1: (NativeUInts2: HugeNativeUIntArray);
+        );
+    6: (A3: array[1..3] of Byte;
+        case Integer of
+          0: (Cardinals3: HugeCardinalArray);
+          1: (NativeUInts3: HugeNativeUIntArray);
+        );
+  {$ifdef LARGEINT}
+    7: (A4: array[1..4] of Byte; NativeUInts4: HugeNativeUIntArray);
+    8: (A5: array[1..5] of Byte; NativeUInts5: HugeNativeUIntArray);
+    9: (A6: array[1..6] of Byte; NativeUInts6: HugeNativeUIntArray);
+   10: (A7: array[1..7] of Byte; NativeUInts7: HugeNativeUIntArray);
+  {$endif}
+  end;
+
+{ Generated in CachedSerializer: https://github.com/d-mozulyov/CachedTexts#cachedserializer }
+{ 0: False, 1: True, -1: Failure }
+function CastStringAsBoolean(const AValue: __luaname; const ALength: Integer): Integer; overload;
+begin
+  Result := -1;
+
+  // byte ascii, ignore case
+  with PMemoryItems(AValue)^ do
+  case ALength of
+    0: Result := 0; // empty string
+    1: case (Bytes[0]) of // "0", "1"
+         $30: Result := 0; // "0"
+         $31: Result := 1; // "1"
+       end;
+    2: case (Words[0] or $2020) of // "no", "ok"
+         $6F6E: Result := 0; // "no"
+         $6B6F: Result := 1; // "ok"
+       end;
+    3: if (Words[0] + Bytes[2] shl 16 or $202020 = $736579) then Result := 1; // "yes"
+    4: if (Cardinals[0] or $20202020 = $65757274) then Result := 1; // "true"
+    5: if (Cardinals[0] or $20202020 = $736C6166) and (Bytes[4] or $20 = $65) then
+       Result := 0; // "false"
+    6: if (Cardinals[0] or $20202020 = $636E6163) and (Words[2] or $2020 = $6C65) then
+       Result := 0; // "cancel"
+  end;
+end;
+
+{ Generated in CachedSerializer: https://github.com/d-mozulyov/CachedTexts#cachedserializer }
+{ 0: False, 1: True, -1: Failure }
+function CastStringAsBoolean(const AValue: PWideChar; const ALength: Integer): Integer; overload;
+begin
+  Result := -1;
+
+  // utf16 ascii, ignore case
+  with PMemoryItems(AValue)^ do
+  case ALength of
+    0: Result := 0; // empty string
+    1: case (Words[0]) of // "0", "1"
+         $0030: Result := 0; // "0"
+         $0031: Result := 1; // "1"
+       end;
+    2: case (Cardinals[0] or $00200020) of // "no", "ok"
+         $006F006E: Result := 0; // "no"
+         $006B006F: Result := 1; // "ok"
+       end;
+    3: if (Cardinals[0] or $00200020 = $00650079) and (Words[2] or $0020 = $0073) then
+       Result := 1; // "yes"
+    4: if (Cardinals[0] or $00200020 = $00720074) and
+       (Cardinals[1] or $00200020 = $00650075) then Result := 1; // "true"
+    5: if (Cardinals[0] or $00200020 = $00610066) and
+       (Cardinals[1] or $00200020 = $0073006C) and (Words[4] or $0020 = $0065) then
+       Result := 0; // "false"
+    6: if (Cardinals[0] or $00200020 = $00610063) and
+       (Cardinals[1] or $00200020 = $0063006E) and
+       (Cardinals[2] or $00200020 = $006C0065) then Result := 0; // "cancel"
+  end;
+end;
+
+function NumberToInteger({$ifdef CPUX86}var{$else}const{$endif} VNumber: Double;
+  var VInteger: Integer): Boolean;
+const
+  DBLROUND_CONST{$ifdef CPUX86}: Double{$endif} = 6755399441055744.0;
+var
+  Temp: record
+  case Integer of
+    0: (VDouble: Double);
+    1: (VInteger: Integer);
+  end;
+begin
+  Temp.VDouble := VNumber + DBLROUND_CONST;
+  if (Temp.VInteger <> VNumber) then
+  begin
+    Result := False;
+    Exit;
+  end else
+  begin
+    VInteger := Temp.VInteger;
+    Result := True;
+  end;
+end;
+
+// 0: TDateTime, 1: TDate, 2: TTime
+function InspectDateTime({$ifdef CPUX86}var{$else}const{$endif} Value: TDateTime): Integer;
+const
+  DBLROUND_CONST{$ifdef CPUX86}: Double{$endif} = 6755399441055744.0;
+var
+  Temp: record
+  case Integer of
+    0: (VDouble: Double);
+    1: (VInteger: Integer);
+  end;
+begin
+  // check 2: TTime
+  {$ifdef CPUX86}
+  if (PPoint(@Value)^.Y >= 0) and (PInt64(@Value)^ < 4607182418800017408) then
+  {$else}
+  if (Value >= 0) and (Value < 1.0) then
+  {$endif}
+  begin
+    Result := 2;
+    Exit;
+  end;
+
+  // 0: TDateTime, 1: TDate
+  Temp.VDouble := Value + DBLROUND_CONST;
+  Result := Byte(Temp.VInteger = Value);
+end;
+
+
 { LuaCFunction routine }
 
 const
@@ -2284,7 +2454,7 @@ var
   Item: PLuaDictionaryItem;
   HashCode: Integer;
   Parent: PInteger;
-  Pow2, NewCapacity: NativeInt;
+  Pow2, NewHashesMask, NewCapacity: NativeInt;
   NewHashes: array of Integer;
 begin
   Pow2 := FHashesMask;
@@ -2298,6 +2468,7 @@ begin
       SetLength(NewHashes, Pow2);
       FillChar(Pointer(NewHashes)^, Pow2 * SizeOf(Integer), $ff);
 
+      NewHashesMask := (Pow2 - 1);
       Item := Pointer(FItems);
       for i := 0 to Count - 1 do
       begin
@@ -2308,13 +2479,14 @@ begin
         {$endif}
         Inc(HashCode, (HashCode shr 16) * -1660269137);
 
-        Parent := @NewHashes[NativeInt(HashCode) and FHashesMask];
+        Parent := @NewHashes[NativeInt(HashCode) and NewHashesMask];
         Item.Next := Parent^;
         Parent^ := i;
 
         Inc(Item);
       end;
 
+      FHashesMask := NewHashesMask;
       NewCapacity := (Pow2 shr 2) + (Pow2 shr 1);
       SwapPtr(Pointer(FHashes), Pointer(NewHashes));
     end;
@@ -2417,6 +2589,811 @@ begin
 end;
 
 
+{ TLuaArg }
+
+
+function LuaArgTypeToString(const Value: TLuaArgType; const Prefixes: Boolean): string;
+begin
+  Result := GetEnumName(TypeInfo(TLuaArgType), Ord(Value));
+  if (not Prefixes) and (Ord(Value) <= Ord(High(TLuaArgType))) then
+    Delete(Result, 1, 2);
+end;
+
+function TLuaArg.TypeException(const AType: TLuaArgType): ELua;
+begin
+  Result := ELua.CreateFmt('Argument can''t be getted as %s because current type is "%s"',
+    [LuaArgTypeToString(AType, True), LuaArgTypeToString(LuaType, False)]);
+end;
+
+function TLuaArg.VariantException: ELua;
+begin
+  Result := ELua.CreateFmt('Argument can''t be getted as Variant because current type is "%s"',
+    [LuaArgTypeToString(LuaType, False)]);
+end;
+
+procedure TLuaArg.CheckDifficultSetter(const Value: __lua_difficult_type__; const Name: PChar;
+  const ReturnAddress: Pointer);
+var
+  P: Pointer;
+  B: Byte;
+begin
+  P := Value.Data;
+  if (NativeUInt(P) <= High(Word)) then
+  raise ELua.CreateFmt('%s.Data field not defined ($%p)', [Name, P]) at ReturnAddress;
+
+  P := PLuaRecord(@Value).Info;
+  if (NativeUInt(P) <= High(Word)) then
+  raise ELua.CreateFmt('%s.Info field not defined ($%p)', [Name, P]) at ReturnAddress;
+
+  B := Byte(Value.FIsRef);
+  if (B > 1) then
+  raise ELua.CreateFmt('%s.IsRef field not defined (%d)', [Name, B]) at ReturnAddress;
+
+  B := Byte(Value.FIsConst);
+  if (B > 1) then
+  raise ELua.CreateFmt('%s.IsConst field not defined (%d)', [Name, B]) at ReturnAddress;
+end;
+
+function TLuaArg.GetLuaTypeName: string;
+begin
+  Result := GetEnumName(TypeInfo(TLuaArgType), Ord(F.LuaType));
+end;
+
+function TLuaArg.GetEmpty: Boolean;
+begin
+  GetEmpty := (F.LuaType = ltEmpty);
+end;
+
+procedure TLuaArg.SetEmpty(const Value: Boolean);
+begin
+  if (Value) then
+  begin
+    FStringValue := '';
+    PInteger(@F.LuaType)^ := 0;
+    F.VDouble := 0;
+  end;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetBoolean: Boolean;
+{$else}
+function TLuaArgGetBoolean(const Self: TLuaArg; const ReturnAddress: Pointer): Boolean;
+{$endif}
+begin
+  Result := Self.F.VBoolean;
+  if (Self.LuaType <> ltBoolean) then
+    raise Self.TypeException(ltBoolean) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetBoolean: Boolean;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetBoolean
+end;
+{$endif}
+
+procedure TLuaArg.SetBoolean(const Value: Boolean);
+begin
+  F.LuaType := ltBoolean;
+  F.VBoolean := Value;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetInteger: Integer;
+{$else}
+function TLuaArgGetInteger(const Self: TLuaArg; const ReturnAddress: Pointer): Integer;
+{$endif}
+begin
+  Result := Self.F.VInteger;
+  if (Self.LuaType <> ltInteger) then
+    raise Self.TypeException(ltInteger) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetInteger: Integer;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetInteger
+end;
+{$endif}
+
+procedure TLuaArg.SetInteger(const Value: Integer);
+begin
+  F.LuaType := ltInteger;
+  F.VInteger := Value;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetDouble: Double;
+{$else}
+function TLuaArgGetDouble(const Self: TLuaArg; const ReturnAddress: Pointer): Double;
+{$endif}
+begin
+  case Self.LuaType of
+   ltInteger: Result := Self.F.VInteger;
+    ltDouble: Result := Self.F.VDouble;
+  else
+    raise Self.TypeException(ltDouble) at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetDouble: Double;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetDouble
+end;
+{$endif}
+
+procedure TLuaArg.SetDouble(Value: Double);
+begin
+  if (NumberToInteger(Value, F.VInteger)) then
+  begin
+    F.LuaType := ltInteger;
+  end else
+  begin
+    F.LuaType := ltDouble;
+    F.VDouble := Value;
+  end;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetString: LuaString;
+{$else}
+procedure TLuaArgGetString(const Self: TLuaArg; var Result: LuaString; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Result := Self.FStringValue;
+  if (Self.LuaType <> ltString) then
+    raise Self.TypeException(ltString) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetString: LuaString;
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgGetString
+end;
+{$endif}
+
+procedure TLuaArg.SetString(const Value: LuaString);
+begin
+  F.LuaType := ltString;
+  FStringValue := Value;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetPointer: Pointer;
+{$else}
+function TLuaArgGetPointer(const Self: TLuaArg; const ReturnAddress: Pointer): Pointer;
+{$endif}
+begin
+  case Self.LuaType of
+      ltEmpty: Result := nil;
+    ltPointer: Result := Self.F.VPointer;
+  else
+    raise Self.TypeException(ltPointer) at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetPointer: Pointer;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetPointer
+end;
+{$endif}
+
+procedure TLuaArg.SetPointer(const Value: Pointer);
+begin
+  if (Value = nil) then
+  begin
+    F.LuaType := ltEmpty;
+  end else
+  begin
+    F.LuaType := ltPointer;
+    F.VPointer := Value;
+  end;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetVariant: Variant;
+{$else}
+procedure TLuaArgGetVariant(const Self: TLuaArg; var Result: Variant; const ReturnAddress: Pointer);
+{$endif}
+begin
+  if (Self.F.LuaType in [ltEmpty, ltBoolean, ltInteger, ltDouble, ltString]) then
+  begin
+    Result := Self.ForceVariant;
+  end else
+  begin
+    raise Self.VariantException at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetVariant: Variant;
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgGetVariant
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+procedure TLuaArg.SetVariant(const Value: Variant);
+{$else}
+procedure TLuaArgSetVariant(const Self: TLuaArg; const Value: Variant; const ReturnAddress: Pointer);
+{$endif}
+
+  procedure DateTimeValue(const Self: PLuaArg; Value: TDateTime); far;
+  begin
+    case InspectDateTime(Value) of
+      0: Self.FStringValue := LuaString(DateTimeToStr(Value));
+      1: Self.FStringValue := LuaString(DateToStr(Value));
+      2: Self.FStringValue := LuaString(TimeToStr(Value));
+    else
+      Self.FStringValue := '';
+    end;
+  end;
+
+  {$ifdef UNICODE}
+  procedure UnicodeValue(const Self: PLuaArg; const Value: UnicodeString); far;
+  begin
+    Self.FStringValue := LuaString(Value);
+  end;
+  {$endif}
+
+  {$ifNdef NEXTGEN}
+  procedure AnsiValue(const Self: PLuaArg; const Value: AnsiString); far;
+  begin
+    Self.FStringValue := LuaString(Value);
+  end;
+
+  procedure WideValue(const Self: PLuaArg; const Value: WideString); far;
+  begin
+    Self.FStringValue := LuaString(Value);
+  end;
+  {$endif}
+begin
+  with TVarData(Value) do
+  case (VType) of
+    varEmpty, varNull: Self.F.LuaType := ltEmpty;
+    varSmallint: Self.SetInteger(VSmallInt);
+    varInteger : Self.SetInteger(VInteger);
+    varSingle  : Self.SetDouble(VSingle);
+    varDouble  : Self.SetDouble(VDouble);
+    varCurrency: Self.SetDouble(VCurrency);
+    varDate    : DateTimeValue(@Self, VDate);
+    varBoolean : Self.SetBoolean(VBoolean);
+    varShortInt: Self.SetInteger(VShortInt);
+    varByte    : Self.SetInteger(VByte);
+    varWord    : Self.SetInteger(VWord);
+    varLongWord: Self.SetInteger(VLongWord);
+    varInt64   : Self.SetDouble(VInt64);
+    {$ifdef UNICODE}
+    varUString : UnicodeValue(@Self, UnicodeString(VUString));
+    {$endif}
+    {$ifNdef NEXTGEN}
+    varString  : AnsiValue(@Self, AnsiString(VString));
+    varOleStr  : WideValue(@Self, WideString(VOleStr));
+    {$endif}
+  else
+    raise ELua.CreateFmt('Unknown variant type %d in "TLuaArg.SetVariant" procedure', [VType])
+      at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+procedure TLuaArg.SetVariant(const Value: Variant);
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgSetVariant
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetClass: TClass;
+{$else}
+function TLuaArgGetClass(const Self: TLuaArg; const ReturnAddress: Pointer): TClass;
+{$endif}
+begin
+  case Self.LuaType of
+    ltEmpty: Result := nil;
+    ltClass: Result := TClass(Self.F.VPointer);
+  else
+    raise Self.TypeException(ltClass) at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetClass: Class;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetClass
+end;
+{$endif}
+
+procedure TLuaArg.SetClass(const Value: TClass);
+begin
+  if (Value = nil) then
+  begin
+    F.LuaType := ltEmpty;
+  end else
+  begin
+    F.LuaType := ltClass;
+    F.VPointer := Pointer(Value);
+  end;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetObject: TObject;
+{$else}
+function TLuaArgGetObject(const Self: TLuaArg; const ReturnAddress: Pointer): TObject;
+{$endif}
+begin
+  case Self.LuaType of
+    ltEmpty: Result := nil;
+    ltObject: Result := TObject(Self.F.VPointer);
+  else
+    raise Self.TypeException(ltObject) at ReturnAddress;
+  end;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetObject: Object;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetObject
+end;
+{$endif}
+
+procedure TLuaArg.SetObject(const Value: TObject);
+begin
+  if (Value = nil) then
+  begin
+    F.LuaType := ltEmpty;
+  end else
+  begin
+    F.LuaType := ltObject;
+    F.VPointer := Pointer(Value);
+  end;
+end;
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetRecord: TLuaRecord;
+{$else}
+procedure TLuaArgGetRecord(const Self: TLuaArg; var Result: TLuaRecord; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Result := PLuaRecord(@Self.F)^;
+  if (Self.LuaType <> ltRecord) then
+    raise Self.TypeException(ltRecord) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetRecord: TLuaRecord;
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgGetRecord
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+procedure TLuaArg.SetRecord(const Value: TLuaRecord);
+{$else}
+procedure TLuaArgSetRecord(const Self: TLuaArg; const Value: TLuaRecord; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Self.CheckDifficultSetter(Value, 'LuaRecord', ReturnAddress);
+  PLuaRecord(@Self.F)^ := Value;
+  Self.F.LuaType := ltRecord;
+end;
+
+{$ifNdef RETURNADDRESS}
+procedure TLuaArg.SetRecord(const Value: TLuaRecord);
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgSetRecord
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetArray: TLuaArray;
+{$else}
+procedure TLuaArgGetArray(const Self: TLuaArg; var Result: TLuaArray; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Result := PLuaArray(@Self.F)^;
+  if (Self.LuaType <> ltArray) then
+    raise Self.TypeException(ltArray) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetArray: TLuaArray;
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgGetArray
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+procedure TLuaArg.SetArray(const Value: TLuaArray);
+{$else}
+procedure TLuaArgSetArray(const Self: TLuaArg; const Value: TLuaArray; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Self.CheckDifficultSetter(Value, 'LuaArray', ReturnAddress);
+  PLuaArray(@Self.F)^ := Value;
+  Self.F.LuaType := ltArray;
+end;
+
+{$ifNdef RETURNADDRESS}
+procedure TLuaArg.SetArray(const Value: TLuaArray);
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgSetArray
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetSet: TLuaSet;
+{$else}
+procedure TLuaArgGetSet(const Self: TLuaArg; var Result: TLuaSet; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Result := PLuaSet(@Self.F)^;
+  if (Self.LuaType <> ltSet) then
+    raise Self.TypeException(ltSet) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetSet: TLuaSet;
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgGetSet
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+procedure TLuaArg.SetSet(const Value: TLuaSet);
+{$else}
+procedure TLuaArgSetSet(const Self: TLuaArg; const Value: TLuaSet; const ReturnAddress: Pointer);
+{$endif}
+begin
+  Self.CheckDifficultSetter(Value, 'LuaSet', ReturnAddress);
+  PLuaSet(@Self.F)^ := Value;
+  Self.F.LuaType := ltSet;
+end;
+
+{$ifNdef RETURNADDRESS}
+procedure TLuaArg.SetSet(const Value: TLuaSet);
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLuaArgSetSet
+end;
+{$endif}
+
+{$ifdef RETURNADDRESS}
+function TLuaArg.GetTable: PLuaTable;
+{$else}
+function TLuaArgGetTable(const Self: TLuaArg; const ReturnAddress: Pointer): PLuaTable;
+{$endif}
+begin
+  Result := Self.F.VPointer;
+  if (Self.LuaType <> ltTable) then
+    raise Self.TypeException(ltTable) at ReturnAddress;
+end;
+
+{$ifNdef RETURNADDRESS}
+function TLuaArg.GetTable: PLuaTable;
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp TLuaArgGetTable
+end;
+{$endif}
+
+function TLuaArg.ForceBoolean: Boolean;
+begin
+  case LuaType of
+      ltEmpty: Result := False;
+    ltBoolean: Result := F.VBoolean;
+    ltInteger: Result := (F.VInteger > 0);
+     ltDouble: Result := (F.VDouble > 0);
+     ltString:
+     begin
+       Result := (Pointer(FStringValue) <> nil) and
+         (CastStringAsBoolean({$ifdef LUA_ANSI}__luaname{$else}PWideChar{$endif}(Pointer(FStringValue)),
+          PInteger(NativeInt(FStringValue) - SizeOf(Integer))^ {$ifdef LUA_LENGTH_SHIFT}shr 1{$endif}) > 0);
+     end;
+  else
+    Result := (F.VPointer <> nil);
+  end;
+end;
+
+function TLuaArg.ForceInteger: NativeInt;
+
+  function StringDefault(const Value: LuaString): NativeInt; far;
+  begin
+    Result := {$ifdef LARGEINT}StrToInt64Def{$else}StrToIntDef{$endif}(string(Value), 0);
+  end;
+
+begin
+  case LuaType of
+      ltEmpty: Result := 0;
+     ltDouble: Result := Trunc(F.VDouble);
+     ltObject: Result := TObject(F.VPointer).InstanceSize;
+     ltRecord: Result := PLuaRecord(@F).Info.Size;
+      ltTable: Result := PLuaTable(@F).Length;
+     ltString: Result := StringDefault(FStringValue);
+  else
+    Result := NativeInt(F.VPointer);
+  end;
+end;
+
+function TLuaArg.ForceDouble: Double;
+
+  function StringDefault(const Value: LuaString): Double; far;
+  begin
+    Result := StrToFloatDef(string(Value), 0);
+  end;
+
+begin
+  case LuaType of
+      ltEmpty: Result := 0;
+    ltBoolean:
+         begin
+           PInteger(@F.VInfo)^ := Byte(F.VBoolean);
+           Result := PInteger(@F.VInfo)^;
+         end;
+    ltInteger: Result := F.VInteger;
+     ltDouble: Result := F.VDouble;
+     ltString: Result := StringDefault(FStringValue);
+  else
+    Result := 0;
+  end;
+end;
+
+function TLuaArg.ForceString: LuaString;
+const
+  BOOLEANS: array[Boolean] of LuaString = ('False', 'True');
+
+  function IntegerValue(const Value: Integer): LuaString; far;
+  begin
+    Result := LuaString(IntToStr(Value));
+  end;
+
+  function DoubleValue(const Value: Double): LuaString; far;
+  begin
+    Result := LuaString(FloatToStr(Value));
+  end;
+
+  function PointerValue(const Value: Pointer): LuaString; far;
+  begin
+    Result := LuaString(IntToHex(NativeInt(Value), {$ifdef SMALLINT}8{$else .LARGEINT}16{$endif}));
+  end;
+
+  function ClassValue(const Value: TClass): LuaString; far;
+  begin
+    Result := LuaString(Value.ClassName);
+  end;
+
+  function ObjectValue(const Value: TObject): LuaString; far;
+  begin
+    {$ifNdef LUA_NOCLASSES}
+    if (Value is TComponent) then Result := LuaString(TComponent(Value).Name)
+    else
+    {$endif}
+    Result := LuaString(Value.ClassName);
+  end;
+
+begin
+  case LuaType of
+    ltBoolean: Result := BOOLEANS[F.VBoolean];
+    ltInteger: Result := IntegerValue(F.VInteger);
+     ltDouble: Result := DoubleValue(F.VDouble);
+     ltString: Result := FStringValue;
+    ltPointer: Result := PointerValue(F.VPointer);
+      ltClass: Result := ClassValue(TClass(F.VPointer));
+     ltObject: Result := ObjectValue(TObject(F.VPointer));
+     ltRecord,
+      ltArray: Result := PLuaRecordInfo(@F.VInfo).Name;
+        ltSet: with PLuaSet(@F)^ do Result := Info.Description(Data);
+      ltTable: Result := 'LuaTable';
+  else
+    {ltEmpty:}
+    Result := 'nil';
+  end;
+end;
+
+function TLuaArg.ForcePointer: pointer;
+begin
+  case LuaType of
+    ltPointer, ltClass, ltObject, ltRecord, ltArray, ltSet: Result := F.VPointer;
+    ltString: Result := Pointer(FStringValue);
+     ltTable: Result := PLuaTable(@F);
+  else
+    Result := nil;
+  end;
+end;
+
+function TLuaArg.ForceVariant: Variant;
+const
+  varDeepData = $BFE8;
+var
+  VType: Integer;
+  VarData: TVarData absolute Result;
+begin
+  VType := VarData.VType;
+  if (VType and varDeepData <> 0) then
+  case VType of
+    varBoolean, varUnknown+1..varUInt64: ;
+  else
+    System.VarClear(Result);
+  end;
+
+  case (LuaType) of
+    ltBoolean: begin
+                 VarData.VType := varBoolean;
+                 VarData.VBoolean := F.VBoolean;
+               end;
+    ltInteger: begin
+                 VarData.VType := varInteger;
+                 VarData.VInteger := F.VInteger;
+               end;
+     ltDouble: begin
+                 VarData.VType := varDouble;
+                 VarData.VDouble := F.VDouble;
+               end;
+     ltString: begin
+                {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+                  {$ifdef UNICODE}
+                    VarData.VType := varUString;
+                   {$else}
+                    VarData.VType := varOleStr;
+                  {$endif}
+                {$else}
+                  VarData.VType := varString;
+                {$ifend}
+                 VarData.VPointer := nil;
+
+                 if (Pointer(FStringValue) <> nil) then
+                 begin
+                  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+                    {$ifdef UNICODE}
+                      UnicodeString(VarData.VUString) := FStringValue;
+                     {$else}
+                      WideString(VarData.VOleStr) := FStringValue;
+                    {$endif}
+                  {$else}
+                    AnsiString(VarData.VString) := FStringValue;
+                  {$ifend}
+                 end;
+               end;
+   else
+     {ltEmpty и др:}
+     VarData.VType := varEmpty;
+  end;
+end;
+
+function TLuaArg.ForceClass: TClass;
+begin
+  case LuaType of
+    ltClass: Result := TClass(F.VPointer);
+   ltObject: Result := TClass(F.VPointer^);
+  else
+    Result := nil;
+  end;
+end;
+
+function TLuaArg.ForceObject: TObject;
+begin
+  case LuaType of
+    ltObject: Result := TObject(F.VPointer);
+  else
+    Result := nil;
+  end;
+end;
+
+function TLuaArg.ForceRecord: TLuaRecord;
+begin
+  case LuaType of
+    ltRecord: Result := PLuaRecord(@F)^;
+  else
+    FillChar(Result, SizeOf(Result), #0);
+  end;
+end;
+
+function TLuaArg.ForceArray: TLuaArray;
+begin
+  case LuaType of
+    ltArray: Result := PLuaArray(@F)^;
+  else
+    FillChar(Result, SizeOf(Result), #0);
+  end;
+end;
+
+function TLuaArg.ForceSet: TLuaSet;
+begin
+  case LuaType of
+    ltSet: Result := PLuaSet(@F)^;
+  else
+    FillChar(Result, SizeOf(Result), #0);
+  end;
+end;
+
+function TLuaArg.ForceTable: PLuaTable;
+begin
+  case LuaType of
+    ltTable: Result := PLuaTable(@F);
+  else
+    Result := nil;
+  end;
+end;
 
                (*
 function IsMemoryZeroed(const Memory: pointer; const Size: integer): boolean;
@@ -2791,54 +3768,6 @@ begin
   Result.FIsConst := IsConst;
 end;     *)
 
-{function NumberToInteger(var Number: double; var IntValue: integer): boolean;
-begin
-  Result := (frac(Number) = 0) and (abs(Number) <= MAXINT);
-  if (Result) then IntValue := trunc(Number);
-end;}
-                      (*
-function NumberToInteger(var Number: double; var IntValue: integer): boolean; overload;
-asm
-  sub esp, 16 {4, Int64, single}
-  mov ecx, edx {результат}
-  fld qword ptr [eax]
-  fld st(0)
-
-  // st(0) -> Int64
-  FNSTCW word ptr[esp]
-  FNSTCW word ptr[esp+2]
-  OR word ptr[esp+2], $0F00  // trunc toward zero, full precision
-  FLDCW word ptr[esp+2]
-  FISTP qword ptr [esp+4]
-  FLDCW word ptr[esp]
-
-  // Frac
-  fild qword ptr [esp+4]
-  fsubp st(1), st(0)
-  fstp dword ptr [esp+12]
-
-  // Frac 0
-  cmp [esp+12], 0
-  jne @fail
-
-  // Int64 -> integer
-  mov eax, [esp+4]
-  mov edx, [esp+8]
-  sar eax, $1f
-  cmp eax, edx
-  jnz @fail
-
-  mov edx, [esp+4]
-  add esp, 16
-  mov [ecx], edx
-  mov eax, 1
-  ret
-
-@fail:
-  xor eax, eax
-  add esp, 16
-  mov [ecx], eax
-end;     *)
                (*
 function NumberToInteger(var Number; const Handle: pointer; const Index: integer): boolean; overload;
 asm
@@ -3446,622 +4375,8 @@ asm
 end;      *)
 
 
-                (*
 
-{ TLuaArg }
 
-procedure TLuaArg.Assert(const NeededType: TLuaArgType; const CodeAddr: pointer);
-
-  function TypeToString(T: TLuaArgType; const DelPrefics:boolean = false): string;
-  begin
-    Result := EnumName(typeinfo(TLuaArgType), byte(T));
-    if (DelPrefics) then Delete(Result, 1, 2);
-  end;
-begin
-  if (LuaType <> NeededType) then
-  ELua.Assert('Argument can''t be getted as %s because current type is "%s"',
-             [TypeToString(NeededType), TypeToString(LuaType, true)], CodeAddr);
-end;
-
-function TLuaArg.GetLuaTypeName: string;
-begin
-  Result := EnumName(typeinfo(TLuaArgType), byte(FLuaType));
-end;
-
-function TLuaArg.GetEmpty: boolean;
-begin
-  GetEmpty := (FLuaType = ltEmpty);
-end;
-
-procedure TLuaArg.SetEmpty(const Value: boolean);
-begin
-  if (Value) then
-  begin
-    str_data := '';
-    pinteger(@FLuaType)^ := 0;
-    Data[0] := 0;
-    Data[1] := 0;
-  end;
-end;
-
-function __TLuaArgGetBoolean(const Self: TLuaArg; const ReturnAddr: pointer): boolean;
-begin
-  if (Self.LuaType <> ltBoolean) then Self.Assert(ltBoolean, ReturnAddr);
-  __TLuaArgGetBoolean := (Self.Data[0] <> 0);
-end;
-
-function TLuaArg.GetBoolean(): boolean;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetBoolean
-end;
-
-procedure TLuaArg.SetBoolean(const Value: boolean);
-begin
-  FLuaType := ltBoolean;
-  Data[0] := ord(Value);
-end;
-
-function __TLuaArgGetInteger(const Self: TLuaArg; const ReturnAddr: pointer): integer;
-begin
-  if (Self.LuaType <> ltInteger) then Self.Assert(ltInteger, ReturnAddr);
-  __TLuaArgGetInteger := Self.Data[0];
-end;
-
-function TLuaArg.GetInteger(): integer;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetInteger
-end;
-
-procedure TLuaArg.SetInteger(const Value: integer);
-begin
-  FLuaType := ltInteger;
-  Data[0] := Value;
-end;
-
-function __TLuaArgGetDouble(const Self: TLuaArg; const ReturnAddr: pointer): double;
-begin
-  if (Self.LuaType = ltInteger) then __TLuaArgGetDouble := Self.Data[0]
-  else
-  begin
-    if (Self.LuaType <> ltDouble) then Self.Assert(ltDouble, ReturnAddr);
-    __TLuaArgGetDouble := pdouble(@Self.Data)^;
-  end;
-end;
-
-function TLuaArg.GetDouble(): double;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetDouble
-end;
-
-procedure TLuaArg.SetDouble(Value: double);
-begin
-  if (NumberToInteger(Value, Data[0])) then
-  begin
-    FLuaType := ltInteger;
-  end else
-  begin
-    FLuaType := ltDouble;
-    pdouble(@Data)^ := Value;
-  end;
-end;
-
-procedure __TLuaArgGetString(const Self: TLuaArg; var Result: string; const ReturnAddr: pointer);
-begin
-  if (Self.LuaType <> ltString) then Self.Assert(ltString, ReturnAddr);
-  Result := Self.str_data;
-end;
-
-function TLuaArg.GetString(): string;
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgGetString
-end;
-
-procedure TLuaArg.SetString(const Value: string);
-begin
-  str_data := Value;
-  FLuaType := ltString;
-end;
-
-function __TLuaArgGetPointer(const Self: TLuaArg; const ReturnAddr: pointer): pointer;
-begin
-  if (Self.LuaType = ltEmpty) then __TLuaArgGetPointer := nil
-  else
-  begin
-    if (Self.LuaType <> ltPointer) then Self.Assert(ltPointer, ReturnAddr);
-    __TLuaArgGetPointer := pointer(Self.Data[0]);
-  end;
-end;
-
-function TLuaArg.GetPointer(): pointer;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetPointer
-end;
-
-procedure TLuaArg.SetPointer(const Value: pointer);
-begin
-  pointer(Data[0]) := Value;
-
-  if (Value <> nil) then FLuaType := ltPointer
-  else FLuaType := ltEmpty;
-end;
-
-procedure __TLuaArgGetVariant(var Self: TLuaArg; var Result: Variant; const ReturnAddr: pointer);
-begin
-  if (Self.FLuaType in [ltEmpty, ltBoolean, ltInteger, ltDouble, ltString]) then Result := Self.ForceVariant
-  else
-  begin
-    Self.str_data := EnumName(typeinfo(TLuaArgType), byte(Self.FLuaType));
-    ELua.Assert('Argument can''t be getted as Variant because current type is "%s"', [Self.str_data], ReturnAddr);
-  end;
-end;
-
-function TLuaArg.GetVariant(): Variant;
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgGetVariant
-end;      *)
-            (*
-// 0: TDateTime, 1: TDate, 2: TTime
-function InspectDateTime(const Value: PDateTime): integer;
-var
-  TR: integer;
-  FR: integer;
-asm
-  fld qword ptr [eax]
-  fld st(0)
-
-  sub esp, 4
-  FNSTCW word ptr[esp]
-  FNSTCW word ptr[esp+2]
-  OR word ptr[esp+2], $0F00  // trunc toward zero, full precision
-  FLDCW word ptr[esp+2]
-  FISTP TR
-  FLDCW word ptr[esp]
-  add esp, 4
-  mov edx, TR
-
-  fisub TR
-  fstp FR
-  mov ecx, FR
-
-  // результат
-  xor  eax, eax
-  test edx, edx
-  jnz @1
-  add eax, 2
-  @1:
-  test ecx, ecx
-  jnz @2
-  inc eax
-  @2:
-  cmp eax, 3
-  jne @3
-  xor eax, eax
-  @3:
-end;         *)
-               (*
-procedure __TLuaArgSetVariant(var Self: TLuaArg; const Value: Variant; const ReturnAddr: pointer);
-type
-  TDateProc = procedure(const DateTime: TDateTime; var Ret: string);
-
-begin
-  with TVarData(Value) do
-  case (VType) of
-    varEmpty, varNull: Self.FLuaType := ltEmpty;
-    varSmallint: Self.SetInteger(VSmallInt);
-    varInteger : Self.SetInteger(VInteger);
-    varSingle  : Self.SetDouble(VSingle);
-    varDouble  : Self.SetDouble(VDouble);
-    varCurrency: Self.SetDouble(VCurrency);
-    varDate    : begin
-                   // SetString(DateTimeToStr(VDate));
-                   Self.FLuaType := ltString;
-                   if (Self.str_data <> '') then Self.str_data := '';
-                   case InspectDateTime(@VDate) of
-                     0: TDateProc(@DateTimeToStr)(VDate, Self.str_data);
-                     1: TDateProc(@DateToStr)(VDate, Self.str_data);
-                     2: TDateProc(@TimeToStr)(VDate, Self.str_data);
-                   end;
-                 end;
-    varOleStr  : begin
-                   // SetString(ansistring(VOleStr));
-                   Self.FLuaType := ltString;
-                   Self.str_data := VOleStr;
-                 end;
-    varBoolean : Self.SetBoolean(VBoolean);
-    varShortInt: Self.SetInteger(VShortInt);
-    varByte    : Self.SetInteger(VByte);
-    varWord    : Self.SetInteger(VWord);
-    varLongWord: Self.SetInteger(VLongWord);
-    varInt64   : Self.SetDouble(VInt64);
-    varString  : Self.SetString(string(VString));
-  else
-    ELua.Assert('Unknown variant type %d in "TLuaArg.SetVariant" procedure', [VType], ReturnAddr);
-  end;
-end;
-
-procedure TLuaArg.SetVariant(const Value: Variant);
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgSetVariant
-end;
-
-function __TLuaArgGetClass(const Self: TLuaArg; const ReturnAddr: pointer): TClass;
-begin
-  if (Self.LuaType = ltEmpty) then __TLuaArgGetClass := nil
-  else
-  begin
-    if (Self.LuaType <> ltClass) then Self.Assert(ltClass, ReturnAddr);
-    __TLuaArgGetClass := TClass(Self.Data[0]);
-  end;
-end;
-
-function TLuaArg.GetClass(): TClass;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetClass
-end;
-
-
-procedure TLuaArg.SetClass(const Value: TClass);
-begin
-  TClass(Data[0]) := Value;
-
-  if (Value <> nil) then FLuaType := ltClass
-  else FLuaType := ltEmpty;
-end;
-
-function __TLuaArgGetObject(const Self: TLuaArg; const ReturnAddr: pointer): TObject;
-begin
-  if (Self.LuaType = ltEmpty) then __TLuaArgGetObject := nil
-  else begin
-    if (Self.LuaType <> ltObject) then Self.Assert(ltObject, ReturnAddr);
-    __TLuaArgGetObject := TObject(Self.Data[0]);
-  end;
-end;
-
-function TLuaArg.GetObject(): TObject;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetObject
-end;
-
-
-procedure TLuaArg.SetObject(const Value: TObject);
-begin
-  TObject(Data[0]) := Value;
-
-  if (Value <> nil) then FLuaType := ltObject
-  else FLuaType := ltEmpty;
-end;
-
-procedure __TLuaArgGetRecord(const Self: TLuaArg; var Result: TLuaRecord; const ReturnAddr: pointer);
-begin
-  if (Self.LuaType <> ltRecord) then Self.Assert(ltRecord, ReturnAddr);
-  Result := PLuaRecord(@Self.FLuaType)^;
-end;
-
-function TLuaArg.GetRecord(): TLuaRecord;
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgGetRecord
-end;
-          *)
-            (*
-procedure __TLuaArgSetRecord(var Self: TLuaArg; const Value: TLuaRecord; const ReturnAddr: pointer);
-begin
-  if (Value.Data = nil) then
-  ELua.Assert('LuaRecord.Data = nil. LuaRecord should point to a record', ReturnAddr);
-
-  if (Value.Info = nil) then
-  ELua.Assert('LuaRecord.Info is not defined', ReturnAddr);
-
-  if (byte(Value.FIsRef) > 1) then
-  ELua.Assert('LuaRecord.IsRef is not defined', ReturnAddr);
-
-  PLuaRecord(@Self.FLuaType)^ := Value;
-  Self.FLuaType := ltRecord;
-end;
-
-procedure TLuaArg.SetRecord(const Value: TLuaRecord);
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgSetRecord
-end;
-
-procedure __TLuaArgGetArray(const Self: TLuaArg; var Result: TLuaArray; const ReturnAddr: pointer);
-begin
-  if (Self.LuaType <> ltArray) then Self.Assert(ltArray, ReturnAddr);
-  Result := PLuaArray(@Self.FLuaType)^;
-end;
-
-function  TLuaArg.GetArray: TLuaArray;
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgGetArray
-end;
-
-procedure __TLuaArgSetArray(var Self: TLuaArg; const Value: TLuaArray; const ReturnAddr: pointer);
-begin
-  if (Value.Data = nil) then
-  ELua.Assert('LuaArray.Data = nil. LuaArray should point to an array', ReturnAddr);
-
-  if (Value.Info = nil) then
-  ELua.Assert('LuaArray.Info is not defined', ReturnAddr);
-
-  if (byte(Value.FIsRef) > 1) then
-  ELua.Assert('LuaArray.IsRef is not defined', ReturnAddr);
-
-  PLuaArray(@Self.FLuaType)^ := Value;
-  Self.FLuaType := ltArray;
-end;
-
-procedure TLuaArg.SetArray(const Value: TLuaArray);
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgSetArray
-end;
-
-procedure __TLuaArgGetSet(const Self: TLuaArg; var Result: TLuaSet; const ReturnAddr: pointer);
-begin
-  if (Self.LuaType <> ltSet) then Self.Assert(ltSet, ReturnAddr);
-  Result := PLuaSet(@Self.FLuaType)^;
-end;
-
-function  TLuaArg.GetSet: TLuaSet;
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgGetSet
-end;
-
-procedure __TLuaArgSetSet(var Self: TLuaArg; const Value: TLuaSet; const ReturnAddr: pointer);
-begin
-  if (Value.Data = nil) then
-  ELua.Assert('LuaSet.Data = nil. LuaSet should point to an array', ReturnAddr);
-
-  if (Value.Info = nil) then
-  ELua.Assert('LuaSet.Info is not defined', ReturnAddr);
-
-  if (byte(Value.FIsRef) > 1) then
-  ELua.Assert('LuaSet.IsRef is not defined', ReturnAddr);
-
-  PLuaSet(@Self.FLuaType)^ := Value;
-  Self.FLuaType := ltSet;
-end;
-
-procedure TLuaArg.SetSet(const Value: TLuaSet);
-asm
-  mov ecx, [esp]
-  jmp __TLuaArgSetSet
-end;
-
-function __TLuaArgGetTable(const Self: TLuaArg; const ReturnAddr: pointer): PLuaTable;
-begin
-  if (Self.LuaType <> ltTable) then Self.Assert(ltTable, ReturnAddr);
-  __TLuaArgGetTable := PLuaTable(@Self.FLuaType);
-end;
-
-function TLuaArg.GetTable(): PLuaTable;
-asm
-  mov edx, [esp]
-  jmp __TLuaArgGetTable
-end;       *)
-                                          
-            (*
-// 0 - false
-// 1 - true
-// <0 - fail
-function __cast_string_as_boolean(const S: string): integer;
-// generated by "Static Serializer"
-type
-  __TAnsiPointerData = packed record
-  case integer of
-    0: (chars: array[0..high(integer)-1] of ansichar);
-    1: (words: array[0..high(integer)div 2-1] of word);
-    2: (dwords: array[0..high(integer)div 4-1] of dword);
-  end;
-begin
-  Result := low(integer); {fail = not defined}
-
-  { not case sensitive, ansi }
-  with __TAnsiPointerData(pointer(S)^) do
-  case (Length(S)) of
-   0: Result := 0; // empty string
-   1: case (chars[0]) of
-        '0': Result := 0; // "0"
-        '1': Result := 1; // "1"
-      end;
-   2: case (words[0]) of
-        $6F6E,$6F4E,$4F6E,$4F4E: Result := 0; // "no"
-        $6B6F,$6B4F,$4B6F,$4B4F: Result := 1; // "ok"
-      end;
-   3: if (chars[0]in['y','Y'])and(chars[1]in['e','E'])and(chars[2]in['s','S']) then Result := 1; // "yes"
-   4: case (words[0]) of
-        $6F6E,$6F4E,$4F6E,$4F4E: if (chars[2]in['n','N'])and(chars[3]in['e','E']) then Result := 0; // "none"
-        $7274,$7254,$5274,$5254: if (chars[2]in['u','U'])and(chars[3]in['e','E']) then Result := 1; // "true"
-      end;
-   5: if ((dwords[0]=$736C6166)or((chars[0]in['f','F'])and(chars[1]in['a','A'])and
-          (chars[2]in['l','L'])and(chars[3]in['s','S'])))
-      and(chars[4]in['e','E']) then Result := 0; // "false"
-
-   6: if ((dwords[0]=$636E6163)or((chars[0]in['c','C'])and(chars[1]in['a','A'])and
-          (chars[2]in['n','N'])and(chars[3]in['c','C'])))
-      and(chars[4]in['e','E'])and(chars[5]in['l','L']) then Result := 0; // "cancel"
-  end;
-end;      *)
-
-            (*
-function TLuaArg.ForceBoolean: boolean;
-begin
-  case LuaType of
-      ltEmpty: ForceBoolean := false;
-    ltBoolean: ForceBoolean := (Data[0] <> 0);
-    ltInteger: ForceBoolean := (Data[0] > 0);
-     ltDouble: ForceBoolean := (pdouble(@Data)^ > 0);
-     ltString: ForceBoolean := (__cast_string_as_boolean(str_data) > 0);
-  else
-    ForceBoolean := (Data[0] <> 0);;
-  end;
-end;
-
-function TLuaArg.ForceInteger: integer;
-begin
-  case LuaType of
-      ltEmpty: ForceInteger := 0;
-     ltDouble: ForceInteger := Trunc(pdouble(@Data)^);
-     ltString: ForceInteger := StrToIntDef(str_data, 0);
-     ltObject: ForceInteger := TObject(Data[0]).InstanceSize;
-     ltRecord: ForceInteger := integer(PLuaRecord(@FLuaType).Info.Size);
-   ltTable: ForceInteger := PLuaTable(@FLuaType).Length;
-  else
-    ForceInteger := Data[0];
-  end;
-end;
-
-function TLuaArg.ForceDouble: double;
-begin
-  case LuaType of
-      ltEmpty: ForceDouble := 0;
-    ltBoolean: ForceDouble := Data[0];
-    ltInteger: ForceDouble := Data[0];
-     ltDouble: ForceDouble := pdouble(@Data)^;
-     ltString: ForceDouble := StrToFloatDef(str_data, 0);
-  else
-    ForceDouble := 0;
-  end;
-end;
-
-function TLuaArg.ForceString: string;
-const
-  BOOLEANS: array[boolean] of string = ('false', 'true');
-begin
-  case LuaType of
-    ltBoolean: ForceString := BOOLEANS[Data[0] <> 0];
-    ltInteger: ForceString := IntToStr(Data[0]);
-     ltDouble: ForceString := Format('%0.2f', [pdouble(@Data)^]);
-     ltString: ForceString := str_data;
-    ltPointer: ForceString := IntToHex(Data[0], 8);
-      ltClass: ForceString := TClass(Data[0]).ClassName;
-     ltObject: begin
-                if (TObject(Data[0]) is TComponent) then ForceString := TComponent(Data[0]).Name
-                else ForceString := TObject(Data[0]).ClassName;
-               end;
-     ltRecord: ForceString := PLuaRecord(@FLuaType).Info.Name;
-      ltArray: ForceString := PLuaArray(@FLuaType).Info.Name;
-        ltSet: with PLuaSet(@FLuaType)^ do ForceString := Info.Description(Data);
-      ltTable: ForceString := 'LuaTable';
-  else
-    {ltEmpty:}
-    ForceString := 'nil';
-  end;
-end;
-
-function TLuaArg.ForcePointer: pointer;
-begin
-  case LuaType of
-    ltPointer, ltClass, ltObject, ltRecord, ltArray, ltSet: ForcePointer := pointer(Data[0]);
-    ltString: ForcePointer := pointer(str_data);
-     ltTable: ForcePointer := PLuaTable(@FLuaType);
-  else
-    ForcePointer := nil;
-  end;
-end;
-
-function TLuaArg.ForceVariant: Variant;
-var
-  VarData: TVarData absolute Result;
-begin
-  // очистка если был занят
-  if (VarData.VType = varString) or (not (VarData.VType in VARIANT_SIMPLE)) then VarClear(Result);
-
-  // присвоить значение
-  case (LuaType) of
-    ltBoolean: begin
-                 VarData.VType := varBoolean;
-                 VarData.VBoolean := Data[0] <> 0;
-               end;
-    ltInteger: begin
-                 VarData.VType := varInteger;
-                 VarData.VInteger := Data[0];
-               end;
-     ltDouble: begin
-                 VarData.VType := varDouble;
-                 VarData.VDouble := double(Data);
-               end;
-     ltString: begin
-                 { Unicode ? todo}
-                 VarData.VType := varString;
-                 VarData.VInteger := 0;
-
-                 if (str_data <> '') then
-                 string(VarData.VString) := str_data;
-               end;
-   else
-     {ltEmpty и др:}
-     VarData.VType := varEmpty;
-  end;
-end;
-
-function TLuaArg.ForceClass: TClass;
-begin
-  case LuaType of
-    ltClass: ForceClass := TClass(Data[0]);
-   ltObject: ForceClass := TClass(pointer(Data[0])^);
-  else
-    ForceClass := nil;
-  end;
-end;
-
-function TLuaArg.ForceObject: TObject;
-begin
-  case LuaType of
-    ltObject: ForceObject := TObject(Data[0]);
-  else
-    ForceObject := nil;
-  end;  
-end;
-
-function TLuaArg.ForceRecord: TLuaRecord;
-begin
-  case LuaType of
-    ltRecord: Result := PLuaRecord(@FLuaType)^;
-  else
-    ZeroMemory(@Result, sizeof(Result));
-  end;
-end;
-
-function TLuaArg.ForceArray: TLuaArray;
-begin
-  case LuaType of
-    ltArray: Result := PLuaArray(@FLuaType)^;
-  else
-    ZeroMemory(@Result, sizeof(Result));
-  end;
-end;
-
-function TLuaArg.ForceSet: TLuaSet;
-begin
-  case LuaType of
-    ltSet: Result := PLuaSet(@FLuaType)^;
-  else
-    ZeroMemory(@Result, sizeof(Result));
-  end;
-end;
-
-function TLuaArg.ForceTable: PLuaTable;
-begin
-  case LuaType of
-    ltTable: ForceTable := PLuaTable(@FLuaType);
-  else
-    ForceTable := nil;
-  end;
-end;
-       *)
               (*
 { TLuaTableItem }
 
@@ -4319,13 +4634,13 @@ begin
   if (pop) then Lua.stack_pop();
   ELua.Assert('Unsupported value type = "%s"', [Lua.FBufferArg.str_data], CodeAddr);
 end;
-
+               *)
 // максимальный индекс целочисленного индекса
-function TLuaTable.GetLength: integer;
+function TLuaTable.GetLength: Integer;
 begin
-  GetLength := lua_objlen(Lua.Handle, Index_);
+  Result := lua_objlen(FLua.FHandle, FIndex);
 end;
-
+           (*
 // количество элементов в таблице
 function TLuaTable.GetCount: integer;
 var
@@ -4696,6 +5011,13 @@ asm
 end;
           *)
 
+{ __lua_difficult_info__ }
+
+function __lua_difficult_info__.GetName: LuaString;
+begin
+  Result := ''{ToDo};
+end;
+
             (*
 { TLuaRecordInfo }
 
@@ -4795,10 +5117,14 @@ begin
   end;
 end;   *)
 
-         (*
+
 { TLuaSetInfo }
 
-function TLuaSetInfo.Description(const X: pointer): string;
+function TLuaSetInfo.Description(const X: Pointer): LuaString;
+begin
+  Result := ''{ToDo};
+end;
+(*
 var
   P1, P2, i: integer;
 
@@ -14582,8 +14908,6 @@ begin
 
   GetLineInfo := FLinesInfo[index];
 end;     *)
-
-
 
 initialization
   InitUnicodeLookups;

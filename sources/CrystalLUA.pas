@@ -782,26 +782,50 @@ type
     // stack helpers
     FHandle: Pointer;
     FInternalBuffer: __TLuaBuffer;
+    FStringBuffer: record
+      {$ifNdef NEXTGEN}
+      Short: ShortString;
+      Ansi: AnsiString;
+      Wide: WideString;
+      {$endif}
+      {$ifdef UNICODE}
+      Unicode: UnicodeString;
+      {$endif}
+      Lua: LuaString;
+      Default: string;
+    end;
 
     procedure push_ansi_chars(const S: PAnsiChar; const CodePage: Word; const Count: Integer);
     procedure push_utf8_chars(const S: PAnsiChar; const Count: Integer);
-    procedure push_utf16_chars(const S: PWideChar; const Count: Integer);
+    procedure push_wide_chars(const S: PWideChar; const Count: Integer);
     {$ifNdef NEXTGEN}
     procedure push_short_string(const S: ShortString);
     procedure push_ansi_string(const S: AnsiString);
     procedure push_wide_string(const S: WideString);
     {$endif}
+    {$ifdef UNICODE}
     procedure push_unicode_string(const S: UnicodeString);
-    procedure push_lua_string(const S: LuaString);
+    {$endif}
+    procedure push_lua_string(const S: LuaString); {$ifdef INLINESUPPORTSIMPLE}inline;{$endif}
 
-    //function  push_userdata(const ClassInfo: TLuaClassInfo; const gc_destroy: boolean; const Data: pointer): PLuaUserData;
-    // function  push_difficult_property(const Instance: Pointer; const PropertyInfo: TLuaPropertyInfo): PLuaUserData;
-  (*  function  push_luaarg(const LuaArg: TLuaArg): Boolean;
+    {$ifNdef NEXTGEN}
+    procedure stack_short_string(var S: ShortString; const StackIndex: Integer; const MaxLength: Integer);
+    procedure stack_ansi_string(var S: AnsiString; const StackIndex: Integer; const CodePage: Word);
+    procedure stack_wide_string(var S: WideString; const StackIndex: Integer);
+    {$endif}
+    {$ifdef UNICODE}
+    procedure stack_unicode_string(var S: UnicodeString; const StackIndex: Integer);
+    {$endif}
+    procedure stack_lua_string(var S: LuaString; const StackIndex: Integer); {$ifdef INLINESUPPORTSIMPLE}inline;{$endif}
+
+    function  push_userdata(const LuaMetaType; const Instance: Pointer; const DcDestroy: Boolean): Pointer{PLuaUserData};
+    function  push_difficult_property(const LuaPropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
+    function  push_luaarg(const LuaArg: TLuaArg): Boolean;
     function  push_variant(const Value: Variant): Boolean;
     function  push_argument(const Value: TVarRec): Boolean;
     procedure stack_pop(const Count: Integer = 1);
     function  stack_variant(var Ret: Variant; const StackIndex: Integer): Boolean;
-    function  stack_luaarg(var Ret: TLuaArg; const StackIndex: integer; const AllowTable: Boolean): Boolean; *)
+    function  stack_luaarg(var Ret: TLuaArg; const StackIndex: integer; const AllowLuaTable: Boolean): Boolean;
 
   private
     // low level routine
@@ -818,7 +842,7 @@ type
     function  StackArgument(const Index: integer): string;
     function  GetUnit(const index: integer): TLuaUnit;
     function  GetUnitByName(const Name: string): TLuaUnit;   *)
-  private
+  protected
     // global name space
     FRef: Integer;
     FNames: __TLuaStringDictionary{<LuaString,__luaname>};
@@ -830,18 +854,18 @@ type
     GlobalNative: TLuaClassInfo; // нативные: методы и перменные
     GlobalVariables: TLuaGlobalVariableDynArray; // полный список включая Lua-переменные
   //  property  NameSpaceHash: TLuaHashIndexDynArray read GlobalNative.NameSpace; // Hash по всем глобальным переменным и функциям
-  *)           (*
-    // работа с глобальной луа-таблицей
-    procedure global_alloc_ref(var ref: integer);
-    procedure global_free_ref(var ref: integer);
-    procedure global_fill_value(const ref: integer);
-    procedure global_push_value(const ref: integer);     *)
+  *)
+    // internal reference table
+    procedure global_alloc_ref(var Ref: Integer);
+    procedure global_free_ref(var Ref: Integer);
+    procedure global_fill_value(const Ref: Integer);
+    procedure global_push_value(const Ref: Integer);
 
     // найти глобальную переменную. если false, то Index - place в hash списке глобальных имён
  //   function  GlobalVariablePos(const Name: pchar; const NameLength: integer; var Index: integer; const auto_create: boolean=false): boolean;
   private
     // registrations
-    FTypesList: __TLuaList {TLuaTypeInfo};
+    FTypesList: __TLuaList {TLuaMetaType};
     FCFunctionHeap: __TLuaCFunctionHeap;
     FProcList: __TLuaList {TLuaProcInfo};
     FPropertiesList: __TLuaList {TLuaPropertyInfo};
@@ -1243,6 +1267,47 @@ end;
 function lua_tonumber_52(L: Plua_State; idx: Integer): lua_Number; cdecl;
 begin
   Result := lua_tonumberx(L, idx, nil);
+end;
+
+function lua_toint64(L: Plua_State; idx: Integer): Int64; register;
+{$if Defined(CPUX86)}
+asm
+  push edx
+  push eax
+  call lua_tonumber
+
+  fistp qword ptr [esp]
+  pop eax
+  pop edx
+end;
+{$elseif Defined(CPUX64)}
+asm
+  push rcx
+  call lua_tonumber
+  cvtsd2si rax, xmm0
+  pop rcx
+end;
+{$else}
+begin
+  Result := Round(lua_tonumber(L, idx));
+end;
+{$ifend}
+
+procedure GetLuaTypeName(var Result: string; const LuaType: Integer);
+begin
+  case (LuaType) of
+    LUA_TNONE         : Result := 'LUA_TNONE';
+    LUA_TNIL          : Result := 'LUA_TNIL';
+    LUA_TBOOLEAN      : Result := 'LUA_TBOOLEAN';
+    LUA_TLIGHTUSERDATA: Result := 'LUA_TLIGHTUSERDATA';
+    LUA_TNUMBER       : Result := 'LUA_TNUMBER';
+    LUA_TSTRING       : Result := 'LUA_TSTRING';
+    LUA_TTABLE        : Result := 'LUA_TTABLE';
+    LUA_TFUNCTION     : Result := 'LUA_TFUNCTION';
+    LUA_TUSERDATA     : Result := 'LUA_TUSERDATA';
+  else
+    Result := Format('UNKNOWN (%d)', [LuaType]);
+  end;
 end;
 
 function LoadLuaLibrary: THandle;
@@ -2056,6 +2121,20 @@ begin
 done:
   Result := (NativeUInt(S) - NativeUInt(Start)) shr 1;
 end;
+
+{$ifNdef NEXTGEN}
+procedure FillShortString(var AResult: ShortString; AChars: PAnsiChar; ALength, AMaxLength: Integer);
+var
+  S: PByte;
+begin
+  if (ALength > AMaxLength) then ALength := AMaxLength;
+  S := Pointer(@AResult);
+  S^ := ALength;
+  Inc(S);
+  if (ALength <> 0) then
+    System.Move(AChars^, S^, ALength);
+end;
+{$endif}
 
 { Generated in CachedSerializer: https://github.com/d-mozulyov/CachedTexts#cachedserializer }
 { 0: False, 1: True, -1: Failure }
@@ -3903,256 +3982,6 @@ begin
   end;
 end;
 
-               (*
-function IsMemoryZeroed(const Memory: pointer; const Size: integer): boolean;
-asm
-  push edi
-  mov ecx, edx
-  mov edi, eax
-  xor eax, eax
-
-  test edi, edi
-  jz @fail
-  test ecx, ecx
-  jle @fail
-
-// проверить цепочку dword-ов
-  shr ecx, 2
-  jz @bytes
-
-  REPE SCASD
-  jne @fail
-  
-// проверить оставшуюся цепочку байт 0..3 (edx)
-@bytes:
-  test edx, 2
-  jz @_1_byte
-  cmp [edi], ax
-  jnz @fail
-  add edi, 2
-
-@_1_byte:
-  test edx, 1
-  jz @ret_true
-  cmp [edi], al
-  jnz @fail
-
-@ret_true:
-  mov eax, 1
-  pop edi
-  ret
-@fail:
-  xor eax, eax
-  pop edi
-end;         *)
-
-          (*
-// коррекция пустой строки
-const NULL_CHAR: char = #0;
-
-procedure lua_push_pchar(const L: Plua_State; const S: PChar; const any4bytes: integer=0); cdecl;
-asm
-  pop ebp
-  mov eax, [esp+8]
-  test eax, eax
-  jnz @1
-  mov [esp+8], OFFSET NULL_CHAR
-  jmp @2
-
-// подсчёт длинны
-@1:xor ecx, ecx
-   mov edx, eax
-   @loop:
-     cmp cl, [eax+0]
-     je @_0
-     cmp cl, [eax+1]
-     je @_1
-     cmp cl, [eax+2]
-     je @_2
-     cmp cl, [eax+3]
-     je @_3
-     add eax, 4
-   jmp @loop
-   @_3: inc eax
-   @_2: inc eax
-   @_1: inc eax
-   @_0: sub eax, edx
-
-// вызов
-@2:mov [esp+12], eax
-   jmp lua_pushlstring
-end;
-      *)
-                 (*
-procedure lua_push_pascalstring(const L: Plua_State; const S: string; const any4bytes: integer=0); cdecl;
-asm
-  pop ebp
-  mov eax, [esp+8]
-  test eax, eax
-  jnz @1
-  mov [esp+8], OFFSET NULL_CHAR
-  jmp @2
-
-// подсчёт длинны
-@1:mov eax, [eax-4]
-
-// вызов
-@2:mov [esp+12], eax
-   jmp lua_pushlstring
-end;
-         *)
-           (*
-procedure AnsiFromPCharLen(var Dest: AnsiString; Source: PAnsiChar; Length: Integer);
-{$ifdef fpc}
-begin
-  if (Dest <> '') then Dest := '';
-  if (Length > 0) then
-  begin
-    SetLength(Dest, Length);
-    Move(Source^, pointer(Dest)^, Length);
-  end;
-end;
-{$else}
-asm
-  cmp [eax], 0
-  jz @1
-  push eax
-  push edx
-  push ecx
-  call System.@LStrClr
-  pop ecx
-  pop edx
-  pop eax
-@1:
-  test ecx, ecx
-  jz @exit
-  jmp System.@LStrFromPCharLen
-@exit:
-end;
-{$endif}
-            *)
-              (*
-procedure lua_to_pascalstring(var Dest: AnsiString; L: Plua_State; const Index: integer);
-{$ifdef FPC} // todo оптимизировать для асм ?
-var
-  Len: integer;
-  S: pchar;
-begin
-  if (Dest <> '') then Dest := '';
-  S := lua_tolstring(L, Index, @Len);
-
-  if (Len <> 0) then
-  begin
-    SetLength(Dest, Len);
-    Move(S^, pointer(Dest)^, Len);
-  end;
-end;
-{$else}
-var
-  __Dest, __Len: integer;
-asm
-  mov __Dest, eax
-
-  cmp [eax], 0
-  jz @1
-  push edx
-  push ecx
-  call System.@LStrClr
-  pop ecx
-  pop edx
-
-@1:
-  // lua_tolstring: function(L: Plua_State; idx: Integer; len: pinteger=nil): PChar; cdecl;
-  lea eax, __Len
-  push eax
-  push ecx
-  push edx
-  call lua_tolstring
-  add esp, $0c
-  cmp __Len, 0
-  jz @exit
-
-  // LStrFromPCharLen
-  mov edx, eax
-  mov ecx, __Len
-  mov eax, __Dest
-  //call System.@LStrFromPCharLen
-  mov esp, ebp
-  pop ebp
-  jmp System.@LStrFromPCharLen
-
-@exit:
-end;
-{$endif}
-           *)
-             (*
-function lua_toint64(L: Plua_State; idx: Integer): int64; register;
-asm
-  push edx
-  push eax
-  call lua_tonumber
-
-  // значение
-  fistp qword ptr [esp]
-  pop eax
-  pop edx
-end;
-       *)
-
-                     (*
-// расшифровка имени луа-типа
-// pchar, это чтобы функции работали быстрее, не создавали разных LStrClr и HandleFinally
-function LuaTypeName(const luatype: integer): pchar;
-begin
-  case luatype of
-    LUA_TNONE         : Result := 'LUA_TNONE';
-    LUA_TNIL          : Result := 'LUA_TNIL';
-    LUA_TBOOLEAN      : Result := 'LUA_TBOOLEAN';
-    LUA_TLIGHTUSERDATA: Result := 'LUA_TLIGHTUSERDATA';
-    LUA_TNUMBER       : Result := 'LUA_TNUMBER';
-    LUA_TSTRING       : Result := 'LUA_TSTRING';
-    LUA_TTABLE        : Result := 'LUA_TTABLE';
-    LUA_TFUNCTION     : Result := 'LUA_TFUNCTION';
-    LUA_TUSERDATA     : Result := 'LUA_TUSERDATA';
-  else
-    Result := 'UNKNOWN';
-  end;
-end;       *)
-             (*
-function TypeKindName(const Kind: TTypeKind): string;
-begin
-  Result := EnumName(typeinfo(TTypeKind), byte(Kind));
-end;
-
-// получить "описание" типа userdata
-// вызов этой функции происходит тогда, когда произошла внештатная ситуация ! (ошибка)
-procedure GetUserDataType(var Result: string; const Lua: TLua; const userdata: PLuaUserData);
-begin
-  if (userdata = nil) then
-  begin
-    Result := 'nil userdata';
-    exit;
-  end;
-  if (byte(userdata.kind) > byte(ukSet)) then
-  begin
-    Result := 'unknown userdata';
-    exit;
-  end;
-  if (userdata.instance = nil) then
-  begin
-    Result := 'already destroyed';
-    exit;
-  end;
-
-  case userdata.kind of
-    ukInstance: Result := Lua.ClassesInfo[userdata.ClassIndex]._ClassName;
-       ukArray: Result := userdata.ArrayInfo.Name;
-         ukSet: Result := userdata.SetInfo.Name;
-    ukProperty: Result := Format('difficult property ''%s''', [userdata.PropertyInfo.PropertyName]);
-  end;
-end; *)
-
- 
           (*
 // найти указатель на конечную калбек-функцию, имея исходную CFunction
 // нужно при анализе луа-аргумента.
@@ -4276,57 +4105,6 @@ begin
   Result.FIsConst := IsConst;
 end;     *)
 
-               (*
-function NumberToInteger(var Number; const Handle: pointer; const Index: integer): boolean; overload;
-asm
-  push eax
-  push ecx
-  push edx
-  call [lua_tonumber]
-  add esp, 8
-  pop ecx
-
-  { luanumber в st(0), ссылка на результат - в eax }
-  sub esp, 16 {4, Int64, single}
-  fld st(0) // копия
-
-  // st(0) -> Int64
-  FNSTCW word ptr[esp]
-  FNSTCW word ptr[esp+2]
-  OR word ptr[esp+2], $0F00  // trunc toward zero, full precision
-  FLDCW word ptr[esp+2]
-  FISTP qword ptr [esp+4]
-  FLDCW word ptr[esp]
-
-  // Frac
-  fild qword ptr [esp+4]
-  fsub st(0), st(1)
-  fstp dword ptr [esp+12]
-
-  // Frac 0
-  cmp [esp+12], 0
-  jne @ret_double
-
-  // Int64 -> integer
-  mov eax, [esp+4]
-  mov edx, [esp+8]
-  sar eax, $1f
-  cmp eax, edx
-  jnz @ret_double
-
-  // return integer
-  ffree st(0)
-  mov edx, [esp+4]
-  add esp, 16
-  mov [ecx], edx
-  mov eax, 1
-  ret
-
-@ret_double:
-  fstp qword ptr [ecx]
-  add esp, 16
-  xor eax, eax
-end;   *)
                 (*
 
 // таблица может быть TClass или PLuaRecordInfo или TLuaTable
@@ -5762,15 +5540,18 @@ type
   PLuaGlobalEntity = ^TLuaGlobalEntity;
 
 
-  TLuaTypeKind = (ltkClass, ltkRecord, ltkArray, ltkSet);
-  TLuaTypeInfo = object
+  TLuaMetaKind = (mkClass, mkRecord, mkArray, mkSet);
+  TLuaMetaType = object
   private
     FNameSpace: TLuaDictionary;
     FLocalItems: array of __luapointer;
   public
 
+    Kind: TLuaMetaKind;
+    Info: Pointer; // TClass, PLuaRecordInfo, PLuaArrayInfo, PLuaSetInfo
+
   end;
-  PLuaTypeInfo = ^TLuaTypeInfo;
+  PLuaMetaType = ^TLuaMetaType;
 
   (*
   { информация по классу . его процедуры и свойства }
@@ -5817,26 +5598,54 @@ type
     *)
 
   // TObject, record, array, set, difficult property structure
-  TLuaUserDataKind = (ukInstance, ukArray, ukProperty, ukSet);
-  TLuaUserData = packed record
+  TLuaUserDataKind = (ukInstance, ukArray, ukSet, ukProperty);
+  TLuaUserData = object
+  public
     Instance: Pointer;
 
     Kind: TLuaUserDataKind;
-    DifficultFlags: Byte; // Count(4bits) and Filled(4bits) for difficult properties
+    ArrayParams: Byte; // Count(4bits) and Filled(4bits) for difficult properties
     IsConst: Boolean;
     GcDestroy: Boolean; // automatically call finalizer/destructor
 
-    case Integer of
+    LuaMetaType: __luapointer;
+    (*case Integer of
 //      0: (ClassIndex: integer); // integer, потому что наиболее неустойчивый user data
       1: (ArrayInfo: PLuaArrayInfo);
       2: (SetInfo: PLuaSetInfo);
-      3: (PropertyInfo: PLuaPropertyInfo);
+      3: (PropertyInfo: PLuaPropertyInfo); *)
+
+    procedure GetDescription(var Result: string; const Lua: TLua);
   end;
   PLuaUserData = ^TLuaUserData;
 
 
+procedure TLuaUserData.GetDescription(var Result: string; const Lua: TLua);
+begin
+  if (@Self = nil) then
+  begin
+    Result := 'nil userdata';
+  end else
+  if (Byte(Kind) > Byte(ukSet)) then
+  begin
+    Result := 'unknown userdata';
+  end else
+  if (Instance = nil) then
+  begin
+    Result := 'already destroyed';
+  end else
+  begin
+    Result := 'ToDo';
 
-
+    (*
+    case Kind of
+      ukInstance: Result := Lua.ClassesInfo[userdata.ClassIndex]._ClassName;
+         ukArray: Result := userdata.ArrayInfo.Name;
+           ukSet: Result := userdata.SetInfo.Name;
+      ukProperty: Result := Format('difficult property ''%s''', [userdata.PropertyInfo.PropertyName]);
+    end; *)
+  end;
+end;
 
            (*
 { TLuaPropertyInfo }
@@ -7132,7 +6941,7 @@ begin
 
   // containers
   TLuaList(FGlobalEntities).Init(SizeOf(TLuaGlobalEntity), nil);
-  TLuaList(FTypesList).Init(SizeOf(TLuaTypeInfo), TypeInfo(TLuaTypeInfo));
+  TLuaList(FTypesList).Init(SizeOf(TLuaMetaType), TypeInfo(TLuaMetaType));
   TLuaList(FProcList).Init(SizeOf(TLuaProcInfo), nil);
   TLuaList(FPropertiesList).Init(SizeOf(TLuaPropertyInfo), nil);
 
@@ -8368,6 +8177,7 @@ begin
   end;
 
   {$ifdef LUA_ANSI}
+    Buffer := @TLuaBuffer(FInternalBuffer);
     Size := Count + 1;
     if (Buffer.Capacity < Size) then
     begin
@@ -8382,7 +8192,7 @@ begin
   {$endif}
 end;
 
-procedure TLua.push_utf16_chars(const S: PWideChar; const Count: Integer);
+procedure TLua.push_wide_chars(const S: PWideChar; const Count: Integer);
 var
   Size: Integer;
   Buffer: ^TLuaBuffer;
@@ -8393,6 +8203,7 @@ begin
     Exit;
   end;
 
+  Buffer := @TLuaBuffer(FInternalBuffer);
   {$ifdef LUA_ANSI}
     Size := Count + 1;
     if (Buffer.Capacity < Size) then
@@ -8443,10 +8254,11 @@ begin
     Exit;
   end;
 
-   push_utf16_chars(Pointer(S), PInteger(NativeInt(S) - SizeOf(Integer))^ {$ifdef WIDE_STR_SHIFT}shr 1{$endif});
+   push_wide_chars(Pointer(S), PInteger(NativeInt(S) - SizeOf(Integer))^ {$ifdef WIDE_STR_SHIFT}shr 1{$endif});
 end;
 {$endif}
 
+{$ifdef UNICODE}
 procedure TLua.push_unicode_string(const S: UnicodeString);
 begin
   if (Pointer(S) = nil) then
@@ -8455,27 +8267,202 @@ begin
     Exit;
   end;
 
-  push_utf16_chars(Pointer(S), PInteger(NativeInt(S) - SizeOf(Integer))^);
+  push_wide_chars(Pointer(S), PInteger(NativeInt(S) - SizeOf(Integer))^);
 end;
+{$endif}
 
 procedure TLua.push_lua_string(const S: LuaString);
+{$ifdef INLINESUPPORTSIMPLE}
 begin
-  if (Pointer(S) = nil) then
-  begin
-    lua_pushlstring(Handle, Pointer(@NULL_CHAR), 0);
-    Exit;
-  end;
-
   {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
-    push_utf16_chars(Pointer(S),
-      PInteger(NativeInt(S) - SizeOf(Integer))^ {$ifdef LUA_LENGTH_SHIFT}shr 1{$endif});
+    {$ifdef UNICODE}
+      push_unicode_string(S);
+    {$else}
+      push_wide_string(S);
+    {$endif}
   {$else}
-    push_ansi_chars(Pointer(S),
-      {$ifdef INTERNALCODEPAGE}PWord(NativeInt(S) - ASTR_OFFSET_CODEPAGE)^{$else}0{$endif},
-      PInteger(NativeInt(S) - SizeOf(Integer))^);
+    push_ansi_string(S);
   {$ifend}
 end;
+{$else .CPUX86}
+asm
+  {$ifdef LUA_UNICODE}
+    jmp push_wide_string
+  {$else}
+    jmp push_ansi_string
+  {$endif}
+end;
+{$endif}
 
+{$ifNdef NEXTGEN}
+procedure TLua.stack_short_string(var S: ShortString; const StackIndex: Integer; const MaxLength: Integer);
+var
+  Chars: __luadata;
+  Count: NativeInt;
+  {$ifdef LUA_UNICODE}
+  Size: NativeInt;
+  Buffer: ^TLuaBuffer;
+  {$endif}
+begin
+  Chars := lua_tolstring(Handle, StackIndex, Pointer(@Count));
+  if (Count <> 0) then
+  begin
+    {$ifdef LUA_ANSI}
+      FillShortString(S, Chars, Count, MaxLength);
+    {$else .LUA_UNICODE}
+      Buffer := @TLuaBuffer(FInternalBuffer);
+      Size := Count + 1;
+      if (Buffer.Capacity < Size) then
+      begin
+        Buffer.Size := 0;
+        Buffer.Alloc(Size);
+      end;
+
+      FillShortString(S, Pointer(Buffer.FBytes),
+        AnsiFromUtf8(Pointer(Buffer.FBytes), 0, Chars, Count),
+        MaxLength);
+    {$endif}
+  end else
+  begin
+    PByte(@S)^ := 0;
+  end;
+end;
+
+procedure TLua.stack_ansi_string(var S: AnsiString; const StackIndex: Integer; const CodePage: Word);
+var
+  Chars: __luadata;
+  Count, Size: NativeInt;
+  Buffer: ^TLuaBuffer;
+begin
+  if (Pointer(S) <> nil) then S := '';
+  Chars := lua_tolstring(Handle, StackIndex, Pointer(@Count));
+  if (Count = 0) then Exit;
+  Buffer := @TLuaBuffer(FInternalBuffer);
+
+  {$ifdef LUA_ANSI}
+  if (CodePage <> 0) and (CodePage <> CODEPAGE_DEFAULT) then
+  {$else .LUA_UNICODE}
+  if (CodePage <> CODEPAGE_UTF8) then
+  {$endif}
+  begin
+    Size := Count * 7 + 1;
+    if (Buffer.Capacity < Size) then
+    begin
+      Buffer.Size := 0;
+      Buffer.Alloc(Size);
+    end;
+
+    {$ifdef LUA_ANSI}
+      Count := AnsiFromAnsi(Pointer(Buffer.FBytes), CodePage, Chars, 0, Count);
+    {$else .LUA_UNICODE}
+      Count := AnsiFromUtf8(Pointer(Buffer.FBytes), CodePage, Chars, Count);
+    {$endif}
+
+    Chars := Pointer(Buffer.FBytes);
+  end;
+
+  if (Count = 0) then Exit;
+  SetLength(S, Count);
+  {$ifdef INTERNALCODEPAGE}
+    PWord(NativeInt(S) - ASTR_OFFSET_CODEPAGE)^ := CodePage;
+  {$endif}
+  System.Move(Chars, Pointer(S)^, Count);
+end;
+
+procedure TLua.stack_wide_string(var S: WideString; const StackIndex: Integer);
+var
+  Chars: __luadata;
+  Count: NativeInt;
+  {$ifdef LUA_UNICODE}
+  Size: NativeInt;
+  Buffer: ^TLuaBuffer;
+  {$endif}
+begin
+  if (Pointer(S) <> nil) then S := '';
+  Chars := lua_tolstring(Handle, StackIndex, Pointer(@Count));
+  if (Count = 0) then Exit;
+
+  {$ifdef LUA_ANSI}
+    SetLength(S, Count);
+    UnicodeFromAnsi(Pointer(S), Chars, 0, Count);
+  {$else .LUA_UNICODE}
+    Buffer := @TLuaBuffer(FInternalBuffer);
+    Size := Count * 2 + 2;
+    if (Buffer.Capacity < Size) then
+    begin
+      Buffer.Size := 0;
+      Buffer.Alloc(Size);
+    end;
+
+    Count := UnicodeFromUtf8(Pointer(Buffer.FBytes), Chars, Count);
+    SetLength(S, Count);
+    System.Move(Pointer(Buffer.FBytes)^, Pointer(S)^, Count * SizeOf(WideChar));
+  {$endif}
+end;
+{$endif}
+
+{$ifdef UNICODE}
+procedure TLua.stack_unicode_string(var S: UnicodeString; const StackIndex: Integer);
+var
+  Chars: __luadata;
+  Count: NativeInt;
+  {$ifdef LUA_UNICODE}
+  Size: NativeInt;
+  Buffer: ^TLuaBuffer;
+  {$endif}
+begin
+  if (Pointer(S) <> nil) then S := '';
+  Chars := lua_tolstring(Handle, StackIndex, Pointer(@Count));
+  if (Count = 0) then Exit;
+
+  {$ifdef LUA_ANSI}
+    SetLength(S, Count);
+    UnicodeFromAnsi(Pointer(S), Chars, 0, Count);
+  {$else .LUA_UNICODE}
+    Buffer := @TLuaBuffer(FInternalBuffer);
+    Size := Count * 2 + 2;
+    if (Buffer.Capacity < Size) then
+    begin
+      Buffer.Size := 0;
+      Buffer.Alloc(Size);
+    end;
+
+    Count := UnicodeFromUtf8(Pointer(Buffer.FBytes), Chars, Count);
+    SetLength(S, Count);
+    System.Move(Pointer(Buffer.FBytes)^, Pointer(S)^, Count * SizeOf(WideChar));
+  {$endif}
+end;
+{$endif}
+
+procedure TLua.stack_lua_string(var S: LuaString; const StackIndex: Integer);
+{$ifdef INLINESUPPORTSIMPLE}
+begin
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    {$ifdef UNICODE}
+      stack_unicode_string(S, StackIndex);
+    {$else}
+      stack_wide_string(S, StackIndex);
+    {$endif}
+  {$else}
+    stack_ansi_string(S, StackIndex, 0);
+  {$ifend}
+end;
+{$else .CPUX86}
+asm
+  {$ifdef LUA_UNICODE}
+    jmp stack_wide_string
+  {$else}
+    push [esp]
+    mov [esp + 4], 0
+    jmp stack_ansi_string
+  {$endif}
+end;
+{$endif}
+
+function TLua.push_userdata(const LuaMetaType; const Instance: Pointer; const DcDestroy: Boolean): Pointer{PLuaUserData};
+begin
+  Result := nil{ToDo};
+end;
             (*
 // основная функция пуша для сложных типов: объектов класса, структур, массивов и множеств
 function  TLua.push_userdata(const ClassInfo: TLuaClassInfo; const gc_destroy: boolean; const Data: pointer): PLuaUserData;
@@ -8592,6 +8579,11 @@ begin
   lua_setmetatable(Handle, -2);
 end;
         *)
+
+function TLua.push_difficult_property(const LuaPropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
+begin
+  Result := nil{ToDo};
+end;
           (*
 // запушить свойство
 function  TLua.push_difficult_property(const Instance: pointer; const PropertyInfo: TLuaPropertyInfo): PLuaUserData;
@@ -8636,81 +8628,20 @@ begin
   lua_rawgeti(Handle, LUA_REGISTRYINDEX, mt_properties); // global_push_value(Ref);
   lua_setmetatable(Handle, -2);
 end;   *)
-         (*
 
-function TLua.push_variant(const Value: Variant): boolean;
-type
-  TDateProc = procedure(const DateTime: TDateTime; var Ret: string);
-  TIntToStr = procedure(const Value: integer; var Ret: string);
-
-var
-  VType: integer;
-  PValue: pointer;
-begin
-  // получить тип и указатель на значение
-  VType := TVarData(Value).VType;
-  PValue := @TVarData(Value).VWords[3];
-
-  // если Variant вызван по ссылке
-  if (VType and varByRef <> 0) then
-  begin
-    VType := VType and (not varByRef);
-    PValue := ppointer(PValue)^;
-  end;
-
-  // push
-  case (VType) of
-    varEmpty, varNull, varError{EmptyParam}: lua_pushnil(Handle);
-    varSmallint: lua_pushinteger(Handle, PSmallInt(PValue)^);
-    varInteger : lua_pushinteger(Handle, PInteger(PValue)^);
-    varSingle  : lua_pushnumber(Handle, PSingle(PValue)^);
-    varDouble  : lua_pushnumber(Handle, PDouble(PValue)^);
-    varCurrency: lua_pushnumber(Handle, PCurrency(PValue)^);
-    varDate    : with FBufferArg do
-                 begin
-                   if (str_data <> '') then str_data := '';
-                   case InspectDateTime(PValue) of
-                     0: TDateProc(@DateTimeToStr)(PDate(PValue)^, str_data);
-                     1: TDateProc(@DateToStr)(PDate(PValue)^, str_data);
-                     2: TDateProc(@TimeToStr)(PDate(PValue)^, str_data);
-                   end;
-                   lua_push_pascalstring(Handle, str_data);
-                 end;
-    varOleStr  : with FBufferArg do
-                 begin
-                   str_data := PWideString(PValue)^;
-                   lua_push_pascalstring(Handle, str_data);
-                 end;
-    varBoolean : lua_pushboolean(Handle, PBoolean(PValue)^);
-    varShortInt: lua_pushinteger(Handle, PShortInt(PValue)^);
-    varByte    : lua_pushinteger(Handle, PByte(PValue)^);
-    varWord    : lua_pushinteger(Handle, PWord(PValue)^);
-    varLongWord: lua_pushnumber(Handle, PLongWord(PValue)^);
-    varInt64   : lua_pushnumber(Handle, PInt64(PValue)^);
-    varString  : lua_push_pascalstring(Handle, PString(PValue)^);
-  else
-    if (FBufferArg.str_data <> '') then FBufferArg.str_data := '';
-    TIntToStr(@IntToStr)(VType, FBufferArg.str_data);
-    push_variant := false;
-    exit;
-  end;
-
-  push_variant := true;
-end;           *)
-              (*
 function TLua.push_luaarg(const LuaArg: TLuaArg): Boolean;
 type
-  TIntToStr = procedure(const Value: integer; var Ret: string);
+  TIntToStr = procedure(const Value: Integer; var Result: string);
 begin
   with LuaArg do
   case (LuaType) of
       ltEmpty: lua_pushnil(Handle);
     ltBoolean: lua_pushboolean(Handle, F.VBoolean);
-    ltInteger: lua_pushinteger(Handle, Data[0]);
-     ltDouble: lua_pushnumber(Handle, pdouble(@Data)^);
-     ltString: lua_push_pascalstring(Handle, str_data);
-    ltPointer: lua_pushlightuserdata(Handle, pointer(Data[0]));
-      ltClass: lua_rawgeti(Handle, LUA_REGISTRYINDEX, ClassesInfo[internal_class_index(pointer(Data[0]), true)].Ref);
+    ltInteger: lua_pushinteger(Handle, F.VInteger);
+     ltDouble: lua_pushnumber(Handle, F.VDouble);
+     ltString: push_lua_string(FStringValue);
+    ltPointer: lua_pushlightuserdata(Handle, F.VPointer);
+  (*    ltClass: lua_rawgeti(Handle, LUA_REGISTRYINDEX, ClassesInfo[internal_class_index(pointer(Data[0]), true)].Ref);
      ltObject: begin
                  if (TClass(pointer(Data[0])^) = TLuaReference) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(Data[0]).Index)
                  else
@@ -8727,111 +8658,151 @@ begin
         ltSet: begin
                  with PLuaSet(@FLuaType)^, Info^ do
                  push_userdata(ClassesInfo[FClassIndex], not IsRef, Data).is_const := IsConst;
-               end;
+               end; *)
       ltTable: begin
-                 FBufferArg.str_data := 'LuaTable';
-                 push_luaarg := false;
-                 exit;
+                 FStringBuffer.Default := 'LuaTable';
+                 Result := False;
+                 Exit;
                end;
   else
-    if (FBufferArg.str_data <> '') then FBufferArg.str_data := '';
-    TIntToStr(@IntToStr)(byte(FLuaType), FBufferArg.str_data);
-    push_luaarg := false;
-    exit;
+    TIntToStr(@IntToStr)(Byte(F.LuaType), FStringBuffer.Default);
+    Result := False;
+    Exit;
   end;
 
-  push_luaarg := true;
+  Result := True;
 end;
-            *)
-        (*
-function TLua.push_argument(const Value: TVarRec): boolean;
+
+function TLua.push_variant(const Value: Variant): Boolean;
 type
-  TIntToStr = procedure(const Value: integer; var Ret: string);
+  TDateProc = procedure(const DateTime: TDateTime; var Result: string);
+  TIntToStr = procedure(const Value: Integer; var Result: string);
 var
-  Buf: array[0..3] of char;
+  VType: Integer;
+  PValue: Pointer;
+begin
+  // TVarType, Data
+  VType := TVarData(Value).VType;
+  PValue := @TVarData(Value).VWords[3];
+  if (VType and varByRef <> 0) then
+  begin
+    VType := VType and (not varByRef);
+    PValue := PPointer(PValue)^;
+  end;
+
+  // push
+  case (VType) of
+    varEmpty, varNull, varError{EmptyParam}: lua_pushnil(Handle);
+    varSmallint: lua_pushinteger(Handle, PSmallInt(PValue)^);
+    varInteger : lua_pushinteger(Handle, PInteger(PValue)^);
+    varSingle  : lua_pushnumber(Handle, PSingle(PValue)^);
+    varDouble  : lua_pushnumber(Handle, PDouble(PValue)^);
+    varCurrency: lua_pushnumber(Handle, PCurrency(PValue)^);
+    varDate    :
+    begin
+      if (Pointer(FStringBuffer.Default) <> nil) then FStringBuffer.Default := '';
+
+      case InspectDateTime(PDateTime(PValue)^) of
+        0: TDateProc(@DateTimeToStr)(PDouble(PValue)^, FStringBuffer.Default);
+        1: TDateProc(@DateToStr)(PDouble(PValue)^, FStringBuffer.Default);
+        2: TDateProc(@TimeToStr)(PDouble(PValue)^, FStringBuffer.Default);
+      end;
+
+      {$ifdef UNICODE}push_unicode_string{$else}push_ansi_string{$endif}(FStringBuffer.Default);
+    end;
+    {$ifNdef NEXTGEN}
+    varOleStr  : push_wide_string(PWideString(PValue)^);
+    {$endif}
+    varBoolean : lua_pushboolean(Handle, PBoolean(PValue)^);
+    varShortInt: lua_pushinteger(Handle, PShortInt(PValue)^);
+    varByte    : lua_pushinteger(Handle, PByte(PValue)^);
+    varWord    : lua_pushinteger(Handle, PWord(PValue)^);
+    varLongWord: lua_pushnumber(Handle, PLongWord(PValue)^);
+    varInt64   : lua_pushnumber(Handle, PInt64(PValue)^);
+    $15{UInt64}: lua_pushnumber(Handle, PUInt64(PValue)^);
+    {$ifdef UNICODE}
+    varUString : push_unicode_string(PUnicodeString(PValue)^);
+    {$endif}
+    {$ifNdef NEXTGEN}
+    varString  : push_ansi_string(PAnsiString(PValue)^);
+    {$endif}
+  else
+    TIntToStr(@IntToStr)(VType, FStringBuffer.Default);
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+end;
+
+function TLua.push_argument(const Value: TVarRec): Boolean;
+type
+  TIntToStr = procedure(const Value: Integer; var Result: string);
 begin
   with Value do
   case (VType) of
     vtInteger:   lua_pushinteger(Handle, VInteger);
     vtBoolean:   lua_pushboolean(Handle, VBoolean);
-    vtChar:      begin
-                   Buf[0] := VChar;
-                   Buf[1] := #0;
-                   lua_push_pchar(Handle, @Buf[0]);
-                 end;
     vtExtended:  lua_pushnumber(Handle, VExtended^);
-    vtString:    with FBufferArg do
-                 begin
-                   str_data := VString^;
-                   lua_push_pascalstring(Handle, str_data);
+    vtInt64:     lua_pushnumber(Handle, VInt64^);
+    vtCurrency:  lua_pushnumber(Handle, VCurrency^);
+    vtVariant:   begin
+                   Result := push_variant(VVariant^);
+                   Exit;
                  end;
-    vtPointer:   if (VPointer = nil) then lua_pushnil(Handle) else lua_pushlightuserdata(Handle, VPointer);
-    vtPChar:     lua_push_pchar(Handle, VPChar);
-    vtObject:    if (VObject = nil) then lua_pushnil(Handle) else
+    vtPointer,
+    vtInterface: if (VPointer = nil) then lua_pushnil(Handle) else lua_pushlightuserdata(Handle, VPointer);
+(*    vtObject:    if (VObject = nil) then lua_pushnil(Handle) else
                  begin
                    if (TClass(pointer(VObject)^) = TLuaReference) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(VObject).Index)
                    else
                    push_userdata(ClassesInfo[internal_class_index(TClass(pointer(VObject)^), true)], false, pointer(VObject));
                  end;
     vtClass:     if (VClass = nil) then lua_pushnil(Handle) else lua_rawgeti(Handle, LUA_REGISTRYINDEX, ClassesInfo[internal_class_index(pointer(VClass), true)].Ref);
-    vtWideChar:  begin
-                   integer(Buf) := 0;
-                   PWideChar(@Buf)^ := VWideChar;
-                   FBufferArg.str_data := PWideChar(@Buf);
-                   lua_push_pascalstring(Handle, FBufferArg.str_data);
-                 end;
-    vtPWideChar: begin
-                   FBufferArg.str_data := VPWideChar;
-                   lua_push_pascalstring(Handle, FBufferArg.str_data);
-                 end;
-    vtAnsiString:lua_push_pascalstring(Handle, string(VAnsiString));
-    vtCurrency:  lua_pushnumber(Handle, VCurrency^);
-    vtVariant:   begin
-                   push_argument := push_variant(VVariant^);
-                   exit;
-                 end;
-    vtWideString:begin
-                   FBufferArg.str_data := pwidestring(VWideString)^;
-                   lua_push_pascalstring(Handle, FBufferArg.str_data);
-                 end;
-    vtInt64:     lua_pushnumber(Handle, VInt64^);
+*)
+    {$ifNdef NEXTGEN}
+    vtChar:      push_ansi_chars(@VChar, 0, 1);
+    vtPChar:     push_ansi_chars(VPChar, 0, LStrLen(VPChar));
+    vtString:    push_short_string(PShortString(VString)^);
+    vtAnsiString:push_ansi_string(AnsiString(VAnsiString));
+    vtWideString:push_wide_string(WideString(VWideString));
+    {$endif}
+    vtWideChar:  push_wide_chars(@VWideChar, 1);
+    vtPWideChar: push_wide_chars(VPWideChar, WStrLen(VPWideChar));
+    {$ifdef UNICODE}
+    vtUnicodeString: push_unicode_string(UnicodeString(VUnicodeString));
+    {$endif}
   else
-    if (FBufferArg.str_data <> '') then FBufferArg.str_data := '';
-    TIntToStr(@IntToStr)(VType, FBufferArg.str_data);
-    push_argument := false;
-    exit;
+    TIntToStr(@IntToStr)(VType, FStringBuffer.Default);
+    Result := False;
+    Exit;
   end;
 
-  push_argument := true;
-end;        *)
+  Result := True;
+end;
 
-{procedure TLua.stack_pop(const count: integer);
+procedure TLua.stack_pop(const Count: Integer);
 begin
-  lua_settop(Handle, -count - 1);//lua_pop(Handle, count);
-end; }      (*
-procedure TLua.stack_pop(const count: integer);
-asm
-  not edx
-  mov eax, [eax + TLua.FHandle]
-  push edx
-  push eax
-  call lua_settop
-  add esp, 8
-end;       *)
-                     (*
-function TLua.stack_variant(var Ret: Variant; const StackIndex: integer): boolean;
+  lua_settop(Handle, not Count{-Count - 1}); // lua_pop(Handle, Count);
+end;
+
+function TLua.stack_variant(var Ret: Variant; const StackIndex: Integer): Boolean;
+const
+  varDeepData = $BFE8;
 var
+  VType, LuaType: Integer;
   VarData: TVarData absolute Ret;
-  Number: double;
-  IntValue: integer absolute Number;
-  luatype: integer;
 begin
-  // очистка если был занят
-  if (VarData.VType = varString) or (not (VarData.VType in VARIANT_SIMPLE)) then VarClear(Ret);
+  VType := VarData.VType;
+  if (VType and varDeepData <> 0) then
+  case VType of
+    varBoolean, varUnknown+1..varUInt64: ;
+  else
+    System.VarClear(Ret);
+  end;
 
-  // получение результата
-  luatype := lua_type(Handle, StackIndex);
-  case (luatype) of
+  LuaType := lua_type(Handle, StackIndex);
+  case (LuaType) of
         LUA_TNIL: begin
                     VarData.VType := varEmpty;
                   end;
@@ -8839,197 +8810,183 @@ begin
                     VarData.VType := varBoolean;
                     VarData.VBoolean := lua_toboolean(Handle, StackIndex);
                   end;
-     LUA_TNUMBER: if (NumberToInteger(Number, Handle, StackIndex)) then
-                  begin
-                    VarData.VType := varInteger;
-                    VarData.VInteger := IntValue;
-                  end else
-                  begin
-                    VarData.VType := varDouble;
-                    VarData.VDouble := Number;
+     LUA_TNUMBER: begin
+                    VarData.VDouble := lua_tonumber(Handle, StackIndex);
+                    if (NumberToInteger(VarData.VDouble, VarData.VInteger)) then
+                    begin
+                      VarData.VType := varInteger;
+                     end else
+                    begin
+                      VarData.VType := varDouble;
+                    end;
                   end;
      LUA_TSTRING: begin
-                    VarData.VType := varString;
-                    VarData.VInteger := 0;
+                    VarData.VUnknown := nil;
 
-                    { Unicode ??? todo }
-                    lua_to_pascalstring(string(VarData.VString), Handle, StackIndex);
+                    {$if Defined(NEXTGEN) or (Defined(LUA_UNICODE) and Defined(UNICODE))}
+                      VarData.VType := varUString;
+                      stack_unicode_string(UnicodeString(VarData.VUString), StackIndex);
+                    {$elseif Defined(LUA_ANSI)}
+                      VarData.VType := varString;
+                      stack_ansi_string(AnsiString(VarData.VString), StackIndex, 0);
+                    {$else .LUA_UNICODE}
+                      VarData.VType := varOleStr;
+                      stack_wide_string(WideString(VarData.VOleStr), StackIndex);
+                    {$ifend}
                   end;
-
   else
     VarData.VType := varEmpty;
-
-    // ошибочная ситуация
-    FBufferArg.str_data := LuaTypeName(luatype);
-
-    // результат - false
-    stack_variant := false;
-    exit;
+    GetLuaTypeName(FStringBuffer.Default, LuaType);
+    Result := False;
+    Exit;
   end;
 
-  stack_variant := true;
-end;         *)
-               (*
-function TLua.stack_luaarg(var Ret: TLuaArg; const StackIndex: integer; const lua_table_available: boolean): boolean;
+  Result := True;
+end;
+
+function TLua.stack_luaarg(var Ret: TLuaArg; const StackIndex: integer; const AllowLuaTable: Boolean): Boolean;
+label
+  copy_meta_params, fail_user_data, fail_lua_type;
 var
-  userdata: PLuaUserData;
-  ClassIndex: integer;
+  LuaType: Integer;
+  UserData: ^TLuaUserData;
+  LuaMetaType: ^TLuaMetaType;
   LuaTable: PLuaTable;
-  luatype: integer;
 begin
-  Result := true;
+  Result := True;
+  Ret.F.LuaType := ltEmpty;
 
-  Ret.FLuaType := ltEmpty;
-  luatype := lua_type(Handle, StackIndex);
-  case (luatype) of
-    LUA_TNIL          : {всё хорошо};
-    LUA_TBOOLEAN      : begin
-                          //Ret.AsBoolean := lua_toboolean(Handle, StackIndex);
-                          Ret.FLuaType := ltBoolean;
-                          Ret.Data[0] := ord(lua_toboolean(Handle, StackIndex));
-                        end;
-    LUA_TNUMBER       : begin
-                          // Ret.AsDouble := lua_tonumber(Handle, StackIndex); // автоматическая проверка на Int делается
-                          if (NumberToInteger(Ret.Data, Handle, StackIndex)) then
-                          Ret.FLuaType := ltInteger else Ret.FLuaType := ltDouble;
-                        end;
-    LUA_TSTRING       : begin
-                          // Ret.AsString := lua_tolstring(Handle, StackIndex, 0);
-                          // во избежание LStrClr и HandleFinally
-                          Ret.FLuaType := ltString;
-                          lua_to_pascalstring(Ret.str_data, Handle, StackIndex);
-                        end;
-    LUA_TLIGHTUSERDATA: begin
-                          // Ret.AsPointer := lua_touserdata(Handle, StackIndex);
-                          Ret.FLuaType := ltPointer;
-                          pointer(Ret.Data[0]) := lua_touserdata(Handle, StackIndex);
-                        end;
-    LUA_TFUNCTION     : {указатель на функцию}
-                        begin
-                          // Ret.AsPointer := CFunctionPtr(lua_tocfunction(Handle, StackIndex));
-                          Ret.FLuaType := ltPointer;
-                          pointer(Ret.Data[0]) := CFunctionPtr(lua_tocfunction(Handle, StackIndex));
+  LuaType := lua_type(Handle, StackIndex);
+  case (LuaType) of
+    LUA_TNIL:    {done};
+    LUA_TBOOLEAN:
+    begin
+      Ret.F.LuaType := ltBoolean;
+      Ret.F.VBoolean := lua_toboolean(Handle, StackIndex);
+    end;
+    LUA_TNUMBER:
+    begin
+      Ret.F.VDouble := lua_tonumber(Handle, StackIndex);
+      if (NumberToInteger(Ret.F.VDouble, Ret.F.VInteger)) then
+      begin
+        Ret.F.LuaType := ltInteger;
+      end else
+      begin
+        Ret.F.LuaType := ltDouble;
+      end;
+    end;
+    LUA_TSTRING:
+    begin
+      Ret.F.LuaType := ltString;
+      stack_lua_string(Ret.FStringValue, StackIndex);
+    end;
+    LUA_TLIGHTUSERDATA:
+    begin
+      Ret.F.LuaType := ltPointer;
+      Ret.F.VPointer := lua_touserdata(Handle, StackIndex);
+    end;
+    LUA_TFUNCTION:
+    begin
+      Ret.F.LuaType := ltPointer;
+      lua_CFunction(Ret.F.VPointer) := lua_tocfunction(Handle, StackIndex);
 
-                          // может быть что-то ещё ?
-                          if (dword(Ret.Data[0]) >= $FE000000) then
-                          begin
-                            Ret.FLuaType := ltInteger;
-                            Ret.Data[0] := Ret.Data[0] and $00FFFFFF;
-                          end;
-                        end;
+      (* ToDo  CFunctionPtr
+      // может быть что-то ещё ?
+      if (dword(Ret.Data[0]) >= $FE000000) then
+      begin
+        Ret.FLuaType := ltInteger;
+        Ret.Data[0] := Ret.Data[0] and $00FFFFFF;
+      end;  *)
+    end;
+    LUA_TUSERDATA:
+    begin
+      UserData := lua_touserdata(Handle, StackIndex);
+      if (UserData = nil) or (UserData.Instance = nil) then goto fail_user_data;
 
-    LUA_TUSERDATA     : begin
-                          // объект класса или структура или массив или ...
-                          userdata := lua_touserdata(Handle, StackIndex);
-                          Result := (userdata <> nil);
+      LuaMetaType := Pointer(TLuaList(FTypesList).FBytes);
+      Inc(NativeInt(LuaMetaType), NativeInt(UserData.LuaMetaType));
+      case (UserData.Kind) of
+        ukInstance:
+        begin
+          if (LuaMetaType.Kind = mkClass) then
+          begin
+            Ret.F.LuaType := ltObject;
+            Ret.F.VPointer := UserData.Instance;
+          end else
+          // if (LuaMetaType.Kind = mkRecord) then
+          begin
+            Ret.F.LuaType := ltRecord;
+            goto copy_meta_params;
+          end;
+        end;
+        ukArray:
+        begin
+          if (UserData.ArrayParams and $f = 0) then
+          begin
+            Ret.F.LuaType := ltArray;
+            goto copy_meta_params;
+          end else
+          begin
+            Ret.F.LuaType := ltPointer;
+            Ret.F.VPointer := UserData.Instance;
+          end;
+        end;
+        ukSet:
+        begin
+          Ret.F.LuaType := ltSet;
+        copy_meta_params:
+          with PLuaRecord{PLuaArray/PLuaSet}(@Ret.F)^ do
+          begin
+            Data := UserData.Instance;
+            Info := LuaMetaType.Info;
+            FIsRef := not UserData.GcDestroy;
+            FIsConst := UserData.IsConst;
+          end;
+        end;
+        ukProperty:
+        begin
+        fail_user_data:
+          UserData.GetDescription(FStringBuffer.Default, Self);
+          Result := False;
+        end;
+      end;
+    end;
+    LUA_TTABLE:
+    begin
+      // TClass, Info or LuaTable
+      //ClassIndex := LuaTableToClass(Handle, StackIndex);
+      LuaMetaType := nil{ToDo};
 
-                          if (Result) then
-                          with userdata^ do
-                          case kind of
-                             ukInstance: with ClassesInfo[ClassIndex] do
-                                         if (_ClassKind = ckClass) then
-                                         begin
-                                           if (instance <> nil) then
-                                           begin
-                                             // Ret.AsObject := TObject(instance);
-                                             Ret.FLuaType := ltObject;
-                                             pointer(Ret.Data[0]) := instance;
-                                           end;
-                                         end else
-                                         begin
-                                           // Ret.AsRecord := LuaRecord(instance, PLuaRecordInfo(_Class), not gc_destroy, is_const);
-                                           Ret.FLuaType := ltRecord;
-                                           with PLuaRecord(@Ret.FLuaType)^ do
-                                           begin
-                                             Data := instance;
-                                             Info := PLuaRecordInfo(_Class);
-                                             FIsRef := not gc_destroy;
-                                             FIsConst := is_const;
-                                           end;
-                                         end;
+      if (Assigned(LuaMetaType)) then
+      begin
+        if (LuaMetaType.Kind = mkClass) then
+        begin
+          Ret.F.LuaType := ltClass;
+          Ret.F.VPointer := LuaMetaType.Info;
+        end else
+        begin
+          Ret.F.LuaType := ltPointer;
+          Ret.F.VPointer := LuaMetaType.Info;
+        end;
+      end else
+      if (AllowLuaTable) then
+      begin
+        PInteger(@Ret.F)^ := {clear and set} Ord(ltTable);
 
-                                ukArray: begin
-                                           // ckArray
-                                           if (array_params and $f = 0) then
-                                           begin
-                                             // Ret.AsArray := LuaArray(instance, ArrayInfo, not gc_destroy, is_const)
-                                             Ret.FLuaType := ltArray;
-                                             with PLuaArray(@Ret.FLuaType)^ do
-                                             begin
-                                               Data := instance;
-                                               Info := ArrayInfo;
-                                               FIsRef := not gc_destroy;
-                                               FIsConst := is_const;
-                                             end;
-                                           end else
-                                           begin
-                                             // Ret.AsPointer := instance;
-                                             Ret.FLuaType := ltPointer;
-                                             pointer(Ret.Data[0]) := instance;
-                                           end;
-                                         end;
-
-                                  ukSet: begin
-                                           // Ret.AsSet := LuaSet(instance, SetInfo, not gc_destroy, is_const);
-                                           Ret.FLuaType := ltSet;
-                                           with PLuaSet(@Ret.FLuaType)^ do
-                                           begin
-                                             Data := instance;
-                                             Info := SetInfo;
-                                             FIsRef := not gc_destroy;
-                                             FIsConst := is_const;
-                                           end;
-                                         end;
-
-                            ukProperty: Result := false; // Ret.Empty уже = true
-                          end;
-
-                          if (not Result) then
-                          GetUserDataType(FBufferArg.str_data, Self, userdata);
-                        end;
-    LUA_TTABLE        : begin
-                          // TClass, Info или Таблица
-                          ClassIndex := LuaTableToClass(Handle, StackIndex);
-
-                          if (ClassIndex >= 0) then
-                          begin
-                            with ClassesInfo[ClassIndex] do
-                            if (_ClassKind = ckClass) then
-                            begin
-                              // Ret.AsClass := TClass(_Class);
-                              Ret.FLuaType := ltClass;
-                              pointer(Ret.Data[0]) := _Class;
-                            end else
-                            begin
-                              // информация по структуре, массиву или множеству
-                              // Ret.AsPointer := _Class;
-                              Ret.FLuaType := ltPointer;
-                              pointer(Ret.Data[0]) := _Class;
-                            end;
-                          end else
-                          if (lua_table_available) then
-                          begin
-                            // луа-таблица
-                            Ret.FLuaType := ltTable;
-                            LuaTable := PLuaTable(@Ret.FLuaType);
-                            pinteger(@LuaTable.align)^ := 0; // просто очистить align
-
-                            LuaTable.Index_ := StackIndex;
-                            LuaTable.Lua := Self;
-                          end else
-                          begin
-                            Result := false;
-                            FBufferArg.str_data := LuaTypeName(luatype{LUA_TTABLE});
-                          end;
-                        end;
-    else
-      // ошибочная ситуация
-      FBufferArg.str_data := LuaTypeName(luatype);
-      Result := false;
+        LuaTable := PLuaTable(@Ret.F);
+        LuaTable.FLua := Self;
+        LuaTable.FIndex := StackIndex;
+      end else
+      begin
+        goto fail_lua_type;
+      end;
+    end;
+  else
+  fail_lua_type:
+    GetLuaTypeName(FStringBuffer.Default, LuaType);
+    Result := False;
   end;
-end;       *)
-
-
+end;
 
                  (*
 procedure __TLuaGarbageCollection(const Self: TLua; const ReturnAddr: pointer);
@@ -10035,65 +9992,46 @@ begin
   if (internal_exception <> nil) then raise internal_exception at CodeAddr;
 end;        *)
 
-             (*
-procedure TLua.global_alloc_ref(var ref: integer);
+procedure TLua.global_alloc_ref(var Ref: Integer);
 begin
-  if (ref = 0) then
+  if (Ref = 0) then
   begin
-    dec(FRef); 
-    ref := FRef;
+    Dec(FRef);
+    Ref := FRef;
   end;
-end;  *)
-          (*
-procedure TLua.global_free_ref(var ref: integer);
+end;
+
+procedure TLua.global_free_ref(var Ref: Integer);
 begin
-  if (ref < 0) then
+  if (Ref < 0) then
   begin
     lua_pushnil(Handle);
-    lua_rawseti(Handle, LUA_REGISTRYINDEX, ref);
-    ref := 0;
+    lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref);
+    Ref := 0;
   end;
-end;      *)
-              (*
-procedure TLua.global_fill_value(const ref: integer);
-{begin
-  if (ref <= 0) then stack_pop()
-  else lua_rawseti(Handle, LUA_REGISTRYINDEX, ref);
-end;}
-asm
-  mov ecx, [eax + TLua.FHandle]
-  test edx, edx
-  jl @rawset
-    mov edx, 1
-    jmp TLua.stack_pop
-@rawset:
-  push edx
-  push LUA_REGISTRYINDEX
-  push ecx
-  call [lua_rawseti]
-  add esp, 12
-end;      *)
+end;
 
-(*procedure TLua.global_push_value(const ref: integer);
-{begin
-  if (ref <= 0) then lua_pushnil(Handle)
-  else lua_rawgeti(Handle, LUA_REGISTRYINDEX, ref);
-end;}
-asm
-  mov ecx, [eax + TLua.FHandle]
-  test edx, edx
-  jl @rawget
-    push ecx
-    call [lua_pushnil]
-    pop eax
-    ret
-@rawget:
-  push edx
-  push LUA_REGISTRYINDEX
-  push ecx
-  call [lua_rawgeti]
-  add esp, 12
-end;    *)
+procedure TLua.global_fill_value(const Ref: Integer);
+begin
+  if (Ref <= 0) then
+  begin
+    stack_pop;
+  end else
+  begin
+    lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref);
+  end;
+end;
+
+procedure TLua.global_push_value(const Ref: Integer);
+begin
+  if (Ref <= 0) then
+  begin
+    lua_pushnil(Handle);
+  end else
+  begin
+    lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref);
+  end;
+end;
                           (*
 // Index - позиция переменной в глобальном списке GlobalVariables если результат = true
 // если false, то Index = place в массиве NameSpaceHash

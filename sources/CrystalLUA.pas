@@ -185,6 +185,8 @@ type
     AnsiChar = Byte;
     PAnsiChar = PByte;
     AnsiString = TBytes;
+    ShortString = array[Byte] of Byte;
+    PShortString = ^ShortString;
   {$endif}
 
   // internal string identifier: utf8 or ansi
@@ -198,6 +200,7 @@ type
   
   // internal containers
   __TLuaMemoryHeap = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
+  __TLuaStack = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaBuffer = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaStringDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
@@ -439,81 +442,35 @@ type
   TLuaMetaKind = (mkClass, mkRecord, mkArray, mkSet);
   TLuaMetaType = object
   protected
-    FLua: TLua;
-    FName: __luaname;
     F: record
+      Marker: Integer;
       Kind: TLuaMetaKind;
+      Align: array[0..2] of Byte;
 
       {$ifdef LARGEINT}
       Ptr: __luapointer;
       {$endif}
+      Ref: Integer;
     case Integer of
       0: (TypeInfo: PTypeInfo);
       1: (AClass: TClass);
     end;
+    FLua: TLua;
+    FNameOffset: Cardinal;
 
-   // FNameSpace: TLuaDictionary;
-   // FLocalItems: array of __luapointer;
     function GetName: LuaString;
     {$ifdef SMALLINT}
     function GetPtr: __luapointer; {$ifdef INLINESUPPORT}inline;{$endif}
     {$endif}
   protected
-
     property Kind: TLuaMetaKind read F.Kind;
     property Ptr: __luapointer read {$ifdef SMALLINT}GetPtr{$else .LARGEINT}F.Ptr{$endif};
+    property Ref: Integer read F.Ref;
   public
-    //Info: Pointer; // TClass, PLuaRecordInfo, PLuaArrayInfo, PLuaSetInfo
-
     property Lua: TLua read FLua;
     property Name: LuaString read GetName;
   end;
   PLuaMetaType = ^TLuaMetaType;
-
-  (*
-  { информация по классу . его процедуры и свойства }
-  { а так же список имён }
-  TLuaClassKind = (ckClass, ckRecord, ckArray, ckSet);
-  TLuaClassInfo = object
-  private
-    // список доступных имён. нужен для того чтобы исключить коллизию и дублирование имён
-    //Names: TLuaHashIndexDynArray;
-    // возвращает индекс. отрицательный (для свойств) или положительный (для методов)
-    //function  InternalAddName(const Name: string; const AsProc: boolean; var Initialized: boolean; const CodeAddr: pointer): integer;
-  private
-    // персональные функции-конструкторы/деструкторы
-    __Create, __Free: pointer; //lua_CFunction
-    // альтернативный (дополняющий) конструктор
-    constructor_address: pointer;
-    constructor_args_count: integer;
-    // указатель на метод assign(arg: tluaarg)
-    assign_address: pointer;
-
-    // полный список имён включая предков. Index = {1: is_proc, 15: class_index, 16: index}
-    // в global native используется как список по всем глобальным переменным (свой алгоритм)
-    NameSpace: TLuaHashIndexDynArray;
-    //function NameSpacePlace(const Lua: TLua; const Name: pchar; const NameLength: integer; var ProcInfo, PropertyInfo: pointer): integer;
-  public
-    _Class: pointer;  // TClass, PLuaRecordInfo, PLuaArrayInfo, PLuaSetInfo
-    _ClassKind: TLuaClassKind;
-    _ClassSimple: boolean; // для убыстренного поиска в простых классах и структурах
-    _ClassName: string; // имя типа: класса или структуры
-    _ClassIndex: integer;
-    _DefaultProperty: integer; // свойство по умолчанию: (AX: ClassIndex, AY: PropertyIndex)
-    ParentIndex: integer;
-    Ref: integer;
-
-    Procs: TLuaProcInfoDynArray; // методы, функции
-    Properties: TLuaPropertyInfoDynArray; // свойства
-
-    //function  PropertyIdentifier(const Name: string = ''): string;
-    //procedure Cleanup();
-  end;
-  PLuaClassInfo = ^TLuaClassInfo;
-  TLuaClassInfoDynArray = array of TLuaClassInfo;
-
-    *)
-
 
   // operators
   TLuaOperator = (loNeg, loAdd, loSub, loMul, loDiv, loMod, loPow, loCompare);
@@ -610,9 +567,64 @@ type
     FNameSpace: __TLuaDictionary;
     FLocalItems: array of __luapointer;
   public
+    // lua_CFunction
+    CFunctionCreate, CFunctionFree: Pointer;
 
+    // special registered method
+    AssignCallback: Pointer;
+    CreateCallback: Pointer;
+    CreateCallbackArgsCount: Integer;
+
+    // advanced
+    Parent: __luapointer;
+    DefaultProperty: __luapointer;
     property AClass: TClass read F.AClass;
   end;
+
+  (*
+  { информация по классу . его процедуры и свойства }
+  { а так же список имён }
+  TLuaClassKind = (ckClass, ckRecord, ckArray, ckSet);
+  TLuaClassInfo = object
+  private
+    // список доступных имён. нужен для того чтобы исключить коллизию и дублирование имён
+    //Names: TLuaHashIndexDynArray;
+    // возвращает индекс. отрицательный (для свойств) или положительный (для методов)
+    //function  InternalAddName(const Name: string; const AsProc: boolean; var Initialized: boolean; const CodeAddr: pointer): integer;
+  private
+    // персональные функции-конструкторы/деструкторы
+    __Create, __Free: pointer; //lua_CFunction
+    // альтернативный (дополняющий) конструктор
+    constructor_address: pointer;
+    constructor_args_count: integer;
+    // указатель на метод assign(arg: tluaarg)
+    assign_address: pointer;
+
+    // полный список имён включая предков. Index = {1: is_proc, 15: class_index, 16: index}
+    // в global native используется как список по всем глобальным переменным (свой алгоритм)
+    NameSpace: TLuaHashIndexDynArray;
+    //function NameSpacePlace(const Lua: TLua; const Name: pchar; const NameLength: integer; var ProcInfo, PropertyInfo: pointer): integer;
+  public
+    _Class: pointer;  // TClass, PLuaRecordInfo, PLuaArrayInfo, PLuaSetInfo
+    _ClassKind: TLuaClassKind;
+    _ClassSimple: boolean; // для убыстренного поиска в простых классах и структурах
+    _ClassName: string; // имя типа: класса или структуры
+    _ClassIndex: integer;
+    _DefaultProperty: integer; // свойство по умолчанию: (AX: ClassIndex, AY: PropertyIndex)
+    ParentIndex: integer;
+    Ref: integer;
+
+    Procs: TLuaProcInfoDynArray; // методы, функции
+    Properties: TLuaPropertyInfoDynArray; // свойства
+
+    //function  PropertyIdentifier(const Name: string = ''): string;
+    //procedure Cleanup();
+  end;
+  PLuaClassInfo = ^TLuaClassInfo;
+  TLuaClassInfoDynArray = array of TLuaClassInfo;
+
+    *)
+
 
 
   (*
@@ -873,6 +885,11 @@ type
       Default: string;
     end;
 
+    procedure unpack_lua_string(var Result: LuaString; const RttiName: ShortString); overload;
+    procedure unpack_lua_string(var Result: LuaString; const Chars: __luadata; const Count: Integer); overload;
+    procedure unpack_lua_string(var Result: LuaString; const Name: __luaname); overload;
+    procedure unpack_lua_string(var Result: LuaString; const Buffer: __luabuffer); overload;
+
     procedure push_ansi_chars(const S: PAnsiChar; const CodePage: Word; const Count: Integer);
     procedure push_utf8_chars(const S: PAnsiChar; const Count: Integer);
     procedure push_wide_chars(const S: PWideChar; const Count: Integer);
@@ -904,13 +921,12 @@ type
     procedure stack_pop(const Count: Integer = 1);
     function  stack_variant(var Ret: Variant; const StackIndex: Integer): Boolean;
     function  stack_luaarg(var Ret: TLuaArg; const StackIndex: integer; const AllowLuaTable: Boolean): Boolean;
-
   protected
     // global name space
     FRef: Integer;
+    FRefStack: __TLuaStack;
     FMemoryHeap: __TLuaMemoryHeap;
     FNames: __TLuaStringDictionary{<LuaString,__luaname>};
-//    FGlobalEntities: __TLuaList {TLuaGlobalEntity};
     FMetaTypes: __TLuaDictionary {Pointer, PMetaType};
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
 
@@ -920,12 +936,13 @@ type
   //  property  NameSpaceHash: TLuaHashIndexDynArray read GlobalNative.NameSpace; // Hash по всем глобальным переменным и функциям
   *)
     // internal reference table
-    procedure global_alloc_ref(var Ref: Integer);
+    function global_alloc_ref: Integer; 
     procedure global_free_ref(var Ref: Integer);
     procedure global_fill_value(const Ref: Integer);
     procedure global_push_value(const Ref: Integer);
 
     // dictionaty: find or add (+ internal reference)
+    function GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
     function GetLuaName(const Value: LuaString): __luaname;
 
     // найти глобальную переменную. если false, то Index - place в hash списке глобальных имён
@@ -958,21 +975,21 @@ type
     ClassesIndexesByName: TLuaClassIndexDynArray; // то же самое по именам
     EnumerationList: TIntegerDynArray; // список enumeration typeinfo, чтобы по несколько раз не регистрировать Enum-ы
   *)     (*
-    procedure INITIALIZE_NAME_SPACE();
-    function  internal_class_index(AClass: pointer; const look_class_parents: boolean = false): integer;
-    function  internal_class_index_by_name(const AName: string): integer;
-    function  internal_add_class_info(const is_global_space: boolean = false): integer;
-    function  internal_add_class_index(const AClass: pointer; const AIndex: integer): integer;
-    function  internal_add_class_index_by_name(const AName: string; const AIndex: integer): integer;
-    function  internal_register_global(const Name: string; const Kind: TLuaGlobalKind; const CodeAddr: pointer): PLuaGlobalVariable;
-    function  internal_register_metatable(const CodeAddr: pointer; const GlobalName: string=''; const ClassIndex: integer = -1; const is_global_space: boolean = false): integer;
-    function  InternalAddClass(AClass: TClass; UsePublished: boolean; const CodeAddr: pointer): integer;
-    function  InternalAddRecord(const Name: string; tpinfo, CodeAddr: pointer): integer;
-    function  InternalAddArray(Identifier, itemtypeinfo, CodeAddr: pointer; const ABounds: array of integer): integer;
-    function  InternalAddSet(tpinfo, CodeAddr: pointer): integer;
-    function  InternalAddProc(const IsClass: boolean; AClass: pointer; const ProcName: string; ArgsCount: integer; const with_class: boolean; Address, CodeAddr: pointer): integer;
-    function  InternalAddProperty(const IsClass: boolean; AClass: pointer; const PropertyName: string; tpinfo: ptypeinfo; const IsConst, IsDefault: boolean; const PGet, PSet, Parameters, CodeAddr: pointer): integer;
-               *) (*
+    procedure INITIALIZE_NAME_SPACE();    *)
+    function  InternalNearestClass(const AClass: TClass): PLuaMetaType;
+    function  InternalRegMetaTable(const MetaType: PLuaMetaType = nil): Integer;
+    function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
+    function  InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem}; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaMetaType;
+    function  InternalAddClass(const AClass: TClass; const UsePublished: Boolean; const ReturnAddress: Pointer): PLuaClassInfo;
+    function  InternalAddRecord(const Name: LuaString; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaRecordInfo;
+(*    function  InternalAddArray(Identifier, itemtypeinfo, CodeAddr: pointer; const ABounds: array of integer): integer;
+    function  InternalAddSet(tpinfo, CodeAddr: pointer): integer;   *)
+    function  InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString; ArgsCount: Integer; const AProcKind: Byte{TLuaProcKind}; Address, ReturnAddress: Pointer): __luapointer;
+    function  InternalAddProperty(const MetaType: PLuaMetaType; const PropertyName: LuaString;
+      const TypeInfo: Pointer;
+      const IsConst, IsDefault: Boolean; const PGet, PSet: Pointer; const InternalIndex: Integer;
+      const Parameters, ReturnAddress: Pointer): __luapointer;
+                (*
     function __tostring(): integer;
     function __inherits_from(): integer;
     function __assign(): integer;
@@ -991,8 +1008,8 @@ type
     function __array_newindex(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
     function __array_dynamic_resize(): integer;
     function __array_include(const mode: integer{constructor, include, concat}): integer;
-    function __set_method(const is_construct: boolean; const method: integer{0..2}): integer;
-    function  ProcCallback(const ClassInfo: TLuaClassInfo; const ProcInfo: TLuaProcInfo): integer;  *)
+    function __set_method(const is_construct: boolean; const method: integer{0..2}): integer;   *)
+    function  ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
   private
     // scripts and units routine
     FPointPreprocess: Boolean;
@@ -1045,11 +1062,11 @@ type
     function ProcExists(const ProcName: string): boolean;
     function Call(const ProcName: string; const Args: TLuaArgs): TLuaArg; overload;
     function Call(const ProcName: string; const Args: array of const): TLuaArg;  overload;
-        *)  (*
-    // регистрация
-    procedure RegClass(const AClass: TClass; const use_published: boolean = true);
-    procedure RegClasses(const AClasses: array of TClass; const use_published: boolean = true);
-    function  RegRecord(const Name: string; const tpinfo: ptypeinfo): PLuaRecordInfo;
+        *)
+    // registrations
+    procedure RegClass(const AClass: TClass; const UsePublished: Boolean = True);
+    procedure RegClasses(const AClasses: array of TClass; const UsePublished: Boolean = True);
+  (*  function  RegRecord(const Name: string; const tpinfo: ptypeinfo): PLuaRecordInfo;
     function  RegArray(const Identifier: pointer; const itemtypeinfo: pointer; const Bounds: array of integer): PLuaArrayInfo;
     function  RegSet(const tpinfo: ptypeinfo): PLuaSetInfo;
     procedure RegProc(const ProcName: string; const Proc: TLuaProc; const ArgsCount: integer=-1); overload;
@@ -1085,14 +1102,14 @@ const
   LUA_CONSTRUCTOR = 'constructor';
   LUA_ASSIGN = 'assign';
 
-  // параметры typeinfo
-  TypeInfoTClass  = PTypeInfo($7FFF0000);
-  TypeInfoPointer = PTypeInfo($7EEE0000);
-  TypeInfoUniversal = PTypeInfo($7DDD0000);
+  // special TypeInfo
+  TypeInfoTClass  = PTypeInfo(NativeInt($7FFF0000) {$ifdef LARGEINT} shl 32{$endif});
+  TypeInfoPointer = PTypeInfo(NativeInt($7EEE0000) {$ifdef LARGEINT} shl 32{$endif});
+  TypeInfoUniversal = PTypeInfo(NativeInt($7DDD0000) {$ifdef LARGEINT} shl 32{$endif});
 
-  // difficult properties parameters
-  INDEXED_PROPERTY = PLuaRecordInfo($7EEEEEEE);
-  NAMED_PROPERTY   = PLuaRecordInfo($7AAAAAAA);
+  // special difficult properties parameters
+  INDEXED_PROPERTY = PLuaRecordInfo(NativeInt($7EEEEEEE) {$ifdef LARGEINT} shl 32{$endif});
+  NAMED_PROPERTY   = PLuaRecordInfo(NativeInt($7AAAAAAA) {$ifdef LARGEINT} shl 32{$endif});
 
   // all possible operators
   ALL_OPERATORS: TLuaOperators = [Low(TLuaOperator)..High(TLuaOperator)];
@@ -1291,6 +1308,8 @@ const
   LUA_TTABLE         = 5;
   LUA_TFUNCTION      = 6;
   LUA_TUSERDATA      = 7;
+
+  LUA_METATYPE_MARKER = Ord('L') or (Ord('M') shl 8) or (Ord('T') shl 16) or (Ord('M') shl 24);
 
 var
   lua_open: function: Plua_State; cdecl;
@@ -1620,6 +1639,18 @@ end;
 
 const
   NULL_CHAR: Byte = 0;
+  RECORD_TYPES: set of TTypeKind = [tkRecord{$ifdef FPC}, tkObject{$endif}];
+
+  {$ifdef SMALLINT}
+    PROPSLOT_MASK    = $FF000000;
+    PROPSLOT_FIELD   = $FF000000;
+    PROPSLOT_VIRTUAL = $FE000000;
+  {$else .LARGEINT}
+    PROPSLOT_MASK    = $FF00000000000000;
+    PROPSLOT_FIELD   = $FF00000000000000;
+    PROPSLOT_VIRTUAL = $FE00000000000000;
+  {$endif}
+  PROPSLOT_VRTMASK = $FFFF;
 
   {$if Defined(MSWINDOWS) or Defined(FPC) or (CompilerVersion < 22)}
     {$define WIDE_STR_SHIFT}
@@ -2337,8 +2368,8 @@ const
   MEMORY_BLOCK_SIZE = 64 * 1024;
   MEMORY_BLOCK_CLEAR = -MEMORY_BLOCK_SIZE;
   MEMORY_BLOCK_TEST = MEMORY_BLOCK_SIZE - 1;
-  MEMORY_BLOCK_MARKER_LOW = Ord('C') + Ord('r') shl 8 + Ord('y') shl 16 + Ord('s') shl 24;
-  MEMORY_BLOCK_MARKER_HIGH = Ord('C') + Ord('L') shl 8 + Ord('u') shl 16 + Ord('a') shl 24;
+  MEMORY_PAGE_MARKER_LOW = Ord('C') + Ord('r') shl 8 + Ord('y') shl 16 + Ord('s') shl 24;
+  MEMORY_PAGE_MARKER_HIGH = Ord('C') + Ord('F') shl 8 + Ord('u') shl 16 + Ord('n') shl 24;
 
 type
   PLuaCFunctionData = ^TLuaCFunctionData;
@@ -2356,6 +2387,8 @@ type
 
   PLuaCFunctionPage = ^TLuaCFunctionPage;
   TLuaCFunctionPage = object
+    MarkerLow: Integer;
+    MarkerHigh: Integer;
     Items: PLuaCFunctionData;
     Allocated: Cardinal;
 
@@ -2373,9 +2406,6 @@ type
     // 11 - contains empties
     Reserved: Word;
     Empties: Word;
-    // CrysCLua
-    MarkerLow: Integer;
-    MarkerHigh: Integer;
     // single linked list
     Next: PLuaCFunctionBlock;
   end;
@@ -2470,6 +2500,9 @@ var
   i, Count: NativeInt;
   List: ^TList;
 begin
+  MarkerLow := MEMORY_PAGE_MARKER_LOW;
+  MarkerHigh := MEMORY_PAGE_MARKER_HIGH;
+
   List := Pointer(@Self);
   if (NativeInt(List) and MEMORY_BLOCK_TEST <> 0) then
   begin
@@ -2591,8 +2624,6 @@ begin
     if (Block <> nil) then
     begin
       Result := CommitPage(Block, 0).Alloc;
-      Block.MarkerLow := MEMORY_BLOCK_MARKER_LOW;
-      Block.MarkerHigh := MEMORY_BLOCK_MARKER_HIGH;
       Block.Next := Self.Blocks;
       Self.Blocks := Block;
     end;
@@ -2659,6 +2690,9 @@ end;
 const
   HEAP_BUFFER_SHIFT = 13{8Kb};
   HEAP_BUFFER_SIZE = 1 shl HEAP_BUFFER_SHIFT;
+  HEAP_BUFFER_MASK = HEAP_BUFFER_SIZE - 1;
+
+  LUA_POINTER_INVALID = __luapointer(-1);
 
 type
 (*  TLuaList = object{<T>}
@@ -2689,6 +2723,21 @@ type
     property Count: NativeInt read FCount;
     property Items[const AIndex: NativeInt]: Pointer read GetItem;
   end; *)
+
+  TLuaStack = object
+  private
+    FItems: TIntegerDynArray;
+    FCount: NativeInt;
+    FCapacity: NativeInt;
+  public
+    procedure Clear;
+    procedure Push(const Value: Integer);
+    function Pop: Integer;
+
+    property Items: TIntegerDynArray read FItems;
+    property Count: NativeInt read FCount;
+    property Capacity: NativeInt read FCapacity;
+  end;
 
   TLuaMemoryHeap = object
   private
@@ -2743,6 +2792,7 @@ type
     procedure TrimExcess;
     function Find(const Key: Pointer): PLuaDictionaryItem; {$ifdef INLINESUPPORT}inline;{$endif}
     procedure Add(const Key: Pointer; const Value: __luapointer);
+    function FindValue(const Key: Pointer): __luapointer;
 
     property Capacity: NativeInt read FCapacity;
     property Count: NativeInt read FCount;
@@ -2772,6 +2822,7 @@ type
     procedure TrimExcess;
     function Find(const Key: LuaString): PLuaStringDictionaryItem; {$ifdef INLINESUPPORT}inline;{$endif}
     procedure Add(const Key: LuaString; const Value: __luaname);
+    function FindValue(const Key: LuaString): __luaname;
 
     property Capacity: NativeInt read FCapacity;
     property Count: NativeInt read FCount;
@@ -2882,6 +2933,60 @@ begin
     raise ELua.CreateFmt('Invalid item index %d, items count: %d', [AIndex, Count]);
   end;
 end;  *)
+
+procedure TLuaStack.Clear;
+begin
+  FItems := nil;
+  FCount := 0;
+  FCapacity := 0;
+end;
+
+procedure TLuaStack.Push(const Value: Integer);
+label
+  start;
+var
+  C: NativeInt;
+begin
+start:
+  C := FCount;
+  if (C = FCapacity) then
+  begin
+    Inc(C);
+    FCount := C;
+    Dec(C);
+    FItems[C] := Value;
+    Exit;
+  end else
+  begin
+    if (C = 0) then
+    begin
+      C := 16;
+    end else
+    begin
+      Inc(C, C);
+    end;
+    FCapacity := C;
+    SetLength(FItems, C);
+    goto start;
+  end;
+end;
+
+function TLuaStack.Pop: Integer;
+var
+  C: NativeInt;
+begin
+  C := FCount;
+  if (C > 0) then
+  begin
+    Dec(C);
+    FCount := C;
+    Result := FItems[C];
+    Exit;
+  end else
+  begin
+    raise ELua.CreateFmt('TLuaStack.Pop: invalid count %d', [C]);
+  end;
+end;
 
 procedure TLuaMemoryHeap.Clear;
 begin
@@ -3117,6 +3222,7 @@ start:
     Parent := @FHashes[NativeInt(HashCode) and FHashesMask];
     Result := @FItems[Index];
     Result.Key := Key;
+    Result.Value := LUA_POINTER_INVALID;
     Result.Next := Parent^;
     Parent^ := Index;
   end else
@@ -3175,6 +3281,16 @@ end;
 procedure TLuaDictionary.Add(const Key: Pointer; const Value: __luapointer);
 begin
   InternalFind(Key, True).Value := Value;
+end;
+
+function TLuaDictionary.FindValue(const Key: Pointer): __luapointer;
+var
+  Item: PLuaDictionaryItem;
+begin
+  Item := InternalFind(Key, False);
+  Result := LUA_POINTER_INVALID;
+  if (Assigned(Item)) then
+    Result := Item.Value;
 end;
 
 
@@ -3282,6 +3398,7 @@ start:
     Parent := @FHashes[NativeInt(HashCode) and FHashesMask];
     Result := @FItems[Index];
     Result.Key := Key;
+    Result.Value := nil;
     Result.Next := Parent^;
     Parent^ := Index;
   end else
@@ -3334,6 +3451,16 @@ end;
 procedure TLuaStringDictionary.Add(const Key: LuaString; const Value: __luaname);
 begin
   InternalFind(Key, True).Value := Value;
+end;
+
+function TLuaStringDictionary.FindValue(const Key: LuaString): __luaname;
+var
+  Item: PLuaStringDictionaryItem;
+begin
+  Item := InternalFind(Key, False);
+  Result := nil;
+  if (Assigned(Item)) then
+    Result := Item.Value;
 end;
 
 
@@ -5461,38 +5588,13 @@ end;
 
 { TLuaMetaType }
 
-{$ifdef LUA_UNICODE}
-function UnicodeFromUtf8(ADest: PWideChar; ASource: PAnsiChar; ALength: Integer): Integer; forward;
-{$endif}
-
 function TLuaMetaType.GetName: LuaString;
 var
-  Count: NativeInt;
-  {$ifdef LUA_UNICODE}
-  Buffer: ^TLuaBuffer;
-  Size: NativeInt;
-  {$endif}
+  Item: PLuaStringDictionaryItem;
 begin
-  if (Pointer(Result) <> nil) then Result := '';
-  Count := LStrLen(FName);
-  if (Count = 0) then Exit;
-
-  {$ifdef LUA_ANSI}
-    SetLength(Result, Count);
-    System.Move(Pointer(FName)^, Pointer(Result)^, Count);
-  {$else .LUA_UNICODE}
-    Buffer := @TLuaBuffer(FLua.FInternalBuffer);
-    Size := Count * 2 + 2;
-    if (Buffer.Capacity < Size) then
-    begin
-      Buffer.Size := 0;
-      Buffer.Alloc(Size);
-    end;
-
-    Count := UnicodeFromUtf8(Pointer(Buffer.FBytes), Pointer(FName), Count);
-    SetLength(Result, Count);
-    System.Move(Pointer(Buffer.FBytes)^, Pointer(Result)^, Count * SizeOf(WideChar));
-  {$endif}
+  Item := Pointer(TLuaStringDictionary(FLua.FNames).FItems);
+  Inc(NativeUInt(Item), FNameOffset);
+  Result := Item.Key;
 end;
 
 {$ifdef SMALLINT}
@@ -5727,7 +5829,7 @@ type
   end;
 
   // global entity
-  TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst, gkLuaData);
+  TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst, gkScriptVariable);
   TLuaGlobalEntity = packed record
     Name: __luaname;
     Kind: TLuaGlobalKind;
@@ -5760,6 +5862,58 @@ type
   end;
   PLuaUserData = ^TLuaUserData;
 
+
+function CFunctionPtr(const CFunction: Pointer): Pointer;
+var
+  Data: PLuaCFunctionData;
+  Offset: NativeInt;
+  Address: Pointer;
+  {$ifdef LARGEINT}
+  Heap: ^TLuaMemoryHeap;
+  {$endif}
+  MetaType: ^TLuaMetaType;
+  ProcInfo: ^TLuaProcInfo;
+begin
+  Result := Pointer(CFunction);
+
+  if (not Assigned(Result)) then Exit;
+  with PLuaCFunctionPage(NativeInt(Result) and MEMORY_PAGE_CLEAR)^ do
+    if (MarkerLow <> MEMORY_PAGE_MARKER_LOW) or (MarkerHigh <> MEMORY_PAGE_MARKER_HIGH) then Exit;
+
+  // callback address
+  Data := Result;
+  {$ifdef CPUX86}
+    Offset := PInteger(@Data.Bytes[16])^;
+    Address := Pointer(Offset + (NativeInt(@Bytes[15]) + 5));
+  {$endif}
+  {$ifdef CPUX64}
+    if (Data.Bytes[21] = $E9) then
+    begin
+      Offset := PInteger(@Data.Bytes[21])^;
+      Address := Pointer(Offset + (NativeInt(@Data.Bytes[21]) + 5));
+    end else
+    begin
+      Address := PPointer(@Data.Bytes[23])^;
+    end;
+  {$endif}
+  if (Address <> @TLua.ProcCallback) then Exit;
+
+  // parameters
+  {$ifdef CPUX86}
+    MetaType := PPointer(@Data.Bytes[6])^;
+    ProcInfo := PPointer(@Data.Bytes[11])^;
+  {$endif}
+  {$ifdef CPUX64}
+    Heap := Pointer(@TLua(PPointer(@Data.Bytes[2])^).FMemoryHeap);
+    MetaType := Heap.Unpack(PInteger(@Data.Bytes[11])^);
+    ProcInfo := Heap.Unpack(PInteger(@Data.Bytes[17])^);
+  {$endif}
+
+  // result (optional virtual)
+  Result := ProcInfo.Address;
+  if (NativeUInt(Result) >= PROPSLOT_VIRTUAL) then
+    Result := PPointer(NativeInt(MetaType.F.AClass) + NativeInt(Result) and PROPSLOT_VRTMASK)^;
+end;
 
 procedure TLuaUserData.GetDescription(var Result: string; const Lua: TLua);
 begin
@@ -7160,6 +7314,7 @@ begin
   end;
 
   // containers
+  TLuaStack(FRefStack).Clear;
   TLuaMemoryHeap(FMemoryHeap).Clear;
   TLuaBuffer(FInternalBuffer).Clear;
   TLuaStringDictionary(FNames).Clear;
@@ -8276,6 +8431,75 @@ begin
   end;
 end;
 
+procedure TLua.unpack_lua_string(var Result: LuaString; const RttiName: ShortString);
+var
+  Count: NativeInt;
+  Chars: PLuaChar;
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN) or Defined(UNICODE)}
+  Buffer: array[Byte] of LuaChar;
+  {$ifend}
+begin
+  Count := PByte(@RttiName)^;
+  Chars := Pointer(@RttiName[1]);
+
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    {$ifdef UNICODE}
+       Count := UnicodeFromUtf8(Pointer(@Buffer), Pointer(Chars), Count);
+    {$else .ANSI}
+       Count := UnicodeFromAnsi(Pointer(@Buffer), Pointer(Chars), 0, Count);
+    {$endif}
+    Chars := @Buffer[0];
+  {$else .LUA_ANSI}
+    {$ifdef UNICODE}
+      Count := AnsiFromUtf8(Pointer(@Buffer), 0, Pointer(Chars), Count);
+      Chars := @Buffer[0];
+    {$else .ANSI}
+      {none}
+    {$endif}
+  {$ifend}
+
+  SetLength(Result, Count);
+  System.Move(Chars^, Pointer(Result), Count * SizeOf(LuaChar));
+end;
+
+procedure TLua.unpack_lua_string(var Result: LuaString; const Chars: __luadata; const Count: Integer);
+{$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+var
+  Buffer: ^TLuaBuffer;
+  Size: NativeInt;
+{$ifend}
+begin
+  if (Pointer(Result) <> nil) then Result := '';
+  if (Count = 0) then Exit;
+
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    Buffer := @TLuaBuffer(FLua.FInternalBuffer);
+    Size := Count * 2 + 2;
+    if (Buffer.Capacity < Size) then
+    begin
+      Buffer.Size := 0;
+      Buffer.Alloc(Size);
+    end;
+
+    Count := UnicodeFromUtf8(Pointer(Buffer.FBytes), Pointer(Chars), Count);
+    SetLength(Result, Count);
+    System.Move(Pointer(Buffer.FBytes)^, Pointer(Result)^, Count * SizeOf(WideChar));
+  {$else .LUA_ANSI}
+    SetLength(Result, Count);
+    System.Move(Pointer(Chars)^, Pointer(Result)^, Count);
+  {$ifend}
+end;
+
+procedure TLua.unpack_lua_string(var Result: LuaString; const Name: __luaname);
+begin
+  unpack_lua_string(Result, Pointer(Name), LStrLen(Name));
+end;
+
+procedure TLua.unpack_lua_string(var Result: LuaString; const Buffer: __luabuffer);
+begin
+  unpack_lua_string(Result, Pointer(Buffer), Length(Buffer));
+end;
+
 procedure TLua.push_ansi_chars(const S: PAnsiChar; const CodePage: Word; const Count: Integer);
 var
   Size: Integer;
@@ -8921,13 +9145,13 @@ begin
     vtClass:     if (VClass = nil) then lua_pushnil(Handle) else lua_rawgeti(Handle, LUA_REGISTRYINDEX, ClassesInfo[internal_class_index(pointer(VClass), true)].Ref);
 *)
     {$ifNdef NEXTGEN}
-    vtChar:      push_ansi_chars(@VChar, 0, 1);
+    vtChar:      push_ansi_chars(@VChar, 0, Ord(VChar <> #0));
     vtPChar:     push_ansi_chars(VPChar, 0, LStrLen(VPChar));
     vtString:    push_short_string(PShortString(VString)^);
     vtAnsiString:push_ansi_string(AnsiString(VAnsiString));
     vtWideString:push_wide_string(WideString(VWideString));
     {$endif}
-    vtWideChar:  push_wide_chars(@VWideChar, 1);
+    vtWideChar:  push_wide_chars(@VWideChar, Ord(VWideChar <> #0));
     vtPWideChar: push_wide_chars(VPWideChar, WStrLen(VPWideChar));
     {$ifdef UNICODE}
     vtUnicodeString: push_unicode_string(UnicodeString(VUnicodeString));
@@ -9048,15 +9272,7 @@ begin
     LUA_TFUNCTION:
     begin
       Ret.F.LuaType := ltPointer;
-      lua_CFunction(Ret.F.VPointer) := lua_tocfunction(Handle, StackIndex);
-
-      (* ToDo  CFunctionPtr
-      // может быть что-то ещё ?
-      if (dword(Ret.Data[0]) >= $FE000000) then
-      begin
-        Ret.FLuaType := ltInteger;
-        Ret.Data[0] := Ret.Data[0] and $00FFFFFF;
-      end;  *)
+      Ret.F.VPointer := CFunctionPtr(Pointer(lua_tocfunction(Handle, StackIndex)));
     end;
     LUA_TUSERDATA:
     begin
@@ -9113,8 +9329,15 @@ begin
     LUA_TTABLE:
     begin
       // TClass, Info or LuaTable
-      //ClassIndex := LuaTableToClass(Handle, StackIndex);
-      MetaType := nil{ToDo};
+      MetaType := nil;
+      lua_rawgeti(Handle, StackIndex, 0);
+      if (lua_type(Handle, -1) = LUA_TUSERDATA) then
+      begin
+        MetaType := lua_touserdata(Handle, -1);
+        if (NativeInt(MetaType) and 3 <> 0) or (MetaType.F.Marker <> LUA_METATYPE_MARKER) then
+          MetaType := nil;
+      end;
+      lua_settop(Handle, -1-1);
 
       if (Assigned(MetaType)) then
       begin
@@ -10151,22 +10374,41 @@ begin
   if (internal_exception <> nil) then raise internal_exception at CodeAddr;
 end;        *)
 
-procedure TLua.global_alloc_ref(var Ref: Integer);
+function TLua.global_alloc_ref: Integer;
+var
+  Count: NativeInt;
 begin
-  if (Ref = 0) then
+  Count := TLuaStack(FRefStack).Count;
+  if (Count <> 0) then
   begin
-    Inc(FRef);
-    Ref := FRef;
+    Dec(Count);
+    TLuaStack(FRefStack).FCount := Count;
+    Result := TLuaStack(FRefStack).Items[Count];
+  end else
+  begin
+    Result := FRef + 1;
+    FRef := Result;
   end;
 end;
 
 procedure TLua.global_free_ref(var Ref: Integer);
+var
+  Value: Integer;
 begin
-  if (Ref > 0) then
+  Value := Ref;
+  Ref := 0;
+  if (Value > 0) then
   begin
+    if (Value = FRef) then
+    begin
+      FRef := Value - 1;
+    end else
+    begin
+      TLuaStack(FRefStack).Push(Value);
+    end;
+
     lua_pushnil(Handle);
-    lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref);
-    Ref := 0;
+    lua_rawseti(Handle, LUA_REGISTRYINDEX, Value);
   end;
 end;
 
@@ -10192,26 +10434,27 @@ begin
   end;
 end;
 
-function TLua.GetLuaName(const Value: LuaString): __luaname;
+function TLua.GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
 var
-  Item: PLuaStringDictionaryItem;
+  Item: ^TLuaStringDictionaryItem;
   Ref: Integer;
 begin
-  Item := TLuaStringDictionary(FNames).Find(Value);
-  if (Assigned(Item)) then
-  begin
-    Result := Item.Value;
-  end else
-  begin
-    Ref := 0;
-    global_alloc_ref(Ref);
+  Item := TLuaStringDictionary(FNames).InternalFind(Value, True);
 
+  if (Item.Value = nil) then
+  begin
+    Ref := global_alloc_ref;
     push_lua_string(Value);
-    Result := lua_tolstring(Handle, -1, nil);
+    Item.Value := lua_tolstring(Handle, -1, nil);
     global_fill_value(Ref);
-
-    TLuaStringDictionary(FNames).Add(Value, Result);
   end;
+
+  Result := Item;
+end;
+
+function TLua.GetLuaName(const Value: LuaString): __luaname;
+begin
+  Result := PLuaStringDictionaryItem(GetLuaNameItem(Value)).Value;
 end;
 
                           (*
@@ -10338,39 +10581,6 @@ asm
   jmp __TLuaLoadScript_buffer
 end;         *)
 
-               (*
-
-function TLua.internal_class_index_by_name(const AName: string): integer;
-{begin
-  for Result := 0 to Length(ClassesInfo)-1 do
-  if (SameStrings(AName, ClassesInfo[Result]._ClassName)) then exit;
-
-  Result := -1;
-end;}
-var
-  Len, Index: integer;
-  NameHash: integer;
-  HashInfo: ^TLuaHashIndex;
-begin
-  NameHash := StringHash(AName);
-  Len := Length(ClassesIndexesByName);
-  Index := InsortedPlace8(NameHash, pointer(ClassesIndexesByName), Len);
-
-  HashInfo := pointer(integer(ClassesIndexesByName) + Index*sizeof(TLuaHashIndex));
-  while (Index < Len) and (HashInfo.Hash = NameHash) do
-  begin
-    if (SameStrings(AName, ClassesInfo[HashInfo.Index]._ClassName)) then
-    begin
-      Result := HashInfo.Index;
-      exit;
-    end;
-
-    inc(Index);
-    inc(HashInfo);
-  end;
-
-  Result := -1;
-end;            *)
                   (*
 function TLua.GetRecordInfo(const Name: string): PLuaRecordInfo;
 var
@@ -10487,113 +10697,37 @@ asm
   jmp __TLuaSetVariableEx
 end;              *)
 
-                    (*
-// зарегистрировать глобальную переменную
-// при необходимости создать/удалить Ref и Index
-// урегулировать конфликты или вызвать exception
-// Kind - Type (Class или Record), Variable, Proc или Enum
-// инициализация gkLuaData происходит в global_newindex если переменная не найдена
-function TLua.internal_register_global(const Name: string; const Kind: TLuaGlobalKind; const CodeAddr: pointer): PLuaGlobalVariable;
 const
-  KIND_NAMES: array[TLuaGlobalKind] of string = ('type', 'variable', 'method', 'enum', '');
-var
-  Ind: integer;
-  new: boolean;
-begin
-  // проверка на корректность имени
-  if (not IsValidIdent(Name)) then
-  ELua.Assert('Non-supported %s name "%s"', [KIND_NAMES[Kind], Name], CodeAddr);
+  // TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst, gkScriptVariable);
+  NATIVE_GLOBAL_KINDS: set of TLuaGlobalKind = [gkMetaType, gkVariable, gkProc];
+  GLOBAL_INDEX_KINDS: set of TLuaGlobalKind = [gkConst, gkScriptVariable];
+  CONST_GLOBAL_KINDS: set of TLuaGlobalKind = [gkMetaType, gkProc, gkConst];
 
-  // создать или найти имеющуюся
-  new := (not GlobalVariablePos(pchar(Name), Length(Name), Ind, true));
-  Result := @GlobalVariables[Ind];
-
-  // урегулировать конфликты
-  if (not new) then
-  begin
-    // если Kind-ы равны, то конфликтов нет, просто могут поменять параметры
-    // если не равны, то 100% конфликт
-    // если прошлое значение не LuaData, то 100% exception
-    if (Result._Kind = Kind) then
-    begin
-      exit;
-    end;
-
-    // если прошлое значение хранится в GLOBAL_INDEX,
-    // то либо установить его в nil, либо разрегистрировать Ref
-    if (Result._Kind = gkLuaData) then
-    begin
-      if (Kind in GLOBAL_INDEX_KINDS) then
-      begin
-        // очистить lua-переменную, но Ref не удалять
-        lua_pushnil(Handle);
-        global_fill_value(Result.Ref);
-      end else
-      begin
-        // под данным именем будет зарегистрировано другое нативное значение
-        // глобальная процедура или глобальная перменная
-        global_free_ref(Result.Ref);
-      end;
-
-    end else
-    begin
-      ELua.Assert('Global %s "%s" is already registered', [KIND_NAMES[Result._Kind], Name], CodeAddr);
-    end;
-  end;
-
-
-// проинициализировать переменную.
-// приходит либо в new случае, либо после того как урегулирован конфликт
-// и Ref уже заполнен. Хотя может быть и нулевой в случае new
-  Result._Kind := Kind;
-  Result.IsConst := (Kind in CONST_GLOBAL_KINDS);
-
-  // Ref или Index
-  if (Kind in NATIVE_GLOBAL_KINDS) then
-  begin
-    Result.Index := GlobalNative.InternalAddName(Name, (Kind = gkProc), FInitialized, CodeAddr);
-  end else
-  begin
-    global_alloc_ref(Result.Ref);
-  end;
-
-  // меняем флаг инициализации глобального пространства имён
-  if (Kind <> gkConst) then FInitialized := false;
-end;               *)
-                     (*
-// создать и проинициализировать метатаблицу
-function  TLua.internal_register_metatable(const CodeAddr: pointer; const GlobalName: string=''; const ClassIndex: integer = -1; const is_global_space: boolean = false): integer;
+function TLua.InternalRegMetaTable(const MetaType: PLuaMetaType): Integer;
 const
   LUA_GLOBALSINDEX = -10002;
   LUA_RIDX_GLOBALS = 2;
 begin
-  // получить Ref
-  // если нужно = зарегистрировать среди глобальных списков классов
-  if (GlobalName <> '') then Result := internal_register_global(GlobalName, gkType, CodeAddr).Ref
-  else
-  begin
-    Result := 0;
-    global_alloc_ref(Result);
-  end;
+  Result := global_alloc_ref;
 
-  // создать метатаблицу, заполнить ClassIndex
   lua_createtable(Handle, 0, 0);
-  if (ClassIndex <> -1) then
+  if (MetaType <> nil) then
   begin
-    lua_pushinteger(Handle, integer(typeinfoTClass) or ClassIndex);
+    lua_pushlightuserdata(Handle, MetaType);
     lua_rawseti(Handle, -2, 0);
   end;
   global_fill_value(Result);
 
-
-  if (is_global_space) then
+  if (Assigned(MetaType){ToDo: check}) then
   begin
+    MetaType.F.Ref := Result;
+
     if (LUA_VERSION_52) then
     begin
       lua_rawgeti(Handle, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
       global_push_value(Result);
       lua_setmetatable(Handle, -2);
-      stack_pop();
+      stack_pop;
     end else
     begin
       global_push_value(Result);
@@ -10604,9 +10738,118 @@ begin
     global_push_value(Result);
     lua_pushvalue(Handle, 1);
     lua_setmetatable(Handle, -2);
-    stack_pop();
+    stack_pop;
   end;
-end;       *)
+end;
+
+function TLua.InternalAddGlobal(const AKind: Byte{TLuaGlobalKind};
+  const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
+const
+  KIND_NAMES: array[TLuaGlobalKind] of string = ('type', 'variable', 'method', 'enum', '');
+var
+  Kind: TLuaGlobalKind absolute AKind;
+  Item: PLuaDictionaryItem;
+  Value: __luapointer;
+  Entity: PLuaGlobalEntity;
+begin
+  Item := TLuaDictionary(FGlobalEntities).InternalFind(Name, True);
+  Value := Item.Value;
+  if (Value = LUA_POINTER_INVALID) then
+  begin
+    Value := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaGlobalEntity));
+    Item.Value := Value;
+    Entity := TLuaMemoryHeap(FMemoryHeap).Unpack(Value);
+    Entity.Name := Name;
+
+    if (Kind in NATIVE_GLOBAL_KINDS) then
+    begin
+      Entity.Ptr := LUA_POINTER_INVALID;
+    end else
+    begin
+      Entity.Ref := global_alloc_ref;
+    end;
+  end else
+  begin
+    Entity := TLuaMemoryHeap(FMemoryHeap).Unpack(Value);
+    if (Entity.Kind = Kind) then
+    begin
+      Result := Entity;
+      Exit;
+    end;
+
+    // solve name space conflict
+    if (Entity.Kind = gkScriptVariable) then
+    begin
+      if (Kind in GLOBAL_INDEX_KINDS) then
+      begin
+        // clear variable, but stay Ref
+        lua_pushnil(Handle);
+        global_fill_value(Entity.Ref);
+      end else
+      begin
+        // dispose variable and Ref, pointer will be filled later
+        global_free_ref(Entity.Ref);
+      end;
+    end else
+    begin
+      unpack_lua_string(FStringBuffer.Lua, Name);
+      raise ELua.CreateFmt('Global %s "%s" is already registered',
+        [KIND_NAMES[Entity.Kind], FStringBuffer.Lua]) at ReturnAddress;
+    end;
+  end;
+
+  Entity.Kind := Kind;
+  Entity.IsConst := (Kind in CONST_GLOBAL_KINDS);
+  Result := Entity;
+
+  // ToDo: if (Kind <> gkConst) then FInitialized := False;
+end;
+
+function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem};
+  const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaMetaType;
+const
+  SIZES: array[TLuaMetaKind] of Integer = (SizeOf(TLuaClassInfo),
+    SizeOf(TLuaRecordInfo), SizeOf(TLuaArrayInfo), SizeOf(TLuaSetInfo));
+var
+  Name: __luaname;
+  NameOffset: Cardinal;
+  Ptr: __luapointer;
+  Entity: PLuaGlobalEntity;
+begin
+  // name dictionary item
+  Name := PLuaStringDictionaryItem(NameItem).Value;
+  NameOffset := NativeUInt(NameItem) - NativeUInt(TLuaStringDictionary(FNames).FItems);
+
+  // global entity
+  Entity := InternalAddGlobal(Ord(gkMetaType), Name, ReturnAddress);
+
+  // allocation
+  Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SIZES[Kind]);
+  Entity.Ptr := Ptr;
+  Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+
+  // base properties
+  Result.F.Marker := LUA_METATYPE_MARKER;
+  PInteger(@Result.F)^ := Ord(Kind);
+  {$ifdef LARGEINT}
+  Result.F.Ptr := Ptr;
+  {$endif}
+  Result.F.TypeInfo := TypeInfo;
+  Result.FLua := Self;
+  Result.FNameOffset := NameOffset;
+
+  // metatable (Ref)
+  {Result.F.Ref := } InternalRegMetaTable(Result);
+
+  // metatypes dictionary
+  TLuaDictionary(FMetaTypes).Add(Name, Ptr);
+  if (Assigned(TypeInfo)) then
+    TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
+
+  // clear instance (specific fields)
+  System.FillChar(Pointer(NativeInt(Result) + SizeOf(TLuaMetaType))^,
+    SIZES[Kind] - SizeOf(TLuaMetaType), #0);
+end;
              (*
 function  TLua.internal_add_class_info(const is_global_space: boolean = false): integer;
 var
@@ -10629,333 +10872,265 @@ begin
   ClassInfo._DefaultProperty := -1;
   ClassInfo.ParentIndex := -1;
 end;          *)
-                (*
-function  TLua.internal_add_class_index(const AClass: pointer; const AIndex: integer): integer;
-begin
-  Result := InsortedPlace8(integer(AClass), pointer(ClassesIndexes), Length(ClassesIndexes));
-  with TLuaClassIndex(DynArrayInsert(ClassesIndexes, typeinfo(TLuaClassIndexDynArray), Result)^) do
-  begin
-    _Class := AClass;
-    Index := AIndex;
-  end;
-end;      *)
-            (*
-function  TLua.internal_add_class_index_by_name(const AName: string; const AIndex: integer): integer;
+
+function TLua.InternalNearestClass(const AClass: TClass): PLuaMetaType;
 var
-  AHash: integer;
+  ClassValue: TClass;
+  Item: PLuaDictionaryItem;
 begin
-  AHash := StringHash(AName);
+  ClassValue := AClass;
+  if (AClass <> nil) then
+  repeat
+    Item := TLuaDictionary(FMetaTypes).InternalFind(Pointer(ClassValue), False);
+    if (Assigned(Item)) then
+    begin
+      Result := {$ifdef LARGEINT}TLuaMemoryHeap(FMemoryHeap).Unpack{$else}Pointer{$endif}(Item.Value);
+      Exit;
+    end else
+    begin
+      ClassValue := PPointer(NativeInt(ClassValue) + vmtParent)^;
+      if (ClassValue = nil) then Break;
+      {$ifNdef FPC}
+      ClassValue := PPointer(ClassValue)^;
+      {$endif}
+    end;
+  until (False);
 
-  Result := InsortedPlace8(integer(AHash), pointer(ClassesIndexesByName), Length(ClassesIndexesByName));
-  with TLuaClassIndex(DynArrayInsert(ClassesIndexesByName, typeinfo(TLuaClassIndexDynArray), Result)^) do
-  begin
-    _Class := pointer(AHash);
-    Index := AIndex;
-  end;
-end;        *)
+  Result := nil;
+end;
 
-// быстро найти индекс класса в массиве ClassesInfo
-//function TLua.internal_class_index(AClass: pointer; const look_class_parents: boolean): integer;
-(*begin
-  Result := -1;
-
-  while (AClass <> nil) do
-  begin
-    Result := InsortedPos8(integer(AClass), ClassesIndexes);
-    if (Result >= 0) or (not look_class_parents) then break;
-
-    // look_parents-вариант: TClass(AClass) := TClass(AClass).ClassParent;
-    AClass := ppointer(integer(AClass) + vmtParent)^;
-    {$ifndef fpc}if (AClass <> nil) then AClass := TClass(AClass^);{$endif}
-  end;
-
-  // результат
-  if (Result >= 0) then Result := ClassesIndexes[Result].Index;
-end;*)  (*
-asm
-  test edx, edx
-  jz   @fail
-  mov  eax, [eax + TLua.ClassesIndexes]
-  test eax, eax
-  jnz @1
-@fail:
-  mov eax, -1
-  ret
-@1:
-  push edi // look_class_parents
-  push ebx // хранилище AClass
-  // edx - указатель на ClassesIndexes, не изменяется при вызове InsortedPlace
-  // ecx - Length(ClassesIndexes), не изменяется при вызове InsortedPlace
-
-  mov ebx, edx
-  mov edi, ecx
-  mov edx, eax
-  mov ecx, [eax-4]
-  {$ifdef fpc} inc ecx {$endif}
-
-@loop:
-  mov eax, ebx
-  call InsortedPlace8
-  cmp eax, ecx  // if (Result >= ArrLength)
-  jge @next
-
-  // if (pinteger( integer(Arr)+Result*8 )^ <> Value)
-  cmp ebx, [edx + eax*8]
-  jne @next
-
-  // return ClassesIndexes[Result].Index;
-  mov eax, [edx + eax*8 + 4]
-  jmp @exit
-
-@next:
-  test edi, edi
-  jz @exit_fail // если не look_class_parents
-  
-  { TClass(AClass) := TClass(AClass).ClassParent; }
-  mov ebx, [ebx + vmtParent]
-  {$ifndef fpc}
-    test ebx, ebx
-    jz @exit_fail
-    mov ebx, [ebx]
-  {$endif}
-  test ebx, ebx
-  jnz @loop
-
-@exit_fail:
-  mov eax, -1
-@exit:
-  pop ebx
-  pop edi
-end;   *)
-
-            (*
-// добавить класс, если такого нет
-// если UsePublished, то прописать ему так же всё связанное с published
-// если это регистратор, то зарегистрировать всё для подрегистрируемого класса
-function TLua.InternalAddClass(AClass: TClass; UsePublished: boolean; const CodeAddr: pointer): integer;
+// add class, if not already exists
+// UsePublished means to register all published properties
+// in registrator-Class case:
+// addition sub-registered class using published registrator-Class methods, fields and properties
+function TLua.InternalAddClass(const AClass: TClass; const UsePublished: Boolean; const ReturnAddress: Pointer): PLuaClassInfo;
 var
-  InstanceSize: integer;
-  ClassRegistrator: TClass;
-  ClassParentIndex: integer;
+  ClassName: LuaString;
+  ClassNameItem: PLuaStringDictionaryItem;
+  ClassRegistrator, ClassValue, ClassChild: TClass;
+  ClassPtr: __luapointer;
+  ClassInfo, Parent: PLuaClassInfo;
 
-  // является ли класс регистратором lua
-  function IsRegistrator(const _Class: TClass): boolean;
-  begin
-    Result := (_Class <> nil) and (EqualStrings('lua', Copy(_Class.ClassName, 1, 3)));
-  end;
-
-  // добавить методы из глобального списка методов
-  procedure AddPublishedMethods(const _Class: TClass);
+  procedure AddPublishedMethods(const AClass: TClass; const ReturnAddress: Pointer);
   type
-    TMethodEntry = packed record
-      len: Word;
-      adr: Pointer;
-      name: ShortString;
+    TMethodRec = packed record
+      Size: Word;
+      Addr: Pointer;
+    case Integer of
+      0: (Name: ShortString);
+      1: (NameLength: Byte);
     end;
   var
-    i: word;
-    MC: pword;
-    MethodEntry: ^TMethodEntry;
-    MethodName: string;
+    i, Count: Integer;
+    MethodCount: PWord;
+    MethodRec: ^TMethodRec;
+    Buffer: ShortString;
   begin
-    // Registrator mode
-    if (ClassRegistrator <> nil) and (_Class.ClassParent <> AClass) then AddPublishedMethods(_Class.ClassParent);
-
-    MC := pword(ppointer(integer(_Class)+vmtMethodtable)^);
-    if (MC = nil) then exit;
-    MethodEntry := pointer(integer(MC)+2);
-
-    for i := 1 to MC^ do
+    // several registrators case
+    if (ClassRegistrator <> nil) and (AClass.ClassParent <> ClassValue) then
     begin
-      MethodName := MethodEntry.name;
+      AddPublishedMethods(AClass.ClassParent, ReturnAddress);
+    end;
 
-      if (EqualStrings(Copy(MethodName, 1, 3), 'lua')) then
+    // method records
+    MethodCount := PWord(PPointer(NativeInt(AClass) + vmtMethodTable)^);
+    if (MethodCount = nil) then Exit;
+    MethodRec := Pointer(NativeInt(MethodCount) + SizeOf(Word));
+
+    // add "lua..." methods
+    for i := 1 to MethodCount^ do
+    begin
+      Count := MethodRec.NameLength;
+      if (Count > 3) and (Byte(MethodRec.Name[1]) = Byte('l')) and
+        (Byte(MethodRec.Name[2]) = Byte('u')) and (Byte(MethodRec.Name[3]) = Byte('a')) then
       begin
-        Delete(MethodName, 1, 3);
-        InternalAddProc(true, AClass, MethodName, -1, false, MethodEntry.adr, CodeAddr);
+        Dec(Count, 3);
+        PByte(@Buffer)^ := Count;
+        System.Move(MethodRec.Name[4], Buffer[1], Count);
+        unpack_lua_string(FStringBuffer.Lua, Buffer);
+
+        InternalAddProc(ClassInfo, FStringBuffer.Lua, -1, Ord(pkMethod), MethodRec.Addr, ReturnAddress);
       end;
 
-      inc(integer(MethodEntry), integer(MethodEntry.len));
+      Inc(NativeInt(MethodRec), MethodRec.Size);
     end;
   end;
 
-  // добавить published-свойства
-  procedure AddPublishedProperties(const _Class: TClass);
+  procedure AddPublishedProperties(const AClass: TClass; const ReturnAddress: Pointer);
   var
-    PropCount, i, PropIndex: integer;
-    tpinfo: TypInfo.PTypeInfo;
-    PropList: TypInfo.PPropList;
-    PropInfo: TypInfo.PPropInfo;
-    PropName, Prefix: string;
-    PropBase: TLuaPropertyInfoBase;
+    TypeInfo: PTypeInfo;
+    PropList: {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.PPropList;
+    PropInfo: {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.PPropInfo;
+    PropCount, i: Integer;
+    PropName: LuaString;
   begin
-    tpinfo := _Class.ClassInfo;
-    if (tpinfo = nil) then exit;
+    TypeInfo := AClass.ClassInfo;
+    if (TypeInfo = nil) then Exit;
 
-    PropCount := GetPropList(tpinfo, PropList);
-    if (PropCount <> 0) then
+    PropCount := GetPropList(TypeInfo, PropList);
+    if (PropCount <= 0) then Exit;
+
     try
-      Prefix := _Class.ClassName + '.';
-
       for i := 0 to PropCount-1 do
       begin
         PropInfo := PropList[i];
-        PropName := PropInfo.Name;
+        unpack_lua_string(PropName, PShortString(@PropInfo.Name)^);
 
-        // проверка при ссылке на поле внутри регистратора
-        if (ClassRegistrator <> nil) then
-        with PropInfo^ do
-        begin
-          if ((dword(GetProc) >= $FF000000) and (integer(GetProc) and $00FFFFFF >= InstanceSize))
-          or ((dword(SetProc) >= $FF000000) and (integer(SetProc) and $00FFFFFF >= InstanceSize)) then
-          ELua.Assert('Class registrator "%s" can''t have own fields. Property "%s"', [ClassRegistrator.ClassName, PropName], CodeAddr);
-        end;
-
-        // регистрация
-        tpinfo := PropInfo.PropType{$ifndef fpc}^{$endif};
-        PropBase := GetLuaPropertyBase(Self, Prefix, PropName, tpinfo, CodeAddr, true);
-        PropIndex := ClassesInfo[Result].InternalAddName(PropName, false, FInitialized, CodeAddr);
-        ClassesInfo[Result].Properties[{InvertIndex} not (PropIndex)].Fill(PropInfo, PropBase);
+        InternalAddProperty(ClassInfo, PropName, PropInfo.PropType{$ifNdef FPC}^{$endif},
+          False, False, PropInfo.GetProc, PropInfo.SetProc, PropInfo.Index, nil, ReturnAddress);
       end;
     finally
       FreeMem(PropList);
-    end;  
+    end;
   end;
 
-  // все published поля. классы
-  procedure AddPublishedFields(const _Class: TClass);
+  procedure AddPublishedFields(const AClass: TClass; const ReturnAddress: Pointer);
   type
-    TUsedClassesTable = packed record
-      Count: word;
-      Classes: array[0..8191] of ^TClass;
-    end;
     PClassFieldInfo = ^TClassFieldInfo;
     TClassFieldInfo = packed record
-      Offset: integer;
+      Offset: Cardinal;
       TypeIndex: Word;
       Name: ShortString;
     end;
+    TClassesTable = packed record
+      Count: Word;
+      Values: array[0..0] of ^TClass;
+    end;
     PClassFieldTable = ^TClassFieldTable;
     TClassFieldTable = packed record
-      Count: word;
-      UsedClasses: ^TUsedClassesTable;
+      Count: Word;
+      Classes: ^TClassesTable;
       Fields: array[0..0] of TClassFieldInfo;
     end;
   var
-    i: integer;
+    i: Integer;
     Table: PClassFieldTable;
     Field: PClassFieldInfo;
+    FieldName: LuaString;
+    FieldAddress: Pointer;
+    FieldClass: TClass;
   begin
-    if (_Class = nil) then exit
-    else AddPublishedFields(_Class.ClassParent);
+    if (AClass = nil) then Exit;
+    AddPublishedFields(AClass.ClassParent, ReturnAddress);
 
-    Table := PClassFieldTable(pointer(integer(_Class)+vmtFieldTable)^);
-    if (Table = nil) then exit;
+    Table := PPointer(PByte(AClass) + vmtFieldTable)^;
+    if (Table = nil) then Exit;
 
-    // регистрация классов
-    if (Table.UsedClasses <> nil) then
-    for i := 0 to Table.UsedClasses.Count-1 do
-    InternalAddClass(Table.UsedClasses.Classes[i]^, True, CodeAddr);
-
-    // регистрация полей
-    Field := @Table.Fields[0];
-    for i := 0 to Table.Count-1 do
+    // classes
+    if (Table.Classes <> nil) then
+    for i := 0 to Table.Classes.Count - 1 do
     begin
-      // проверка при ссылке на поле внутри регистратора
-      if (ClassRegistrator <> nil) and (Field.Offset >= InstanceSize) then
-      ELua.Assert('Class registrator "%s" can''t have own fields. Field "%s"', [ClassRegistrator.ClassName, Field.Name], CodeAddr);
+      FieldClass := Table.Classes.Values[i]^;
+      if (TLuaDictionary(FMetaTypes).Find(Pointer(FieldClass)) = nil) then
+        InternalAddClass(FieldClass, True, ReturnAddress);
+    end;
 
-      // регистрация
-      InternalAddProperty(true, ClassesInfo[Result]._Class, Field.Name, typeinfo(TObject), false, false, pointer(Field.Offset), pointer(Field.Offset), nil, CodeAddr);
-      inc(integer(Field), sizeof(integer)+sizeof(word)+sizeof(byte)+pbyte(@Field.Name)^);
+    // classes fields
+    Field := @Table.Fields[0];
+    for i := 0 to Table.Count - 1 do
+    begin
+      unpack_lua_string(FieldName, Field.Name);
+      FieldAddress := Pointer(NativeUInt(Field.Offset) or PROPSLOT_FIELD);
+
+      InternalAddProperty(ClassInfo, FieldName, TypeInfo(TObject), False, False,
+        FieldAddress, FieldAddress, Low(Integer), nil, ReturnAddress);
+      Inc(PByte(Field), (SizeOf(Cardinal) + SizeOf(Word) + SizeOf(Byte)) + PByte(@Field.Name)^);
     end;
   end;
 
 begin
-  if (AClass = nil) then
-  ELua.Assert('AClass is not defined', [], CodeAddr);
+  if (NativeUInt(AClass) <= $ffff) then
+    raise ELua.Create('AClass is not defined') at ReturnAddress;
 
-  // найти имеющийся
-  Result := internal_class_index(AClass, false);
-  if (Result >= 0) and (not UsePublished) then exit;
-
-  // проверка на класс регистратор
-  if (not IsRegistrator(AClass)) then
+  // find exists
+  ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(AClass));
+  if (ClassPtr <> LUA_POINTER_INVALID) and (not UsePublished) then
   begin
-    ClassRegistrator := nil;
+    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
+    Exit;
+  end;
+
+  // registrator, class name
+  ClassValue := AClass;
+  ClassRegistrator := nil;
+  repeat
+    ClassName := LuaString(ClassValue.ClassName);
+    if (Length(ClassName) > 3) and (ClassName[1] = 'l') and
+      (ClassName[2] = 'u') and (ClassName[3] = 'a') then
+    begin
+      ClassRegistrator := AClass;
+      ClassChild := ClassValue;
+      ClassValue := ClassValue.ClassParent;
+      if (ClassValue = nil) then
+        raise ELua.Create('ClassRegistrator is defined, but really Class not found') at ReturnAddress;
+
+      if (ClassValue.InstanceSize <> ClassChild.InstanceSize) then
+        raise ELua.CreateFmt('Class registrator "%s" can''t have own fields', [ClassChild.ClassName]) at ReturnAddress;
+
+      ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(ClassValue));
+    end else
+    begin
+      Break;
+    end;
+  until (False);
+
+  // existing or new class
+  if (ClassPtr <> LUA_POINTER_INVALID) then
+  begin
+    ClassInfo := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
   end else
   begin
-    ClassRegistrator := AClass;
+    // check existing name (type)
+    ClassNameItem := GetLuaNameItem(ClassName);
+    if (TLuaDictionary(FMetaTypes).Find(ClassNameItem.Value) <> nil) then
+      raise ELua.CreateFmt('Type "%s" is already registered', [ClassName]) at ReturnAddress;
 
-    while (AClass <> nil) do
+    // globals, metatypes dictionary, metatable
+    ClassInfo := Pointer(InternalAddMetaType(mkClass, ClassNameItem, Pointer(ClassValue), ReturnAddress));
+
+    // register parents
+    if (ClassValue.ClassParent = nil) then
     begin
-      AClass := AClass.ClassParent;
-      if (not IsRegistrator(AClass)) then break;
+      ClassInfo.Parent := LUA_POINTER_INVALID;
+      ClassInfo.DefaultProperty := LUA_POINTER_INVALID;
+     end else
+    begin
+      Parent := InternalAddClass(AClass.ClassParent, UsePublished, ReturnAddress);
+      ClassInfo.Parent := Parent.Ptr;
+      ClassInfo.DefaultProperty := Parent.DefaultProperty;
+      ClassInfo.AssignCallback := Parent.AssignCallback;
+      ClassInfo.CreateCallback := Parent.CreateCallback;
+      ClassInfo.CreateCallbackArgsCount := Parent.CreateCallbackArgsCount;
     end;
-
-    if (AClass = nil) then
-    ELua.Assert('ClassRegistrator is defined, but really Class not found', [], CodeAddr);
-
-    // найти имеющийся
-    Result := internal_class_index(AClass, false);
   end;
 
-  // если не зарегистрирован, то зарегистрировать, зарегистрировав при этом предка
-  if (Result < 0) then
-  begin
-    // проверка на имеющийся RecordInfo или другие типы
-    if (internal_class_index_by_name(AClass.ClassName) >= 0) then
-    ELua.Assert('Type "%s" is already registered', [AClass.ClassName]);
-
-    // зарегистрировать предков
-    if (AClass.ClassParent = nil) then ClassParentIndex := -1
-    else ClassParentIndex := InternalAddClass(AClass.ClassParent, UsePublished, CodeAddr);
-
-    // добавление в массив, информация о классе, регистрация метатаблицы
-    Result := internal_add_class_info();
-    with ClassesInfo[Result] do
-    begin
-      _Class := AClass;
-      _ClassKind := ckClass;      
-      _ClassName := AClass.ClassName;
-      ParentIndex := ClassParentIndex;
-      Ref := internal_register_metatable(CodeAddr, _ClassName, Result);
-
-      // конструктор, дефолтное свойство
-      if (ClassParentIndex >= 0) then
-      begin
-        constructor_address := ClassesInfo[ClassParentIndex].constructor_address;
-        constructor_args_count := ClassesInfo[ClassParentIndex].constructor_args_count;
-        _DefaultProperty := ClassesInfo[ClassParentIndex]._DefaultProperty;
-      end;
-    end;
-
-    // добавить в список быстрого поиска  
-    internal_add_class_index(AClass, Result);
-    internal_add_class_index_by_name(ClassesInfo[Result]._ClassName, Result);
-  end;
-
-  // из регистратора взять методы и свойства
-  InstanceSize := AClass.InstanceSize;
+  // published
   if (ClassRegistrator <> nil) then
   begin
-    // published-методы
-    AddPublishedMethods(ClassRegistrator);
-
-    // published-свойства
-    AddPublishedProperties(ClassRegistrator);
-
-    // published поля и их классы (это типа published полей в форме - кнопки и т.д. - компоненты)
-    AddPublishedFields(ClassRegistrator);
+    AddPublishedMethods(ClassRegistrator, ReturnAddress);
+    AddPublishedProperties(ClassRegistrator, ReturnAddress);
+    AddPublishedFields(ClassRegistrator, ReturnAddress);
   end else
   if (UsePublished) then
   begin
-    // зарегистрировать published-информацию прям из этого класса
-    AddPublishedMethods(AClass);
-    AddPublishedProperties(AClass);
-    AddPublishedFields(AClass);
+    AddPublishedMethods(ClassValue, ReturnAddress);
+    AddPublishedProperties(ClassValue, ReturnAddress);
+    AddPublishedFields(ClassValue, ReturnAddress);
   end;
-end;     *)
+
+  // result
+  Result := ClassInfo;
+end;
+
+// TypeInfo can be the following:
+//  - TypeInfo(record)
+//  - TypeInfo(Dynamic array of record type)
+//  - Pointer(SizeOf(record))
+function TLua.InternalAddRecord(const Name: LuaString; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaRecordInfo;
+begin
+  Result := nil;
+end;
+
            (*
 // tpinfo может быть:
 // - typeinfo(struct)
@@ -11351,6 +11526,13 @@ begin
     end;
   end;
 end;   *)
+
+function  TLua.InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString;
+  ArgsCount: Integer; const AProcKind: Byte{TLuaProcKind}; Address, ReturnAddress: Pointer): __luapointer;
+begin
+  Result := LUA_POINTER_INVALID;
+end;
+
          (*
 function TLua.InternalAddProc(const IsClass: boolean; AClass: pointer; const ProcName: string; ArgsCount: integer; const with_class: boolean; Address, CodeAddr: pointer): integer;
 var
@@ -11476,6 +11658,13 @@ begin
   ProcInfo.with_class := with_class;
   ProcInfo.Address := Address;
 end;     *)
+
+function  TLua.InternalAddProperty(const MetaType: PLuaMetaType; const PropertyName: LuaString;
+  const TypeInfo: Pointer; const IsConst, IsDefault: boolean; const PGet, PSet: Pointer;
+  const InternalIndex: Integer; const Parameters, ReturnAddress: Pointer): __luapointer;
+begin
+  Result := LUA_POINTER_INVALID;
+end;
            (*
 // IsConst имеет значение только для глобальных переменных (AClass = GLOBAL_NAME_SPACE)
 // tpinfo может быть как обычным typeinfo, так и PLuaRecordInfo
@@ -15108,7 +15297,7 @@ begin
       // копировать память или делать умное копирование (через RTTI)
       if (ItemTypeInfo = nil) then
       begin
-        Move(SrcInstance^, DestInstance^, CopyCount*ItemSize);
+        System.Move(SrcInstance^, DestInstance^, CopyCount*ItemSize);
       end else
       begin
         CopyArray(DestInstance, SrcInstance, ItemTypeInfo, CopyCount*ItemsCount);
@@ -15229,6 +15418,11 @@ begin
     lua_pushboolean(Handle, boolean(Ret));
   end;
 end;      *)
+
+function TLua.ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
+begin
+  Result := 0;
+end;
             (*
 
 function TLua.ProcCallback(const ClassInfo: TLuaClassInfo; const ProcInfo: TLuaProcInfo): integer;
@@ -15543,8 +15737,9 @@ end;              *)
 procedure TLua.CheckArgsCount(const ArgsCount: integer; const ProcName: string=''; const AClass: TClass=nil);
 begin
   InternalCheckArgsCount(@ArgsCount, 1, ProcName, AClass);
-end;
+end;      *)
 
+(*
 procedure __TLuaRegClass(const Self: TLua; const AClass: TClass; const use_published: boolean; const ReturnAddr: pointer);
 begin
   Self.InternalAddClass(AClass, use_published, ReturnAddr);
@@ -15554,8 +15749,8 @@ procedure TLua.RegClass(const AClass: TClass; const use_published: boolean);
 asm
   push [esp]
   jmp __TLuaRegClass
-end;          *)
-                   (*
+end;
+
 procedure __TLuaRegClasses(const Self: TLua; const AClasses: array of TClass; const use_published: boolean; const ReturnAddr: pointer);
 var
   i: integer;
@@ -15569,8 +15764,55 @@ asm
   pop ebp
   push [esp]
   jmp __TLuaRegClasses
+end;   *)
+
+procedure TLua.RegClass(const AClass: TClass; const UsePublished: Boolean);
+{$ifdef RETURNADDRESS}
+begin
+  Self.InternalAddClass(AClass, UsePublished, ReturnAddress);
 end;
-        *)
+{$else}
+asm
+  {$ifdef CPUX86}
+  push [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLua.InternalAddClass
+end;
+{$endif}
+
+{$ifNdef RETURNADDRESS}
+procedure __TLuaRegClasses(const Self: TLua; const AClasses: array of TClass;
+  const UsePublished: Boolean; const ReturnAddress: Pointer);
+var
+  i: Integer;
+begin
+  for i := 0 to High(AClasses) do
+  Self.InternalAddClass(AClasses[i], UsePublished, ReturnAddress);
+end;
+{$endif}
+
+procedure TLua.RegClasses(const AClasses: array of TClass; const UsePublished: Boolean);
+{$ifdef RETURNADDRESS}
+var
+  i: Integer;
+begin
+  for i := 0 to High(AClasses) do
+  Self.InternalAddClass(AClasses[i], UsePublished, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push [esp]
+  {$else .CPUX64}
+  mov r10, [rsp]
+  {$endif}
+  jmp __TLuaRegClasses
+end;
+{$endif}
+
           (*
 // tpinfo может быть:
 // - typeinfo(struct)

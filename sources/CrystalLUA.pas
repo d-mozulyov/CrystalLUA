@@ -115,6 +115,7 @@ unit CrystalLUA;
 
 interface
   uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo{$else}Types, TypInfo{$endif},
+       {$ifdef UNICODE}{$ifdef UNITSCOPENAMES}System.Character{$else}Character{$endif},{$endif}
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif},{$endif}
        {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread,{$endif}
        {$ifdef KOL}
@@ -482,83 +483,65 @@ type
   TLuaRecordInfo = object(TLuaMetaType)
   protected
     FNameSpace: __TLuaDictionary;
-
-   (* FLua: TLua; // FType: __TLuaType;
-    FClassIndex: integer;
-    FTypeInfo: ptypeinfo;
-    FName: string;  *)
     FSize: Integer;
-   (* FOperators: TLuaOperators;
+    FOperators: TLuaOperators;
     FOperatorCallback: TLuaOperatorCallback;
 
-    function  GetFieldsCount: integer;
-    procedure InternalRegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer; const CodeAddr: pointer);
+    procedure InternalRegField(const FieldName: LuaString; const FieldOffset: NativeInt; const TypeInfo: Pointer; const ReturnAddress: Pointer);
     procedure SetOperators(const Value: TLuaOperators);
-    procedure SetOperatorCallback(const Value: TLuaOperatorCallback);  *)
+    procedure SetOperatorCallback(const Value: TLuaOperatorCallback);
   public
-   (* procedure RegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer); overload;
-    procedure RegField(const FieldName: string; const FieldPointer: pointer; const tpinfo: pointer; const pRecord: pointer = nil); overload;
-    procedure RegProc(const ProcName: string; const Proc: TLuaClassProc; const ArgsCount: integer=-1);
-    *)
+    procedure RegField(const FieldName: LuaString; const FieldOffset: Integer; const TypeInfo: Pointer); overload;
+    procedure RegField(const FieldName: LuaString; const FieldPointer: Pointer; const TypeInfo: Pointer; const RecordInstance: Pointer = nil); overload;
+    procedure RegProc(const ProcName: LuaString; const Proc: Pointer; const ArgsCount: Integer = -1);
 
-   // property Name: string read FName;
     property Size: Integer read FSize;
-  (*  property FieldsCount: integer read GetFieldsCount;
     property Operators: TLuaOperators read FOperators write SetOperators;
-    property OperatorCallback: TLuaOperatorCallback read FOperatorCallback write SetOperatorCallback;  *)
+    property OperatorCallback: TLuaOperatorCallback read FOperatorCallback write SetOperatorCallback;
   end;
 
   // information needed to use arrays between native and script side
   TLuaArrayInfo = object(TLuaMetaType)
   protected
-    // FType: __TLuaType;
-    // основные
-   (* FName: string;
-    FClassIndex: integer;    
-    FIsDynamic: boolean;
-    ItemInfo: array[0..31] of byte; // TLuaPropertyInfo;
+   (*ItemInfo: array[0..31] of byte; // TLuaPropertyInfo; *)
+    // basics
+    FIsDynamic: Boolean;
+    FDimention: Integer;
+    FBounds: PInteger; // static array bounds
+    FItemSize: Integer;
+    FSize: Integer; // SizeOf(Pointer) for dynamic
 
-    // размерность
-    FBoundsData: TIntegerDynArray; // заполняется только для статических
-    FBounds: pinteger;
-    FDimention: integer;
-    FItemSize: integer; // размер элемента. нужен для расчёта смещений    
-    FMultiplies: TIntegerDynArray; // множители (стат) и typeinfo (дин)
+    // finalizations
+    FFinalTypeInfo: PTypeInfo; // final item type info or self for dynamic
+    FFinalItemsCount: Integer;
 
-    // для финализации
-    FTypeInfo: ptypeinfo; // конечный элемент финализации (или nil). для массивов c typeinfo - сам дин массив
-    FItemsCount: integer; // количество элементов. для массивов c typeinfo - 1
-    FSize: integer; // размер такого массива целиком. для динамических - 4 *)
+    // managing: multiplies (static), typeinfo (dynamic)
+    FMultiplies: array[0..0] of NativeInt;
   public
-   (* property Name: string read FName;
-    property IsDynamic: boolean read FIsDynamic;
-    property Bounds: pinteger read FBounds;
-    property Dimention: integer read FDimention;  *)
+    property IsDynamic: Boolean read FIsDynamic;
+    property Dimention: Integer read FDimention;
+    property Bounds: PInteger read FBounds;
+    property ItemSize: Integer read FItemSize;
+    property Size: Integer read FSize;
   end;
 
   // information needed to use sets between native and script side
   TLuaSetInfo = object(TLuaMetaType)
   protected
-    // FType: __TLuaType;
-  (*  FName: string;
-    FClassIndex: integer;
-    FTypeInfo: ptypeinfo;
-    FSize: integer;
-    FLow: integer;
-    FHigh: integer;
-    FCorrection: integer;
-    FRealSize: integer; // это поле нужно только для того чтобы грамотно инвертировать 3х байтные (а sizeof = 4) множества
-    FAndMasks: integer; // для коррекции при инфертировании (конечный байт) or (начальный байт shl 8)
+    FItemTypeInfo: PTypeInfo;
+    FSize: Integer;
+    FLow: Integer;
+    FHigh: Integer;
+    FCorrection: Integer;
+    FRealSize: Integer;
+    FAndMasks: Integer;
 
-    //function  EnumName(const Value: integer): string; *)
-    function Description(const X: Pointer): LuaString;
+    function Description(const Value: Pointer): LuaString;
   public
-   (* property Name: string read FName;
-    property Size: integer read FSize;
-    property Low: integer read FLow;
-    property High: integer read FHigh;  *)
+    property Size: Integer read FSize;
+    property Low: Integer read FLow;
+    property High: Integer read FHigh;
   end;
-
 
   // (internal) information needed to use classes between native and script side
   PLuaClassInfo = ^TLuaClassInfo;
@@ -936,7 +919,7 @@ type
   //  property  NameSpaceHash: TLuaHashIndexDynArray read GlobalNative.NameSpace; // Hash по всем глобальным переменным и функциям
   *)
     // internal reference table
-    function global_alloc_ref: Integer; 
+    function global_alloc_ref: Integer;
     procedure global_free_ref(var Ref: Integer);
     procedure global_fill_value(const Ref: Integer);
     procedure global_push_value(const Ref: Integer);
@@ -979,16 +962,17 @@ type
     function  InternalNearestClass(const AClass: TClass): PLuaMetaType;
     function  InternalRegMetaTable(const MetaType: PLuaMetaType = nil): Integer;
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
-    function  InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem}; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaMetaType;
+    function  InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem};
+      const TypeInfo: Pointer; const ReturnAddress: Pointer; const AdditionalSize: NativeInt = 0): PLuaMetaType;
     function  InternalAddClass(const AClass: TClass; const UsePublished: Boolean; const ReturnAddress: Pointer): PLuaClassInfo;
     function  InternalAddRecord(const Name: LuaString; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaRecordInfo;
-(*    function  InternalAddArray(Identifier, itemtypeinfo, CodeAddr: pointer; const ABounds: array of integer): integer;
-    function  InternalAddSet(tpinfo, CodeAddr: pointer): integer;   *)
-    function  InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString; ArgsCount: Integer; const AProcKind: Byte{TLuaProcKind}; Address, ReturnAddress: Pointer): __luapointer;
+    function  InternalAddArray(const Identifier, ItemTypeInfo: Pointer; const ABounds: array of Integer; const ReturnAddress: Pointer): PLuaArrayInfo;
+    function  InternalAddSet(const TypeInfo, ReturnAddress: Pointer): PLuaSetInfo;
+    function  InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString; ArgsCount: Integer;
+      const AProcKind: Byte{TLuaProcKind}; Address, ReturnAddress: Pointer): __luapointer;
     function  InternalAddProperty(const MetaType: PLuaMetaType; const PropertyName: LuaString;
-      const TypeInfo: Pointer;
-      const IsConst, IsDefault: Boolean; const PGet, PSet: Pointer; const InternalIndex: Integer;
-      const Parameters, ReturnAddress: Pointer): __luapointer;
+      const TypeInfo: Pointer; const IsConst, IsDefault: Boolean; const PGet, PSet: Pointer;
+      const InternalIndex: Integer; const Parameters, ReturnAddress: Pointer): __luapointer;
                 (*
     function __tostring(): integer;
     function __inherits_from(): integer;
@@ -1066,10 +1050,10 @@ type
     // registrations
     procedure RegClass(const AClass: TClass; const UsePublished: Boolean = True);
     procedure RegClasses(const AClasses: array of TClass; const UsePublished: Boolean = True);
-  (*  function  RegRecord(const Name: string; const tpinfo: ptypeinfo): PLuaRecordInfo;
-    function  RegArray(const Identifier: pointer; const itemtypeinfo: pointer; const Bounds: array of integer): PLuaArrayInfo;
-    function  RegSet(const tpinfo: ptypeinfo): PLuaSetInfo;
-    procedure RegProc(const ProcName: string; const Proc: TLuaProc; const ArgsCount: integer=-1); overload;
+    function  RegRecord(const Name: LuaString; const TypeInfo: PTypeInfo): PLuaRecordInfo;
+    function  RegArray(const Identifier: Pointer; const ItemTypeInfo: PTypeInfo; const ABounds: array of Integer): PLuaArrayInfo;
+    function  RegSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
+  (*  procedure RegProc(const ProcName: string; const Proc: TLuaProc; const ArgsCount: integer=-1); overload;
     procedure RegProc(const AClass: TClass; const ProcName: string; const Proc: TLuaClassProc; const ArgsCount: integer=-1; const with_class: boolean=false); overload;
     procedure RegProperty(const AClass: TClass; const PropertyName: string; const tpinfo: pointer; const PGet, PSet: pointer; const parameters: PLuaRecordInfo=nil; const default: boolean=false);
     procedure RegVariable(const VariableName: string; const X; const tpinfo: pointer; const IsConst: boolean = false);
@@ -1260,6 +1244,16 @@ begin
   inherited CreateFmt(e_Custom, System.LoadResString(ResStringRec), Args);
 end;
 {$endif}
+
+function ETypeRegistered(const Name: LuaString): ELua;
+begin
+  Result := ELua.CreateFmt('Type "%s" is already registered', [Name]);
+end;
+
+function EInvalidFieldOffset(const Value: NativeInt): ELua;
+begin
+  Result := ELua.CreateFmt('Invalid field offset %d', [Value]);
+end;
 
 
 { Lua API routine }
@@ -1635,6 +1629,733 @@ begin
 end;
 
 
+{ Sets routine }
+
+type
+  TSet1 = set of 0..7;
+  TSet2 = set of 0..15;
+  TSet4 = set of 0..31;
+  TSetBuffer = array[0..32 div SizeOf(NativeUInt) - 1] of NativeUInt;
+
+function SetBitInitialize(Bit: Integer): TSetBuffer;
+{$ifdef CPUX86}
+asm
+  xor ecx, ecx
+  mov [edx +  0], ecx
+  mov [edx +  4], ecx
+  mov [edx +  8], ecx
+  mov [edx + 12], ecx
+  mov [edx + 16], ecx
+  mov [edx + 20], ecx
+  mov [edx + 24], ecx
+  mov [edx + 28], ecx
+
+  bts [edx], eax
+end;
+{$else}
+var
+  Null: NativeUInt;
+  Dest: PNativeUInt;
+begin
+  Null := 0;
+  Result[0] := Null;
+  Result[1] := Null;
+  Result[2] := Null;
+  Result[3] := Null;
+  {$ifdef SMALLINT}
+  Result[4] := Null;
+  Result[5] := Null;
+  Result[6] := Null;
+  Result[7] := Null;
+  {$endif}
+
+  Dest := @Result[Bit shr {$ifdef SMALLINT}5{$else .LARGEINT}6{$endif}];
+  Bit := Bit and {$ifdef SMALLINT}31{$else .LARGEINT}63{$endif};
+  Dest^ := Dest^ or (NativeUInt(1) shl Bit);
+end;
+{$endif}
+
+procedure SetBitInclude(Value: PByte; Bit: Integer);
+{$ifdef CPUX86}
+asm
+  bts [eax], edx
+end;
+{$else}
+begin
+  Inc(Value, Bit shr 3);
+  Bit := Bit and 7;
+  Value^ := Value^ or (1 shl Bit);
+end;
+{$endif}
+
+procedure SetBitExclude(Value: PByte; Bit: Integer);
+{$ifdef CPUX86}
+asm
+  btr [eax], edx
+end;
+{$else}
+begin
+  Inc(Value, Bit shr 3);
+  Bit := Bit and 7;
+  Value^ := Value^ and (not (1 shl Bit));
+end;
+{$endif}
+
+function SetBitContains(Value: PByte; Bit: Integer): Boolean;
+{$ifdef CPUX86}
+asm
+  bt [eax], edx
+  setc al
+end;
+{$else}
+begin
+  Inc(Value, Bit shr 3);
+  Bit := Bit and 7;
+  Result := (Value^ and (1 shl Bit) <> 0);
+end;
+{$endif}
+
+function  _SetLe(Left, Right: PByte; Size: Integer): Boolean;
+{$ifdef CPUX86}
+asm
+  test ecx, 3
+  jnz @@loop
+
+  push ebx
+  shr ecx, 2
+@@loop_dwords:
+        mov ebx, [edx]
+        not ebx
+        and ebx, [eax]
+        jne @@pop_ebx_exit
+        add edx, 4
+        add eax, 4
+        dec ecx
+        jnz @@loop_dwords
+        jmp @@pop_ebx_exit
+
+@@loop:
+        MOV     CH,[EDX]
+        NOT     CH
+        AND     CH,[EAX]
+        JNE     @@exit
+        INC     EDX
+        INC     EAX
+        DEC     CL
+        JNZ     @@loop
+        JMP     @@exit
+
+@@pop_ebx_exit:
+  pop ebx
+@@exit:
+  setz al
+end;
+{$else}
+label
+  ret_false;
+var
+  L, R: NativeUInt;
+begin
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    L := PNativeUInt(Left)^;
+    R := PNativeUInt(Right)^;
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+    Inc(Right, SizeOf(NativeUInt));
+    if (L and (not R) <> 0) then goto ret_false;
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    L := PCardinal(Left)^;
+    R := PCardinal(Right)^;
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+    Inc(Right, SizeOf(Cardinal));
+    if (L and (not R) <> 0) then goto ret_false;
+  end;
+  {$endif}
+
+  if (Size >= SizeOf(Byte)) then
+  repeat
+    L := PByte(Left)^;
+    R := PByte(Right)^;
+    Dec(Size, SizeOf(Byte));
+    Inc(Left, SizeOf(Byte));
+    Inc(Right, SizeOf(Byte));
+    if (L and (not R) <> 0) then goto ret_false;
+  until (Size < SizeOf(Byte));
+
+  Result := True;
+  Exit;
+ret_false:
+  Result := False;
+end;
+{$endif}
+
+function _SetEq(Left, Right: PByte; Size: Integer): Boolean;
+{$ifdef CPUX86}
+asm
+  push ebx
+  jmp @1
+
+@@dwords:
+    mov ebx, [eax]
+    cmp ebx, [edx]
+    jne @@exit
+    add eax, 4
+    add edx, 4
+@1: sub ecx, 4
+    jge @@dwords
+    je  @@exit
+
+    add ecx, 3
+@@loop:
+    movzx ebx, byte ptr [eax + ecx]
+    cmp bl, [edx + ecx]
+    jne @@exit
+    dec ecx
+    jnz @@loop
+
+@@exit:
+  pop ebx
+  sete al
+end;
+{$else}
+label
+  ret_false;
+begin
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    if (PNativeUInt(Left)^ <> PNativeUInt(Right)^) then goto ret_false;
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+    Inc(Right, SizeOf(NativeUInt));
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    if (PCardinal(Left)^ <> PCardinal(Right)^) then goto ret_false;
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+    Inc(Right, SizeOf(Cardinal));
+  end;
+  {$endif}
+
+  if (Size >= SizeOf(Byte)) then
+  repeat
+    if (PByte(Left)^ <> PByte(Right)^) then goto ret_false;
+    Dec(Size, SizeOf(Byte));
+    Inc(Left, SizeOf(Byte));
+    Inc(Right, SizeOf(Byte));
+  until (Size < SizeOf(Byte));
+
+  Result := True;
+  Exit;
+ret_false:
+  Result := False;
+end;
+{$endif}
+
+// Result 0 means "equal"
+function SetsCompare(const Left, Right: Pointer; const Size: Integer; const SubsetMode: Boolean): Integer; overload;
+var
+  Ret: Boolean;
+begin
+  if (SubsetMode) then
+  begin
+    case (Size) of
+      1: Ret := (TSet1(Left^) <= TSet1(Right^));
+      2: Ret := (TSet2(Left^) <= TSet2(Right^));
+      4: Ret := (TSet4(Left^) <= TSet4(Right^));
+    else
+      Ret := _SetLe(Left, Right, Size);
+    end;
+  end else
+  begin
+    case (Size) of
+      1: Ret := (TSet1(Left^) = TSet1(Right^));
+      2: Ret := (TSet2(Left^) = TSet2(Right^));
+      4: Ret := (TSet4(Left^) = TSet4(Right^));
+    else
+      Ret := _SetEq(Left, Right, Size);
+    end;
+  end;
+
+  Result := Ord(not Ret);
+end;
+
+function SetsCompare(const Left: Pointer; const Bit, Size: Integer; const SubsetMode: Boolean): Integer; overload;
+var
+  Right: TSetBuffer;
+  Ret: Boolean;
+begin
+  if (SubsetMode) then
+  begin
+    case (Size) of
+      {$ifNdef FPC}
+      1: Ret := (TSet1(Left^) <= TSet1(Byte(1 shl Bit)));
+      2: Ret := (TSet2(Left^) <= TSet2(Word(1 shl Bit)));
+      {$endif}
+      4: Ret := (TSet4(Left^) <= TSet4(Integer(1 shl Bit)));
+    else
+      Right := SetBitInitialize(Bit);
+      Ret := _SetLe(Left, Pointer(@Right), Size);
+    end;
+  end else
+  begin
+    case (Size) of
+      {$ifNdef FPC}
+      1: Ret := (TSet1(Left^) = TSet1(Byte(1 shl Bit)));
+      2: Ret := (TSet2(Left^) = TSet2(Word(1 shl Bit)));
+      {$endif}
+      4: Ret := (TSet4(Left^) = TSet4(Integer(1 shl Bit)));
+    else
+      Right := SetBitInitialize(Bit);
+      Ret := _SetEq(Left, Pointer(@Right), Size);
+    end;
+  end;
+
+  Result := Ord(not Ret);
+end;
+
+procedure SetsUnion(Dest, Left, Right: PByte; ASize: Integer); overload;
+{$ifdef CPUX86}
+asm
+  push ebx
+  mov ebp, ASize
+  jmp @@start
+
+@@dwords:
+  mov ebx, [edx]
+  add edx, 4
+  or  ebx, [ecx]
+  add ecx, 4
+  mov [eax], ebx
+  add eax, 4
+@@start:
+  sub ebp, 4
+  jg @@dwords
+  je @@4
+
+@@bytes:
+  inc ebp
+  jz @@3
+  inc ebp
+  jz @@2
+
+@@1:
+  movzx ebx, byte ptr [edx]
+  or  bl, [ecx]
+  mov [eax], bl
+  jmp @@exit
+@@2:
+  movzx ebx, word ptr [edx]
+  or  bx, [ecx]
+  mov [eax], bx
+  jmp @@exit
+@@3:
+  movzx ebx, word ptr [edx]
+  or  bx, [ecx]
+  mov [eax], bx
+  movzx ebx, byte ptr [edx + 2]
+  or  bl, [ecx + 2]
+  mov [eax + 2], bl
+  jmp @@exit
+@@4:
+  mov ebx, [edx]
+  or  ebx, [ecx]
+  mov [eax], ebx
+@@exit:
+  pop ebx
+end;
+{$else}
+var
+  Size: Integer;
+begin
+  Size := ASize;
+
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    PNativeUInt(Dest)^ := PNativeUInt(Left)^ or PNativeUInt(Right)^;
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Dest, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+    Inc(Right, SizeOf(NativeUInt));
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    PCardinal(Dest)^ := PCardinal(Left)^ or PCardinal(Right)^;
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Dest, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+    Inc(Right, SizeOf(Cardinal));
+  end;
+  {$endif}
+
+  if (Size >= SizeOf(Byte)) then
+  repeat
+    PByte(Dest)^ := PByte(Left)^ or PByte(Right)^;
+    Dec(Size, SizeOf(Byte));
+    Inc(Dest, SizeOf(Byte));
+    Inc(Left, SizeOf(Byte));
+    Inc(Right, SizeOf(Byte));
+  until (Size < SizeOf(Byte));
+end;
+{$endif}
+
+procedure SetsUnion(Dest, Left: Pointer; Bit, Size: Integer); overload;
+var
+  Right: TSetBuffer;
+begin
+  case Size of
+    {$ifNdef FPC}
+    1: TSet1(Dest^) := TSet1(Left^) + TSet1(Byte(1 shl Bit));
+    2: TSet2(Dest^) := TSet2(Left^) + TSet2(Word(1 shl Bit));
+    {$endif}
+    4: TSet4(Dest^) := TSet4(Left^) + TSet4(Integer(1 shl Bit));
+  else
+    Right := SetBitInitialize(Bit);
+    SetsUnion(Dest, Left, Pointer(@Right), Size);
+  end;
+end;
+
+procedure SetsDifference(Dest, Left, Right: PByte; ASize: Integer); overload;
+{$ifdef CPUX86}
+asm
+  push ebx
+  mov ebp, ASize
+  jmp @@start
+
+@@dwords:
+  mov ebx, [ecx]
+  add ecx, 4
+  not ebx
+  and ebx, [edx]
+  add edx, 4
+  mov [eax], ebx
+  add eax, 4
+@@start:
+  sub ebp, 4
+  jg @@dwords
+  je @@4
+
+@@bytes:
+  inc ebp
+  jz @@3
+  inc ebp
+  jz @@2
+
+@@1:
+  movzx ebx, byte ptr [ecx]
+  not ebx
+  movzx ebp, byte ptr [edx]
+  and ebx, ebp
+  mov [eax], bl
+  jmp @@exit
+@@2:
+  movzx ebx, word ptr [ecx]
+  not ebx
+  movzx ebp, word ptr [edx]
+  and ebx, ebp
+  mov [eax], bx
+  jmp @@exit
+@@3:
+  movzx ebx, word ptr [ecx]
+  not ebx
+  movzx ebp, word ptr [edx]
+  and ebx, ebp
+  mov [eax], bx
+  movzx ebx, byte ptr [ecx + 2]
+  not ebx
+  movzx ebp, byte ptr [edx + 2]
+  and ebx, ebp
+  mov [eax + 2], bl
+  jmp @@exit
+@@4:
+  mov ebx, [ecx]
+  not ebx
+  and ebx, [edx]
+  mov [eax], ebx
+@@exit:
+  pop ebx
+end;
+{$else}
+var
+  Size: Integer;
+begin
+  Size := ASize;
+
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    PNativeUInt(Dest)^ := PNativeUInt(Left)^ and (not PNativeUInt(Right)^);
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Dest, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+    Inc(Right, SizeOf(NativeUInt));
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    PCardinal(Dest)^ := PCardinal(Left)^ and (not PCardinal(Right)^);
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Dest, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+    Inc(Right, SizeOf(Cardinal));
+  end;
+  {$endif}
+
+  if (Size >= SizeOf(Byte)) then
+  repeat
+    PByte(Dest)^ := PByte(Left)^ and (not PByte(Right)^);
+    Dec(Size, SizeOf(Byte));
+    Inc(Dest, SizeOf(Byte));
+    Inc(Left, SizeOf(Byte));
+    Inc(Right, SizeOf(Byte));
+  until (Size < SizeOf(Byte));
+end;
+{$endif}
+
+procedure SetsDifference(Dest, Left: Pointer; Bit, Size: Integer; Exchange: Boolean); overload;
+var
+  Right: TSetBuffer;
+begin
+  if (not Exchange) then
+  begin
+    case Size of
+      {$ifNdef FPC}
+      1: TSet1(Dest^) := TSet1(Left^) - TSet1(Byte(1 shl Bit));
+      2: TSet2(Dest^) := TSet2(Left^) - TSet2(Word(1 shl Bit));
+      {$endif}
+      4: TSet4(Dest^) := TSet4(Left^) - TSet4(Integer(1 shl Bit));
+    else
+      Right := SetBitInitialize(Bit);
+      SetsDifference(Dest, Left, Pointer(@Right), Size);
+    end;
+  end else
+  begin
+    case Size of
+      {$ifNdef FPC}
+      1: TSet1(Dest^) := TSet1(Byte(1 shl Bit)) - TSet1(Left^);
+      2: TSet2(Dest^) := TSet2(Word(1 shl Bit)) - TSet2(Left^);
+      {$endif}
+      4: TSet4(Dest^) := TSet4(Integer(1 shl Bit))- TSet4(Left^);
+    else
+      Right := SetBitInitialize(Bit);
+      SetsDifference(Dest, Pointer(@Right), Left, Size);
+    end;
+  end;
+end;
+
+procedure SetsIntersection(Dest, Left, Right: PByte; ASize: Integer); overload;
+{$ifdef CPUX86}
+asm
+  push ebx
+  mov ebp, ASize
+  jmp @@start
+
+@@dwords:
+  mov ebx, [edx]
+  add edx, 4
+  and ebx, [ecx]
+  add ecx, 4
+  mov [eax], ebx
+  add eax, 4
+@@start:
+  sub ebp, 4
+  jg @@dwords
+  je @@4
+
+@@bytes:
+  inc ebp
+  jz @@3
+  inc ebp
+  jz @@2
+
+@@1:
+  movzx ebx, byte ptr [edx]
+  and bl, [ecx]
+  mov [eax], bl
+  jmp @@exit
+@@2:
+  movzx ebx, word ptr [edx]
+  and bx, [ecx]
+  mov [eax], bx
+  jmp @@exit
+@@3:
+  movzx ebx, word ptr [edx]
+  and bx, [ecx]
+  mov [eax], bx
+  movzx ebx, byte ptr [edx + 2]
+  and bl, [ecx + 2]
+  mov [eax + 2], bl
+  jmp @@exit
+@@4:
+  mov ebx, [edx]
+  and ebx, [ecx]
+  mov [eax], ebx
+@@exit:
+  pop ebx
+end;
+{$else}
+var
+  Size: Integer;
+begin
+  Size := ASize;
+
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    PNativeUInt(Dest)^ := PNativeUInt(Left)^ and PNativeUInt(Right)^;
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Dest, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+    Inc(Right, SizeOf(NativeUInt));
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    PCardinal(Dest)^ := PCardinal(Left)^ and PCardinal(Right)^;
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Dest, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+    Inc(Right, SizeOf(Cardinal));
+  end;
+  {$endif}
+
+  if (Size >= SizeOf(Byte)) then
+  repeat
+    PByte(Dest)^ := PByte(Left)^ and PByte(Right)^;
+    Dec(Size, SizeOf(Byte));
+    Inc(Dest, SizeOf(Byte));
+    Inc(Left, SizeOf(Byte));
+    Inc(Right, SizeOf(Byte));
+  until (Size < SizeOf(Byte));
+end;
+{$endif}
+
+procedure SetsIntersection(Dest, Left: Pointer; Bit, Size: Integer); overload;
+var
+  Right: TSetBuffer;
+begin
+  case Size of
+    {$ifNdef FPC}
+    1: TSet1(Dest^) := TSet1(Left^) * TSet1(Byte(1 shl Bit));
+    2: TSet2(Dest^) := TSet2(Left^) * TSet2(Word(1 shl Bit));
+    {$endif}
+    4: TSet4(Dest^) := TSet4(Left^) * TSet4(Integer(1 shl Bit));
+  else
+    Right := SetBitInitialize(Bit);
+    SetsIntersection(Dest, Left, Pointer(@Right), Size);
+  end;
+end;
+
+procedure SetInvert(Dest, Left: PByte; AndMasks, ASize: Integer);
+{$ifdef CPUX86}
+asm
+  push eax
+  push ebx
+  mov ebp, ASize
+  jmp @@start
+
+@@dwords:
+  mov ebx, [edx]
+  add eax, 4
+  not ebx
+  add edx, 4
+  mov [eax-4], ebx
+@@start:
+  sub ebp, 4
+  jg @@dwords
+  je @@4
+
+@@bytes:
+  inc ebp
+  jz @@3
+  inc ebp
+  jz @@2
+
+@@1:
+  movzx ebx, byte ptr [edx]
+  not ebx
+  and ebx, ecx
+  mov [eax], bl
+  jmp @@exit
+@@2:
+  movzx ebx, word ptr [edx]
+  not ebx
+  and ebx, ecx
+  mov [eax], bx
+  jmp @@exit
+@@3:
+  movzx ebx, byte ptr [edx]
+  not ebx
+  mov [eax], bx
+  movzx ebx, byte ptr [edx + 2]
+  not ebx
+  and ebx, ecx
+  mov [eax + 2], bl
+  jmp @@exit
+@@4:
+  mov ebx, [edx]
+  not ebx
+  mov [eax], ebx
+@@exit:
+  pop ebx
+  pop eax
+  and [eax], ch
+end;
+{$else}
+var
+  Size: Integer;
+begin
+  Size := ASize;
+
+  if (Size >= SizeOf(NativeUInt)) then
+  repeat
+    PNativeUInt(Dest)^ := not PNativeUInt(Left)^;
+    Dec(Size, SizeOf(NativeUInt));
+    Inc(Dest, SizeOf(NativeUInt));
+    Inc(Left, SizeOf(NativeUInt));
+  until (Size < SizeOf(NativeUInt));
+
+  {$ifdef LARGEINT}
+  if (Size >= SizeOf(Cardinal)) then
+  begin
+    PCardinal(Dest)^ := not PCardinal(Left)^;
+    Dec(Size, SizeOf(Cardinal));
+    Inc(Dest, SizeOf(Cardinal));
+    Inc(Left, SizeOf(Cardinal));
+  end;
+  {$endif}
+
+  case Size of
+    3:
+    begin
+      PWord(Dest)^ := (not Integer(PWord(Left)^));
+      Inc(Left, SizeOf(Word));
+      Inc(Dest, SizeOf(Word));
+      PByte(Dest)^ := (not Integer(PByte(Left)^)) and AndMasks;
+    end;
+    2:
+    begin
+      PWord(Dest)^ := (not Integer(PWord(Left)^)) and AndMasks;
+    end;
+    1:
+    begin
+      PByte(Dest)^ := (not Integer(PByte(Left)^)) and AndMasks;
+    end;
+  end;
+end;
+{$endif}
+
+
 { RTTI routine }
 
 const
@@ -1821,8 +2542,19 @@ type
     Fields: array [0..0] of TFieldInfo;
   end;
 
+procedure GetTypeKindName(var Result: string; const Kind: TTypeKind);
+begin
+  Result := GetEnumName(TypeInfo(TTypeKind), Byte(Kind));
+end;
 
-function IsManagedTypeInfo(Value: PTypeInfo): Boolean;
+function IsBooleanTypeInfo(const Value: PTypeInfo): Boolean;
+begin
+  Result := (Value <> nil) and
+  ((Value = TypeInfo(Boolean)) or (Value = TypeInfo(ByteBool)) or
+   (Value = TypeInfo(WordBool)) or (Value = TypeInfo(LongBool)));
+end;
+
+function IsManagedTypeInfo(const Value: PTypeInfo): Boolean;
 var
   i: Cardinal;
   {$ifdef WEAKREF}
@@ -2358,6 +3090,64 @@ begin
   Result := Byte(Temp.VInteger = Value);
 end;
 
+function IsValidIdent(const Ident: LuaString): Boolean;
+{$if (not Defined(LUA_UNICODE)) and (not Defined(NEXTGEN))}
+const
+  Alpha: set of AnsiChar = ['A'..'Z', 'a'..'z', '_'];
+  AlphaNumeric: set of AnsiChar = ['A'..'Z', 'a'..'z', '_', '0'..'9'{$ifdef UNITSCOPENAMES}, '.'{$endif}];
+{$ifend}
+var
+  i, Count: NativeInt;
+  S: PLuaChar;
+begin
+  Result := False;
+  Count := Length(Ident);
+  if (Count = 0) then Exit;
+  S := Pointer(Ident);
+
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    if (S^ <> '_') and (not
+      {$if not Defined(UNICODE)}
+        IsCharAlphaW(S^)
+      {$elseif (CompilerVersion < 25)}
+        IsLetter(S^)
+      {$else}
+        S^.IsLetter
+      {$ifend}
+    ) then Exit;
+
+    Inc(S);
+    for i := 1 to Count - 1 do
+    begin
+      case S^ of
+        '_'{$ifdef UNITSCOPENAMES}, '.'{$endif}: ;
+      else
+        if (not
+          {$if not Defined(UNICODE)}
+            IsCharAlphaNumericW(S^)
+          {$elseif (CompilerVersion < 25)}
+            IsLetterOrDigit(S^)
+          {$else}
+            S^.IsLetterOrDigit
+          {$ifend}
+        ) then Exit;
+      end;
+
+      Inc(S);
+    end;
+  {$else .ANSI}
+    if (not (S^ in Alpha)) then Exit;
+    Inc(S);
+    for i := 1 to Count - 1 do
+    begin
+      if (not (S^ in AlphaNumeric)) then Exit;
+      Inc(S);
+    end;
+  {$ifend}
+
+  Result := True;
+end;
+
 
 { LuaCFunction routine }
 
@@ -2695,35 +3485,6 @@ const
   LUA_POINTER_INVALID = __luapointer(-1);
 
 type
-(*  TLuaList = object{<T>}
-  private
-    FBytes: TBytes;
-    F: packed record
-      Managed: Boolean;
-      Padding: array[1..SizeOf(NativeUInt) - SizeOf(Boolean)] of Byte;
-    end;
-    FItemSize: NativeInt;
-    FTypeInfo: PTypeInfo;
-    FCapacity: NativeInt;
-    FCount: NativeInt;
-
-    procedure SetCapacity(const Value: NativeInt);
-    function GetItem(const AIndex: NativeInt): Pointer;
-  public
-    procedure Init(const AItemSize: NativeInt; const ATypeInfo: PTypeInfo);
-    procedure Clear;
-    procedure TrimExcess;
-    function Add: Pointer;
-
-    property Bytes: TBytes read FBytes;
-    property Managed: Boolean read F.Managed;
-    property ItemSize: NativeInt read FItemSize;
-    property TypeInfo: PTypeInfo read FTypeInfo;
-    property Capacity: NativeInt read FCapacity write SetCapacity;
-    property Count: NativeInt read FCount;
-    property Items[const AIndex: NativeInt]: Pointer read GetItem;
-  end; *)
-
   TLuaStack = object
   private
     FItems: TIntegerDynArray;
@@ -2836,103 +3597,6 @@ begin
   Left := Right;
   Right := Temp;
 end;
-
-(*procedure TLuaList.Init(const AItemSize: NativeInt; const ATypeInfo: PTypeInfo);
-begin
-  Clear;
-  SetCapacity(0);
-
-  FItemSize := AItemSize;
-  FTypeInfo := AtypeInfo;
-  F.Managed := IsManagedTypeInfo(ATypeInfo);
-end;
-
-procedure TLuaList.SetCapacity(const Value: NativeInt);
-var
-  NewBytes: TBytes;
-begin
-  if (Value = FCapacity) then
-    Exit;
-  if (Value < Count) then
-    raise ELua.CreateFmt('Invalid capacity value %d, items count: %d', [Value, Count]);
-
-  if (Value < Count) then
-  begin
-    SetLength(NewBytes, Value * FItemSize);
-    System.Move(Pointer(FBytes)^, Pointer(NewBytes)^, Count * FItemSize);
-    FBytes := NewBytes;
-  end else
-  begin
-    SetLength(FBytes, Value * FItemSize);
-  end;
-
-  FCapacity := Value;
-end;
-
-procedure TLuaList.Clear;
-begin
-  if (Managed) and (Count <> 0) then
-    FinalizeArray(Pointer(FBytes), TypeInfo, Count);
-end;
-
-procedure TLuaList.TrimExcess;
-begin
-  Self.Capacity := Count;
-end;
-
-function TLuaList.Add: Pointer;
-label
-  start;
-var
-  Index, Size: NativeInt;
-begin
-start:
-  Index := FCount;
-  if (Index <> FCapacity) then
-  begin
-    Inc(Index);
-    FCount := Index;
-    Dec(Index);
-    Size := FItemSize;
-    Result := @FBytes[Index * Size];
-
-    if (F.Managed) then
-    begin
-      if (Size > 16) and (Assigned(FTypeInfo)) then
-      begin
-        InitializeArray(Result, FTypeInfo, 1);
-      end else
-      begin
-        System.FillChar(Result^, Size, #0);
-      end;
-    end;
-
-    Exit;
-  end else
-  begin
-    if (FCapacity = 0) then
-    begin
-      SetCapacity(4);
-    end else
-    begin
-      SetCapacity(FCapacity * 2);
-    end;
-
-    goto start;
-  end;
-end;
-
-function TLuaList.GetItem(const AIndex: NativeInt): Pointer;
-begin
-  if (NativeUInt(AIndex) < NativeUInt(FCount)) then
-  begin
-    Result := @FBytes[AIndex * FItemSize];
-    Exit;
-  end else
-  begin
-    raise ELua.CreateFmt('Invalid item index %d, items count: %d', [AIndex, Count]);
-  end;
-end;  *)
 
 procedure TLuaStack.Clear;
 begin
@@ -4500,458 +5164,8 @@ begin TMethod(Result).Code := @Proc; end;
 function LuaClassProcPtr(const Proc: pointer): TLuaClassProc;
 begin TMethod(Result).Code := Proc; end;
                          *)
-                                (*
-// -----------   операции с множествами   -------------
-type
-  _set1 = set of 0..7;
-  _set2 = set of 0..15;
-  _set4 = set of 0..31;
 
-procedure IncludeSetBit(const _Set: pointer; const Bit: integer);
-asm
-  bts [eax], edx
-end;
-
-procedure ExcludeSetBit(const _Set: pointer; const Bit: integer);
-asm
-  btr [eax], edx
-end;
-
-function SetBitContains(const _Set: pointer; const Bit: integer): boolean;
-asm
-  bt [eax], edx
-  setc al
-end;
-
-
-// спёрто из System и модифицировано
-function  _SetLe(const X1, X2: pointer; const Size: integer): boolean;
-asm
-  test ecx, 3
-  jnz @@loop
-
-  push ebx
-  shr ecx, 2
-@@loop_dwords:
-        mov ebx, [edx]
-        not ebx
-        and ebx, [eax]
-        jne @@pop_ebx_exit
-        add edx, 4
-        add eax, 4
-        dec ecx
-        jnz @@loop_dwords
-        jmp @@pop_ebx_exit
-
-@@loop:
-        MOV     CH,[EDX]
-        NOT     CH
-        AND     CH,[EAX]
-        JNE     @@exit
-        INC     EDX
-        INC     EAX
-        DEC     CL
-        JNZ     @@loop
-        JMP     @@exit
-
-@@pop_ebx_exit:
-  pop ebx
-@@exit:
-  setz al
-  and  eax, $FF
-end;
-
-// по аналогии с System, только чуть более оптимизировано
-function _SetEq(const X1, X2: pointer; const Size: integer): boolean;
-asm
-  push ebx
-  jmp @1
-
-@@dwords:
-    mov ebx, [eax]
-    cmp ebx, [edx]
-    jne @@exit
-    add eax, 4
-    add edx, 4
-@1: sub ecx, 4
-    jge @@dwords
-    je  @@exit
-
-@@bytes: add ecx, 4
-@@loop:
-    mov bl, [eax+ecx-1]
-    cmp bl, [edx+ecx-1]
-    jne @@exit
-    dec ecx
-    jnz @@loop
-
-@@exit:
-  pop ebx
-  sete al
-  and  eax, $FF
-end;
-            *)
-              (*
-// сравнение множеств
-// флаг "subset"  означает "является ли X1 подмножеством X2"
-// в остальных случаях надо сравнить на равенство
-// Result = 0 если True и 1 если False (условие = subset)
-function SetsCompare(const X1, X2: pointer; const Size: integer; const subset: boolean): integer; overload;
-var
-  Ret: boolean;
-begin
-  if (subset) then
-  begin
-    case (Size) of
-      1: Ret := (_set1(X1^) <= _set1(X2^));
-      2: Ret := (_set2(X1^) <= _set2(X2^));
-      4: Ret := (_set4(X1^) <= _set4(X2^));
-    else
-      Ret := _SetLe(X1, X2, Size);
-    end;
-  end else
-  begin
-    case (Size) of
-      1: Ret := (_set1(X1^) = _set1(X2^));
-      2: Ret := (_set2(X1^) = _set2(X2^));
-      4: Ret := (_set4(X1^) = _set4(X2^));
-    else
-      Ret := _SetEq(X1, X2, Size);
-    end;
-  end;
-
-  // результат
-  Result := ord(not Ret);  
-end;
-
-// промежуточная функция
-// заполнить 32-байтный буфер нулями и выставить i-й флаг
-function __bit_include(var X2; const Bit: integer): pointer;
-asm
-  xor ecx, ecx
-  mov [eax +  0], ecx
-  mov [eax +  4], ecx
-  mov [eax +  8], ecx
-  mov [eax + 12], ecx
-  mov [eax + 16], ecx
-  mov [eax + 20], ecx
-  mov [eax + 24], ecx
-  mov [eax + 28], ecx
-
-  bts [eax], edx
-  {push ebx
-  mov ecx, edx
-  mov ebx, 1
-  and ecx, 7
-  shr edx, 3
-  shl ebx, cl
-  mov [eax + edx], bl
-  pop ebx }
-end;
-         *)
-             (*
-function SetsCompare(const X1: pointer; const Value, Size: integer; const subset: boolean): integer; overload;
-var
-  X2: array[0..31] of byte;
-  Ret: boolean;
-begin
-  if (subset) then
-  begin
-    case (Size) of
-      {$ifndef fpc}
-      1: Ret := (_set1(X1^) <= _set1(byte(1 shl Value)));
-      2: Ret := (_set2(X1^) <= _set2(word(1 shl Value)));
-      {$endif}
-      4: Ret := (_set4(X1^) <= _set4(integer(1 shl Value)));
-    else
-      // сложный вариант
-      Ret := _SetLe(X1, __bit_include(X2, Value), Size);
-    end;
-  end else
-  begin
-    case (Size) of
-      {$ifndef fpc}
-      1: Ret := (_set1(X1^) = _set1(byte(1 shl Value)));
-      2: Ret := (_set2(X1^) = _set2(word(1 shl Value)));
-      {$endif}
-      4: Ret := (_set4(X1^) = _set4(integer(1 shl Value)));
-    else
-      Ret := _SetEq(X1, __bit_include(X2, Value), Size);
-    end;
-  end;
-
-  // результат
-  Result := ord(not Ret);  
-end;     *)
-           (*
-// объединений множеств
-procedure SetsUnion(const Dest, X1, X2: pointer; const Size: integer); overload;
-asm
-  push ebx
-  jmp  @@start
-
-@@dwords:
-  mov ebx, [edx]
-  add edx, 4
-  or  ebx, [ecx]
-  add ecx, 4
-  mov [eax], ebx
-  add eax, 4
-@@start:
-  sub Size, 4
-  jg @@dwords
-  je @@4
-
-@@bytes:
-  inc Size
-  jz @@3
-  inc Size
-  jz @@2
-
-@@1:
-  mov bl, [edx]
-  or  bl, [ecx]
-  mov [eax], bl
-  jmp @@exit
-@@2:
-  mov bx, [edx]
-  or  bx, [ecx]
-  mov [eax], bx
-  jmp @@exit
-@@3:
-  mov bx, [edx]
-  or  bx, [ecx]
-  mov [eax], bx
-  mov bl, [edx+2]
-  or  bl, [ecx+2]
-  mov [eax+2], bl
-  jmp @@exit
-@@4:
-  mov ebx, [edx]
-  or  ebx, [ecx]
-  mov [eax], ebx
-@@exit:
-  pop ebx
-end;    *)
-          (*
-procedure SetsUnion(const Dest, X1: pointer; const Value, Size: integer); overload;
-var
-  X2: array[0..31] of byte;
-begin
-  case Size of
-    {$ifndef fpc}
-    1: _set1(Dest^) := _set1(X1^) + _set1(byte(1 shl Value));
-    2: _set2(Dest^) := _set2(X1^) + _set2(word(1 shl Value));
-    {$endif}
-    4: _set4(Dest^) := _set4(X1^) + _set4(integer(1 shl Value));
-  else
-    SetsUnion(Dest, X1, __bit_include(X2, Value), Size);
-  end;                             
-end;    *)
-              (*
-// различия множеств
-procedure SetsDifference(const Dest, X1, X2: pointer; const Size: integer); overload;
-asm
-  push ebx
-  jmp  @@start
-
-@@dwords:
-  mov ebx, [edx]
-  add edx, 4
-  xor ebx, [ecx]
-  add ecx, 4
-  mov [eax], ebx
-  add eax, 4
-@@start:
-  sub Size, 4
-  jg @@dwords
-  je @@4
-
-@@bytes:
-  inc Size
-  jz @@3
-  inc Size
-  jz @@2
-
-@@1:
-  mov bl, [edx]
-  xor bl, [ecx]
-  mov [eax], bl
-  jmp @@exit
-@@2:
-  mov bx, [edx]
-  xor bx, [ecx]
-  mov [eax], bx
-  jmp @@exit
-@@3:
-  mov bx, [edx]
-  xor bx, [ecx]
-  mov [eax], bx
-  mov bl, [edx+2]
-  xor bl, [ecx+2]
-  mov [eax+2], bl
-  jmp @@exit
-@@4:
-  mov ebx, [edx]
-  xor ebx, [ecx]
-  mov [eax], ebx
-@@exit:
-  pop ebx
-end;      *)
-           (*
-procedure SetsDifference(const Dest, X1: pointer; const Value, Size: integer; const Exchenge: boolean); overload;
-var
-  X2: array[0..31] of byte;
-begin
-  if (not Exchenge) then
-  begin
-    case Size of
-      {$ifndef fpc}
-      1: _set1(Dest^) := _set1(X1^) - _set1(byte(1 shl Value));
-      2: _set2(Dest^) := _set2(X1^) - _set2(word(1 shl Value));
-      {$endif}
-      4: _set4(Dest^) := _set4(X1^) - _set4(integer(1 shl Value));
-    else
-      SetsDifference(Dest, X1, __bit_include(X2, Value), Size);
-    end;
-  end else
-  begin
-  case Size of
-      {$ifndef fpc}
-      1: _set1(Dest^) := _set1(byte(1 shl Value)) - _set1(X1^);
-      2: _set2(Dest^) := _set2(word(1 shl Value)) - _set2(X1^);
-      {$endif}
-      4: _set4(Dest^) := _set4(integer(1 shl Value))- _set4(X1^);
-    else
-      SetsDifference(Dest, __bit_include(X2, Value), X1, Size);
-    end;
-  end;
-end;   *)
-         (*
-// пересечение множеств
-procedure SetsIntersection(const Dest, X1, X2: pointer; const Size: integer); overload;
-asm
-  push ebx
-  jmp  @@start
-
-@@dwords:
-  mov ebx, [edx]
-  add edx, 4
-  and ebx, [ecx]
-  add ecx, 4
-  mov [eax], ebx
-  add eax, 4
-@@start:
-  sub Size, 4
-  jg @@dwords
-  je @@4
-
-@@bytes:
-  inc Size
-  jz @@3
-  inc Size
-  jz @@2
-
-@@1:
-  mov bl, [edx]
-  and bl, [ecx]
-  mov [eax], bl
-  jmp @@exit
-@@2:
-  mov bx, [edx]
-  and bx, [ecx]
-  mov [eax], bx
-  jmp @@exit
-@@3:
-  mov bx, [edx]
-  and bx, [ecx]
-  mov [eax], bx
-  mov bl, [edx+2]
-  and bl, [ecx+2]
-  mov [eax+2], bl
-  jmp @@exit
-@@4:
-  mov ebx, [edx]
-  and ebx, [ecx]
-  mov [eax], ebx
-@@exit:
-  pop ebx
-end;      *)
-            (*
-procedure SetsIntersection(const Dest, X1: pointer; const Value, Size: integer); overload;
-var
-  X2: array[0..31] of byte;
-begin
-  case Size of
-    {$ifndef fpc}
-    1: _set1(Dest^) := _set1(X1^) * _set1(byte(1 shl Value));
-    2: _set2(Dest^) := _set2(X1^) * _set2(word(1 shl Value));
-    {$endif}
-    4: _set4(Dest^) := _set4(X1^) * _set4(integer(1 shl Value));
-  else
-    SetsIntersection(Dest, X1, __bit_include(X2, Value), Size);
-  end;                             
-end;     *)
-           (*
-procedure SetInvert(const Dest, X1: pointer; const AndMasks, Size: integer);
-asm
-  push eax
-  push ebx
-  jmp  @@start
-
-@@dwords:
-  mov ebx, [edx]
-  add eax, 4
-  not ebx
-  add edx, 4
-  mov [eax-4], ebx
-@@start:
-  sub Size, 4
-  jg @@dwords
-  je @@4
-
-@@bytes:
-  inc Size
-  jz @@3
-  inc Size
-  jz @@2
-
-@@1:
-  mov bl, [edx]
-  not ebx
-  and ebx, ecx // and bl, cl
-  mov [eax], bl
-  jmp @@exit
-@@2:
-  mov bx, [edx]
-  not ebx
-  mov [eax], bx
-  and [eax+1], cl
-  jmp @@exit
-@@3:
-  mov bx, [edx]
-  not ebx
-  mov [eax], bx
-  mov bl, [edx+2]
-  not ebx
-  and ebx, ecx // and bl, cl
-  mov [eax+2], bl
-  jmp @@exit
-@@4:
-  mov ebx, [edx]
-  not ebx
-  mov [eax], ebx
-  and [eax+3], cl
-@@exit:
-  pop ebx
-  pop eax
-  and [eax], ch
-end;      *)
-
-
-
-
-              (*
+                         (*
 { TLuaTableItem }
 
 const
@@ -5605,146 +5819,155 @@ end;
 {$endif}
 
 
-            (*
 { TLuaRecordInfo }
 
-function TLuaRecordInfo.GetFieldsCount: integer;
-begin
-  Result := Length(FLua.ClassesInfo[FClassIndex].Properties);
-end;
-
-// tpinfo может быть:
-// - typeinfo(type)
-// - PLuaRecordInfo
-procedure TLuaRecordInfo.InternalRegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer; const CodeAddr: pointer);
-type
-  TDataBuffer = array[0..sizeof(TLuaPropertyInfo)-1] of byte;
+procedure TLuaRecordInfo.InternalRegField(const FieldName: LuaString; const FieldOffset: NativeInt;
+  const TypeInfo: Pointer; const ReturnAddress: Pointer);
 var
-  i, j: integer;
-  Buffer: TDataBuffer;
+  FieldAddress: Pointer;
 begin
-  // провеки ?
+  if (NativeUInt(FieldOffset) > (High(NativeUInt) shr 8)) then
+    raise EInvalidFieldOffset(FieldOffset) at ReturnAddress;
 
-  // регистрация
-  FLua.InternalAddProperty(false, @Self, FieldName, tpinfo, false, false,
-       pointer(FieldOffset), pointer(FieldOffset), nil, CodeAddr);
-
-  // сортировка полей по возрастанию
-  with FLua.ClassesInfo[FClassIndex] do
-  for i := 0 to Length(Properties)-2 do
-  for j := i+1 to Length(Properties)-1 do
-  if (integer(Properties[i].read_mode) > integer(Properties[j].read_mode)) then
-  begin
-    // swap i <--> j
-    Buffer := TDataBuffer(Properties[i]);
-    TDataBuffer(Properties[i]) := TDataBuffer(Properties[j]);
-    TDataBuffer(Properties[j]) := Buffer;
-  end;
+  FieldAddress := Pointer(NativeUInt(FieldOffset) or PROPSLOT_FIELD);
+  FLua.InternalAddProperty(@Self, FieldName, TypeInfo, False, False,
+    FieldAddress, FieldAddress, Low(Integer), nil, ReturnAddress);
 end;
 
-
-procedure __TLuaRecordInfoRegField_1(const Self: TLuaRecordInfo; const FieldName: string;
-          const FieldOffset: integer; const tpinfo: pointer; const ReturnAddr: pointer);
+procedure __TLuaRecordInfoRegField_1(const Self: TLuaRecordInfo; const FieldName: LuaString;
+  const FieldOffset: Integer; const TypeInfo: Pointer; const ReturnAddress: Pointer);
 begin
-  Self.InternalRegField(FieldName, FieldOffset, tpinfo, ReturnAddr);
+  Self.InternalRegField(FieldName, FieldOffset, TypeInfo, ReturnAddress);
 end;
 
-procedure TLuaRecordInfo.RegField(const FieldName: string; const FieldOffset: integer; const tpinfo: pointer);
+procedure TLuaRecordInfo.RegField(const FieldName: LuaString; const FieldOffset: Integer; const TypeInfo: Pointer);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaRecordInfoRegField_1(Self, FieldName, FieldOffset, TypeInfo, ReturnAddress);
+end;
+{$else}
 asm
-  pop ebp
+  {$ifdef CPUX86}
   push [esp]
+  {$else .CPUX64}
+  mov r10, [rsp]
+  {$endif}
   jmp __TLuaRecordInfoRegField_1
 end;
+{$endif}
 
-procedure __TLuaRecordInfoRegField_2(const Self: TLuaRecordInfo; const FieldName: string;
-          const FieldPointer: pointer; const tpinfo: pointer; const pRecord: pointer; const ReturnAddr: pointer);
+procedure __TLuaRecordInfoRegField_2(const Self: TLuaRecordInfo; const FieldName: LuaString;
+  const FieldPointer: Pointer; const TypeInfo: Pointer; const RecordInstance: Pointer;
+  const ReturnAddress: Pointer);
 begin
-  if (integer(pRecord) > integer(FieldPointer)) then
-  ELua.Assert('Illegal parameters using: FieldPointer and pRecord', [ReturnAddr]);
-
-  Self.InternalRegField(FieldName, integer(FieldPointer)-integer(pRecord), tpinfo, ReturnAddr);
+  Self.InternalRegField(FieldName, NativeInt(FieldPointer) - NativeInt(RecordInstance), TypeInfo, ReturnAddress);
 end;
 
-procedure TLuaRecordInfo.RegField(const FieldName: string; const FieldPointer: pointer; const tpinfo: pointer; const pRecord: pointer = nil);
+procedure TLuaRecordInfo.RegField(const FieldName: LuaString; const FieldPointer: Pointer;
+  const TypeInfo: Pointer; const RecordInstance: Pointer);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaRecordInfoRegField_2(Self, FieldName, FieldPointer, TypeInfo, RecordInstance, ReturnAddress);
+end;
+{$else}
 asm
-  pop ebp
+  {$ifdef CPUX86}
   push [esp]
+  {$else .CPUX64}
+  mov r11, [rsp]
+  {$endif}
   jmp __TLuaRecordInfoRegField_2
 end;
+{$endif}
 
-
-procedure __TLuaRecordInfoRegProc(const Self: TLuaRecordInfo; const ProcName: string; const Proc: TLuaClassProc;
-                                  const ArgsCount: integer; const ReturnAddr: pointer);
+procedure __TLuaRecordInfoRegProc(const Self: TLuaRecordInfo; const ProcName: LuaString;
+  const Proc: Pointer; const ArgsCount: Integer; const ReturnAddress: Pointer);
 begin
-  Self.FLua.InternalAddProc(false, @Self, ProcName, ArgsCount, false, TMethod(Proc).Code, ReturnAddr);
+  Self.FLua.InternalAddProc(@Self, ProcName, ArgsCount, 0{pkMethod}, Proc, ReturnAddress);
 end;
 
-procedure TLuaRecordInfo.RegProc(const ProcName: string; const Proc: TLuaClassProc; const ArgsCount: integer=-1);
+procedure TLuaRecordInfo.RegProc(const ProcName: LuaString; const Proc: Pointer; const ArgsCount: Integer);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaRecordInfoRegProc(Self, ProcName, Proc, ArgsCount, ReturnAddress);
+end;
+{$else}
 asm
-  pop ebp
+  {$ifdef CPUX86}
   push [esp]
+  {$else .CPUX64}
+  mov r10, [rsp]
+  {$endif}
   jmp __TLuaRecordInfoRegProc
 end;
+{$endif}
 
 procedure TLuaRecordInfo.SetOperators(const Value: TLuaOperators);
 begin
   if (FOperators <> Value) then
   begin
     FOperators := Value;
-    FLua.FInitialized := false;
-  end;  
+    //FLua.FInitialized := false;
+  end;
 end;
 
 procedure TLuaRecordInfo.SetOperatorCallback(const Value: TLuaOperatorCallback);
 begin
-  if (@FOperatorCallback <> @Value) then
+  if (Pointer(@FOperatorCallback) <> Pointer(@Value)) then
   begin
     FOperatorCallback := Value;
-    FLua.FInitialized := false;
+    //FLua.FInitialized := false;
   end;
-end;   *)
+end;
 
 
 { TLuaSetInfo }
 
-function TLuaSetInfo.Description(const X: Pointer): LuaString;
-begin
-  Result := ''{ToDo};
-end;
-(*
+function TLuaSetInfo.Description(const Value: Pointer): LuaString;
 var
   P1, P2, i: integer;
+  Buffer: ^string;
 
   procedure Add();
   const
-    CHARS: array[boolean] of string = (', ', '..');
+    CHARS: array[Boolean] of string = (', ', '..');
+  var
+    S: string;
   begin
-    if (P1 < 0) then exit;
-    if (Result <> '') then Result := Result + ', ';
-    Result := Result + TypInfo.GetEnumName(FTypeInfo, P1);
-    if (P2 <> P1) then Result := Result + CHARS[P2>P1+1] + TypInfo.GetEnumName(FTypeInfo, P2);
+    if (P1 < 0) then Exit;
+    if (Buffer^ <> '') then Buffer^ := Buffer^ + ', ';
+    S := GetEnumName(FItemTypeInfo, P1);
+    Buffer^ := Buffer^ + S;
+    if (P2 <> P1) then
+    begin
+      S := GetEnumName(FItemTypeInfo, P2);
+      Buffer^ := Buffer^ + CHARS[P2 > (P1 + 1)] + S;
+    end;
 
     P1 := -1;
     P2 := -1;
   end;
 begin
+  Buffer := @FLua.FStringBuffer.Default;
+  Buffer^ := '';
+
   P1 := -1;
   P2 := -1;
-
   for i := FLow to FHigh do
-  if (SetBitContains(X, i-FCorrection)) then
+  if (SetBitContains(Value, i - FCorrection)) then
   begin
     if (P1 < 0) then P1 := i;
     P2 := i;
   end else
   begin
-    if (P1 >= 0) then Add();
+    if (P1 >= 0) then Add;
   end;
 
-  Add();
-  Result := '['+Result+']';
+  Add;
+  Buffer^ := '['+ Buffer^ + ']';
+
+  Result := LuaString(Buffer^);
 end;
-         *)
 
 
 { Name space management structures  }
@@ -5884,7 +6107,7 @@ begin
   Data := Result;
   {$ifdef CPUX86}
     Offset := PInteger(@Data.Bytes[16])^;
-    Address := Pointer(Offset + (NativeInt(@Bytes[15]) + 5));
+    Address := Pointer(Offset + (NativeInt(@Data.Bytes[15]) + 5));
   {$endif}
   {$ifdef CPUX64}
     if (Data.Bytes[21] = $E9) then
@@ -7290,7 +7513,7 @@ begin
   FUnits := nil;
   FUnitsCount := 0; *)
 
-  // finalize names arrays
+  // finalize dynamic arrays
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
   begin
     MetaType := TLuaMemoryHeap(FMemoryHeap).Unpack(TLuaDictionary(FMetaTypes).FItems[i].Value);
@@ -8459,7 +8682,7 @@ begin
   {$ifend}
 
   SetLength(Result, Count);
-  System.Move(Chars^, Pointer(Result), Count * SizeOf(LuaChar));
+  System.Move(Chars^, Pointer(Result)^, Count * SizeOf(LuaChar));
 end;
 
 procedure TLua.unpack_lua_string(var Result: LuaString; const Chars: __luadata; const Count: Integer);
@@ -8473,7 +8696,7 @@ begin
   if (Count = 0) then Exit;
 
   {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
-    Buffer := @TLuaBuffer(FLua.FInternalBuffer);
+    Buffer := @TLuaBuffer(FInternalBuffer);
     Size := Count * 2 + 2;
     if (Buffer.Capacity < Size) then
     begin
@@ -8481,9 +8704,9 @@ begin
       Buffer.Alloc(Size);
     end;
 
-    Count := UnicodeFromUtf8(Pointer(Buffer.FBytes), Pointer(Chars), Count);
-    SetLength(Result, Count);
-    System.Move(Pointer(Buffer.FBytes)^, Pointer(Result)^, Count * SizeOf(WideChar));
+    Size{Count} := UnicodeFromUtf8(Pointer(Buffer.FBytes), Pointer(Chars), Count);
+    SetLength(Result, Size{Count});
+    System.Move(Pointer(Buffer.FBytes)^, Pointer(Result)^, Size{Count} * SizeOf(WideChar));
   {$else .LUA_ANSI}
     SetLength(Result, Count);
     System.Move(Pointer(Chars)^, Pointer(Result)^, Count);
@@ -10435,12 +10658,43 @@ begin
 end;
 
 function TLua.GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
+label
+  has_item;
 var
+  {$ifdef UNITSCOPENAMES}
+  i, j: Integer;
+  S: PLuaChar;
+  {$endif}
   Item: ^TLuaStringDictionaryItem;
   Ref: Integer;
 begin
+  {$ifdef UNITSCOPENAMES}
+    S := Pointer(Value);
+    for i := 1 to Length(Value) do
+    begin
+      if (S^ = '.') then
+      begin
+        FStringBuffer.Lua := Value;
+        UniqueString(FStringBuffer.Lua);
+
+        S := Pointer(FStringBuffer.Lua);
+        for j := 1 to Length(FStringBuffer.Lua) do
+        begin
+          if (S^ = '.') then S^ := '_';
+          Inc(S);
+        end;
+
+        Item := TLuaStringDictionary(FNames).InternalFind(FStringBuffer.Lua, True);
+        goto has_item;
+      end;
+
+      Inc(S);
+    end;
+  {$endif}
+
   Item := TLuaStringDictionary(FNames).InternalFind(Value, True);
 
+has_item:
   if (Item.Value = nil) then
   begin
     Ref := global_alloc_ref;
@@ -10806,13 +11060,14 @@ begin
 end;
 
 function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem};
-  const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaMetaType;
+  const TypeInfo: Pointer; const ReturnAddress: Pointer; const AdditionalSize: NativeInt): PLuaMetaType;
 const
   SIZES: array[TLuaMetaKind] of Integer = (SizeOf(TLuaClassInfo),
     SizeOf(TLuaRecordInfo), SizeOf(TLuaArrayInfo), SizeOf(TLuaSetInfo));
 var
   Name: __luaname;
   NameOffset: Cardinal;
+  Size: NativeInt;
   Ptr: __luapointer;
   Entity: PLuaGlobalEntity;
 begin
@@ -10824,7 +11079,8 @@ begin
   Entity := InternalAddGlobal(Ord(gkMetaType), Name, ReturnAddress);
 
   // allocation
-  Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SIZES[Kind]);
+  Size := SIZES[Kind] + AdditionalSize;
+  Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(Size);
   Entity.Ptr := Ptr;
   Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
 
@@ -10848,7 +11104,7 @@ begin
 
   // clear instance (specific fields)
   System.FillChar(Pointer(NativeInt(Result) + SizeOf(TLuaMetaType))^,
-    SIZES[Kind] - SizeOf(TLuaMetaType), #0);
+    Size - SizeOf(TLuaMetaType), #0);
 end;
              (*
 function  TLua.internal_add_class_info(const is_global_space: boolean = false): integer;
@@ -11083,7 +11339,7 @@ begin
     // check existing name (type)
     ClassNameItem := GetLuaNameItem(ClassName);
     if (TLuaDictionary(FMetaTypes).Find(ClassNameItem.Value) <> nil) then
-      raise ELua.CreateFmt('Type "%s" is already registered', [ClassName]) at ReturnAddress;
+      raise ETypeRegistered(ClassNameItem.Key) at ReturnAddress;
 
     // globals, metatypes dictionary, metatable
     ClassInfo := Pointer(InternalAddMetaType(mkClass, ClassNameItem, Pointer(ClassValue), ReturnAddress));
@@ -11127,405 +11383,342 @@ end;
 //  - TypeInfo(Dynamic array of record type)
 //  - Pointer(SizeOf(record))
 function TLua.InternalAddRecord(const Name: LuaString; const TypeInfo: Pointer; const ReturnAddress: Pointer): PLuaRecordInfo;
-begin
-  Result := nil;
-end;
-
-           (*
-// tpinfo может быть:
-// - typeinfo(struct)
-// - typeinfo(DynArray of struct)
-// - sizeof(struct)
-function TLua.InternalAddRecord(const Name: string; tpinfo, CodeAddr: pointer): integer;
 var
-  RecordTypeInfo: ptypeinfo;
-  RecordSize: integer;
+  RecordTypeInfo: PTypeInfo;
+  RecordSize: Integer;
   TypeData: PTypeData;
-  FieldTable: PFieldTable absolute TypeData;
-  RecordInfo: PLuaRecordInfo;
+  RecordPtr: __luapointer;
+  NameItem: PLuaStringDictionaryItem;
 begin
   if (not IsValidIdent(Name)) then
-  ELua.Assert('Non-supported record type name ("%s")', [Name], CodeAddr);
+    raise ELua.CreateFmt('Non-supported record type name ("%s")', [Name]) at ReturnAddress;
 
-  // провека tpinfo, найти sizeof и реальный typeinfo
+  if (TypeInfo = nil) then
+    raise ELua.CreateFmt('TypeInfo of record "%s" is not defined', [Name]) at ReturnAddress;
+
+  RecordTypeInfo := nil;
+  if (NativeUInt(TypeInfo) <= $FFFF) then
   begin
-    if (tpinfo = nil) then
-    ELua.Assert('TypeInfo of record "%s" is not defined', [Name], CodeAddr);
-
-    RecordTypeInfo := nil;
-    RecordSize := 0;
-
-    if (integer(tpinfo) < $FFFF) then
-    begin
-      // sizeof()
-      RecordSize := integer(tpinfo);
-    end else
-    begin
-      TypeData := GetTypeData(tpinfo);
-
-      // запись или динамический массив
-      if (TTypeInfo(tpinfo^).Kind in RECORD_TYPES) then
-      begin
-        RecordSize := FieldTable.Size;
-        RecordTypeInfo := tpinfo;
-      end else
-      if (TTypeInfo(tpinfo^).Kind = tkDynArray) then
-      begin
-        RecordSize := TypeData.elSize;
-
-        if (TypeData.elType <> nil) then
-        begin
-          RecordTypeInfo := TypeData.elType^;
-          if (RecordTypeInfo <> nil) and (not (RecordTypeInfo.Kind in RECORD_TYPES)) then
-          ELua.Assert('Sub dynamic type "%s" is not record type (%s)', [RecordTypeInfo.Name, TypeKindName(RecordTypeInfo.Kind)], CodeAddr);
-        end;
-      end else
-      begin
-        ELua.Assert('Type "%s" is not record and subdynamic type (%s)', [Name, TypeKindName(ptypeinfo(tpinfo).Kind)], CodeAddr);
-      end;
-    end;
-  end;
-
-  // найти имеющийся
-  if (RecordTypeInfo <> nil) then
-  begin
-    if (not SameStrings(RecordTypeInfo.Name, Name)) then
-    ELua.Assert('Mismatch of names: typeinfo "%s" and "%s" as parameter "Name"', [RecordTypeInfo.Name, Name], CodeAddr);
-
-    Result := internal_class_index(RecordTypeInfo);
+    RecordSize := NativeInt(TypeInfo);
   end else
   begin
-    Result := -1;
-  end;
+    TypeData := GetTypeData(TypeInfo);
 
-  if (Result < 0) then Result := internal_class_index_by_name(Name);
-  if (Result >= 0) then
-  with ClassesInfo[Result] do
-  begin
-    if (_ClassKind <> ckRecord) then
-    ELua.Assert('Type "%s" is already registered', [Name], CodeAddr);
-
-    // проверка на соответствие
-    with PLuaRecordInfo(_Class)^ do
+    // record or dynamic array
+    if (PTypeInfo(TypeInfo).Kind in RECORD_TYPES) then
     begin
-      if (Size <> RecordSize) then
-      ELua.Assert('Size of %s (%d) differs from the previous value (%d)', [Name, RecordSize, Size], CodeAddr);
+      RecordSize := TypeData.elSize;
+      RecordTypeInfo := TypeInfo;
+    end else
+    if (PTypeInfo(TypeInfo).Kind = tkDynArray) then
+    begin
+      RecordSize := TypeData.elSize;
 
-      if (FTypeInfo = nil) then FTypeInfo := RecordTypeInfo
-      else
-      if (FTypeInfo <> RecordTypeInfo) then
-      ELua.Assert('TypeInfo of "%s" differs from the previous value', [Name], CodeAddr);
+      if (TypeData.elType <> nil) then
+      begin
+        RecordTypeInfo := TypeData.elType^;
+        if (RecordTypeInfo <> nil) and (not (RecordTypeInfo.Kind in RECORD_TYPES)) then
+        begin
+          GetTypeKindName(FStringBuffer.Default, RecordTypeInfo.Kind);
+          raise ELua.CreateFmt('Sub dynamic type "%s" is not record type (%s)',
+            [RecordTypeInfo.Name, FStringBuffer.Default]) at ReturnAddress;
+        end;
+      end;
+    end else
+    begin
+      GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
+      raise ELua.CreateFmt('Type "%s" is not record and subdynamic type (%s)',
+        [Name, FStringBuffer.Default]) at ReturnAddress;
     end;
-
-    exit;
   end;
 
-  // проициализировать RecordInfo
-  new(RecordInfo);
-  with RecordInfo^ do
+  // find existing, name item
+  if (Assigned(RecordTypeInfo)) then
   begin
-    FLua := Self;
-    FTypeInfo := RecordTypeInfo;
-    FSize := RecordSize;
-    FOperators := [];
-    FOperatorCallback := nil;
-  end;
+    unpack_lua_string(FStringBuffer.Lua, PShortString(@RecordTypeInfo.Name)^);
 
-  // добавить в список ClassesInfo
-  Result := internal_add_class_info();
-  with ClassesInfo[Result] do
+    if (FStringBuffer.Lua <> Name) then
+      raise ELua.CreateFmt('Mismatch of names: TypeInfo "%s" and "%s" as parameter "Name"',
+        [FStringBuffer.Lua, Name]) at ReturnAddress;
+
+    RecordPtr := TLuaDictionary(FMetaTypes).FindValue(RecordTypeInfo);
+  end else
   begin
-    _Class := RecordInfo;
-    _ClassKind := ckRecord;    
-    _ClassName := Name;
-    Ref := internal_register_metatable(CodeAddr, _ClassName, Result);
-
-    RecordInfo.FName := Name;
-    RecordInfo.FClassIndex := Result;
+    RecordPtr := LUA_POINTER_INVALID;
   end;
+  NameItem := GetLuaNameItem(Name);
+  if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
 
-  // добавить в список быстрого поиска
-  internal_add_class_index(RecordInfo, Result);
-  internal_add_class_index_by_name(Name, Result);
-  if (RecordTypeInfo <> nil) then internal_add_class_index(RecordTypeInfo, Result);
-end; *)
-       (*
+  if (RecordPtr <> LUA_POINTER_INVALID) then
+  begin
+    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(RecordPtr);
 
-// itemtypeinfo - обычный тип или recordinfo или arrayinfo
-function TLua.InternalAddArray(Identifier, itemtypeinfo, CodeAddr: pointer; const ABounds: array of integer): integer;
+    if (Result.Kind <> mkRecord) then
+      raise ETypeRegistered(Name) at ReturnAddress;
+
+    if (Result.Size <> RecordSize) then
+      raise ELua.CreateFmt('Size of %s (%d) differs from the previous value (%d)', [Name, RecordSize, Result.Size]) at ReturnAddress;
+
+    if (Result.F.TypeInfo = nil) then
+    begin
+      Result.F.TypeInfo := RecordTypeInfo;
+      TLuaDictionary(FMetaTypes).Add(RecordTypeInfo, RecordPtr);
+    end else
+    if (Result.F.TypeInfo <> RecordTypeInfo) then
+    begin
+      raise ELua.CreateFmt('TypeInfo of "%s" differs from the previous value', [Name]) at ReturnAddress;
+    end;
+  end else
+  begin
+    Result := Pointer(InternalAddMetaType(mkRecord, NameItem, RecordTypeInfo, ReturnAddress));
+    Result.FSize := RecordSize;
+  end;
+end;
+
+function TLua.InternalAddArray(const Identifier, ItemTypeInfo: Pointer;
+  const ABounds: array of Integer; const ReturnAddress: Pointer): PLuaArrayInfo;
 const
   STATIC_DYNAMIC: array[boolean] of string = ('static', 'dynamic');
 var
-  i: integer;
-  Dest: TLuaArrayInfo;
-
-  arraytypeinfo: ptypeinfo;
-  PropertyInfo: PLuaPropertyInfo;
-
+  ArrayTypeInfo, BufTypeInfo: PTypeInfo;
+  TypeData: PTypeData;
+  ArrayPtr: __luapointer;
+  NameItem: PLuaStringDictionaryItem;
+  IsDynamic: Boolean;
+  ItemSize, Dimention, i, Count: Integer;
   elType: PPTypeInfo;
-  FBufSize: integer;
-  buftypeinfo: ptypeinfo;
-  buftypekind: TTypeKind;
+  AdvancedSize: NativeInt;
 begin
-  ZeroMemory(@Dest, sizeof(Dest));
-  PropertyInfo := PLuaPropertyInfo(@Dest.ItemInfo);
+  // identifier: name or typeinfo
+  begin
+    if (NativeUInt(Identifier) <= $ffff) then
+      raise ELua.Create('Array identifier is not defined') at ReturnAddress;
+    try
+      if (TTypeKind(Identifier^) in [tkArray, tkDynArray]) then
+      begin
+        ArrayTypeInfo := PTypeInfo(Identifier);
+        unpack_lua_string(FStringBuffer.Lua, PShortString(@ArrayTypeInfo.Name)^);
+      end else
+      begin
+        FStringBuffer.Lua := PLuaChar(Identifier);
+        ArrayTypeInfo := nil;
+      end;
+    except
+      raise ELua.Create('Array identifier is invalid') at ReturnAddress;
+    end;
+    if (not IsValidIdent(FStringBuffer.Lua)) then
+      raise ELua.CreateFmt('Non-supported array type name ("%s")', [FStringBuffer.Lua]) at ReturnAddress;
+  end;
 
-  // идентификатор: Имя, typeinfo
-  if (Identifier = nil) then
-  ELua.Assert('Array identifier is not defined', CodeAddr);
-  try
-    if (TTypeKind(Identifier^) in [tkArray, tkDynArray]) then
+  // static/dynamic
+  IsDynamic := Assigned(ArrayTypeInfo) and (ArrayTypeInfo.Kind = tkDynArray);
+  if (IsDynamic <> (Length(ABounds) = 0)) then
+  begin
+    if (IsDynamic) then
     begin
-      arraytypeinfo := ptypeinfo(Identifier);
-      Dest.FName := arraytypeinfo.Name;
+      raise ELua.CreateFmt('Dynamic array "%s" has no bounds', [FStringBuffer.Lua]) at ReturnAddress;
     end else
     begin
-      Dest.FName := pchar(Identifier); // todo Unicode ?
-      arraytypeinfo := nil;
+      raise ELua.CreateFmt('Array information of "%s" is not defined', [FStringBuffer.Lua]) at ReturnAddress;
     end;
-  except
-    ELua.Assert('Array identifier is not correct', CodeAddr);
-    Result := -1;
-    exit;
   end;
-  if (not IsValidIdent(Dest.Name)) then
-  ELua.Assert('Non-supported array type name ("%s")', [Dest.Name], CodeAddr);
 
-  // сбор информации
-  with Dest do
+  // item: typeinfo, size
+  // ToDo
   begin
-      // проверка имеющегося
-      Result := internal_class_index_by_name(Name);
-      if (Result < 0) and (arraytypeinfo <> nil) then Result := internal_class_index(arraytypeinfo);
-      if (Result >= 0) and (ClassesInfo[Result]._ClassKind <> ckArray) then ELua.Assert('Type "%s" is already registered', [Name], CodeAddr);
+    ItemSize := 100500;
+    (*if (itemtypeinfo = nil) then
+    ELua.Assert('"%s" registering... The typeinfo of %s array item is not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);
+    PropertyInfo.Base := GetLuaPropertyBase(Self, '', Name, ptypeinfo(itemtypeinfo), CodeAddr);
+    itemtypeinfo := PropertyInfo.Base.Information;
+    FItemSize := GetLuaItemSize(PropertyInfo.Base);
+    if (FItemSize = 0) then ELua.Assert('"%s" registering... The size of %s array item is not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);*)
+  end;
 
-      // IsDymanic
-      FIsDynamic := (arraytypeinfo <> nil) and (arraytypeinfo.Kind = tkDynArray);
-      FBoundsData := IntegerDynArray(ABounds);
-      FBounds := pointer(FBoundsData);
-      if (IsDynamic <> (Bounds=nil)) then
+  // Dimention, Bounds
+  if (IsDynamic) then
+  begin
+    BufTypeInfo := ArrayTypeInfo;
+    Dimention := 0;
+    while (BufTypeInfo <> nil) do
+    begin
+      Inc(Dimention);
+      TypeData := GetTypeData(BufTypeInfo);
+      elType := TypeData.elType;
+
+      if (elType = nil) then
       begin
-        if (IsDynamic) then ELua.Assert('Dynamic array "%s" has no bounds', [Name], CodeAddr)
-        else ELua.Assert('Array information of "%s" is not defined', [Name], CodeAddr);
-      end;
-
-      // проверка itemtypeinfo, Kind, размер
-      if (itemtypeinfo = nil) then
-      ELua.Assert('"%s" registering... The typeinfo of %s array item is not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);
-      PropertyInfo.Base := GetLuaPropertyBase(Self, '', Name, ptypeinfo(itemtypeinfo), CodeAddr);
-      itemtypeinfo := PropertyInfo.Base.Information;
-      FItemSize := GetLuaItemSize(PropertyInfo.Base);
-      if (FItemSize = 0) then ELua.Assert('"%s" registering... The size of %s array item is not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);
-
-
-      // подсчёт Dimention, проверка Bounds, Multiplies
-      if (IsDynamic) then
-      begin
-          buftypeinfo := arraytypeinfo;
-          while (buftypeinfo <> nil) do
-          begin
-            inc(FDimention);
-            elType := GetTypeData(buftypeinfo).elType;
-
-            if (elType = nil) then
-            begin
-              if (FItemSize = GetTypeData(buftypeinfo).elSize) then break;
-            end else
-            begin
-              buftypeinfo := elType^;
-              if (buftypeinfo = itemtypeinfo) then break;
-
-              buftypekind := ptypeinfo(buftypeinfo).kind;
-              if (buftypekind = tkDynArray) then
-              begin
-                if (PLuaArrayInfo(itemtypeinfo).FTypeInfo = buftypeinfo) then break;
-                continue;
-              end else
-              if (buftypekind = tkArray) then
-              begin
-                if (PLuaArrayInfo(itemtypeinfo).FTypeInfo = buftypeinfo) or
-                   (PLuaArrayInfo(itemtypeinfo).FSize = integer(PFieldTable(GetTypeData(buftypeinfo)).Size)) then break;
-              end else
-              if (buftypekind in RECORD_TYPES) then
-              begin
-                if (PLuaRecordInfo(itemtypeinfo).FTypeInfo = buftypeinfo) then break;
-              end;
-            end;
-
-            ELua.Assert('Incorrect itemtypeinfo of dynamic array "%s"', [Name], CodeAddr);
-          end;
-
-          buftypeinfo := arraytypeinfo;
-          SetLength(FMultiplies, Dimention);
-          ptypeinfo(FMultiplies[0]) := buftypeinfo;
-          for i := 1 to Dimention-1 do
-          begin
-            buftypeinfo := GetTypeData(buftypeinfo).elType^;
-            ptypeinfo(FMultiplies[i]) := buftypeinfo;
-          end;                       
+        if (ItemSize = TypeData.elSize) then Break;
       end else
       begin
-        FDimention := Length(FBoundsData);
-        if (Dimention and 1 = 1) then ELua.Assert('"%s" registering... Bounds size should be even. %d is an incorrect size', [Name, Dimention], CodeAddr);
-        FDimention := FDimention div 2;
+        BufTypeInfo := elType^;
+        if (BufTypeInfo = ItemTypeInfo) then Break;
 
-        for i := 0 to Dimention-1 do
-        if (ABounds[i*2] > ABounds[i*2+1]) then
-        ELua.Assert('"%s" registering... Incorrect bounds: "%d..%d"', [Name, ABounds[i*2], ABounds[i*2+1]], CodeAddr);
-
-        SetLength(FMultiplies, Dimention);
-        FMultiplies[Dimention-1] := FItemSize;
-        for i := Dimention-2 downto 0 do
-        FMultiplies[i] := FMultiplies[i+1]*(ABounds[(i+1)*2+1] - ABounds[(i+1)*2] + 1);
-      end;
-
-
-      // заполнение информации для финализации
-      if (arraytypeinfo <> nil) then
-      begin
-        FTypeInfo := arraytypeinfo;
-        FItemsCount := 1;
-
-        if (IsDynamic) then
+        if (BufTypeInfo.Kind = tkDynArray) then
         begin
-          FSize := sizeof(pointer);
+          //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
+          Continue;
         end else
+        if (BufTypeInfo.Kind = tkArray) then
         begin
-          FSize := PFieldTable(GetTypeData(arraytypeinfo)).Size;
-
-          // дополнительная проверка размера
-          FBufSize := FItemSize;
-          for i := 0 to Dimention-1 do
-          FBufSize := FBufSize*(ABounds[i*2+1]-ABounds[i*2]+1);
-
-          if (FSize <> FBufSize) then
-          ELua.Assert('Incorrect bounds of static array "%s"', [Name], CodeAddr);
+          //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) or
+          //ToDo    (PLuaArrayInfo(ItemTypeInfo).FSize = GetTypeData(BufTypeInfo).elSize) then Break;
+        end else
+        if (BufTypeInfo.Kind in RECORD_TYPES) then
+        begin
+          //ToDo if (PLuaRecordInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
         end;
-      end else
-      begin
-        // 100% статический массив
-        // элементов itemtypeinfo.
+      end;
 
-        // конечный элемент финализации - FTypeInfo: ptypeinfo
-        PropertyInfo.Base.Information := itemtypeinfo;
-        FTypeInfo := GetLuaDifficultTypeInfo(PropertyInfo.Base);
-
-        // определить общее количество элементов по Bounds
-        FItemsCount := 1;
-        if (PropertyInfo.Base.Kind = pkArray) then FItemsCount := PLuaArrayInfo(itemtypeinfo).FItemsCount;
-
-        for i := 0 to Dimention-1 do
-        FItemsCount := FItemsCount*(ABounds[i*2+1]-ABounds[i*2]+1);
-
-        // размер статического массива
-        FSize := FItemSize*FItemsCount;
-      end;                   
-  end;
-
-  // если найден, то очистить поле ItemInfo, а если не найден, то создать
-  if (Result >= 0) then
-  begin
-    Dest.FClassIndex := Result;
-    TLuaPropertyInfo(PLuaArrayInfo(ClassesInfo[Result]._Class).ItemInfo).Cleanup();
+      raise ELua.CreateFmt('Incorrect ItemTypeInfo of dynamic array "%s"', [FStringBuffer.Lua]) at ReturnAddress;
+    end;
   end else
   begin
-    Result := internal_add_class_info();
-    Dest.FClassIndex := Result;    
-    FInitialized := false;
+    Dimention := Length(ABounds);
+    if (Dimention and 1 = 1) then
+      raise ELua.CreateFmt('"%s" registering... Bounds size should be even. %d is an incorrect size',
+      [FStringBuffer.Lua, Dimention]) at ReturnAddress;
+    Dimention := Dimention shr 1;
 
-    with ClassesInfo[Result] do
-    begin
-      new(PLuaArrayInfo(_Class));
-      _ClassKind := ckArray;
-      _ClassName := Dest.Name;
-      Ref := internal_register_metatable(CodeAddr, _ClassName, Result);
-
-      // добавить в список быстрого поиска
-      internal_add_class_index(_Class, Result);
-      internal_add_class_index_by_name(_ClassName, Result);
-      if (arraytypeinfo <> nil) then internal_add_class_index(arraytypeinfo, Result);
-    end;
+    for i := 0 to Dimention-1 do
+    if (ABounds[i * 2] > ABounds[i * 2 + 1]) then
+      raise ELua.CreateFmt('"%s" registering... Incorrect bounds: "%d..%d"',
+      [FStringBuffer.Lua, ABounds[i * 2], ABounds[i * 2 + 1]]) at ReturnAddress;
   end;
 
-  // в любом случае заполнить ArrayInfo
-  PLuaArrayInfo(ClassesInfo[Result]._Class)^ := Dest;
+  // find
+  ArrayPtr := LUA_POINTER_INVALID;
+  if (Assigned(ArrayTypeInfo)) then ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(ArrayTypeInfo);
+  if (ArrayPtr = LUA_POINTER_INVALID) then
+  begin
+    NameItem := GetLuaNameItem(FStringBuffer.Lua);
+    ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
+    if (ArrayPtr = LUA_POINTER_INVALID) then
+    begin
+      AdvancedSize := Length(ABounds) * SizeOf(Integer);
+      Inc(AdvancedSize, (Dimention - 1) * SizeOf(NativeInt));
+      Result := Pointer(InternalAddMetaType(mkArray, NameItem, ArrayTypeInfo, ReturnAddress, AdvancedSize));
 
-  // заполнение PropertyInfo элемента массива
-  TLuaPropertyInfo(PLuaArrayInfo(ClassesInfo[Result]._Class).ItemInfo).Fill(
-                   ClassesInfo[Result], PropertyInfo.Base, nil, nil, nil);
+      Result.FIsDynamic := IsDynamic;
+      Result.FDimention := Dimention;
+      Result.FItemSize := ItemSize;
+
+      if (IsDynamic) then
+      begin
+        BufTypeInfo := ArrayTypeInfo;
+        PTypeInfo(Result.FMultiplies[0]) := BufTypeInfo;
+        for i := 1 to Dimention - 1 do
+        begin
+          BufTypeInfo := GetTypeData(BufTypeInfo).elType^;
+          PTypeInfo(Result.FMultiplies[i]) := BufTypeInfo;
+        end;
+
+        Result.FSize := SizeOf(Pointer);
+        Result.FFinalTypeInfo := ArrayTypeInfo;
+        Result.FFinalItemsCount := 1;
+      end else
+      begin
+        Result.FMultiplies[Dimention - 1] := ItemSize;
+        for i := Dimention - 2 downto 0 do
+        begin
+          Count := (ABounds[(i + 1) * 2 + 1] - ABounds[(i + 1) * 2]) + 1;
+          Result.FMultiplies[i] := Result.FMultiplies[i + 1] * Count;
+        end;
+
+        Result.FBounds := Pointer(@Result.FMultiplies[Dimention]);
+        System.Move(ABounds[0], Result.FBounds^, Length(ABounds) * SizeOf(Integer));
+
+        Result.FSize := Result.FMultiplies[0];
+        Result.FFinalTypeInfo := ItemTypeInfo{ToDo ???};
+        Result.FFinalItemsCount := Result.FSize div ItemSize;
+      end;
+    end else
+    begin
+      Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
+      if (Result.Kind <> mkArray) {ToDo or (Result.Low <> Low) or (Result.High <> High)} then
+        raise ETypeRegistered(NameItem.Key) at ReturnAddress;
+
+      if (Assigned(ArrayTypeInfo)) then
+        TLuaDictionary(FMetaTypes).Add(ArrayTypeInfo, ArrayPtr);
+    end;
+  end else
+  begin
+    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
+  end;
 end;
-         *)
-            (*
-// tpinfo - только typeinfo(Set)
-function TLua.InternalAddSet(tpinfo, CodeAddr: pointer): integer;
+
+function TLua.InternalAddSet(const TypeInfo, ReturnAddress: Pointer): PLuaSetInfo;
 const
   MASK_3 = $FF shl 3;
 var
-  Name: string;
-  TypeData: PTypeData;  
-  SetInfo: PLuaSetInfo;
+  Ptr: __luapointer;
+  ItemTypeInfo: PTypeInfo;
+  TypeData: PTypeData;
+  Low, High: Integer;
+  NameItem: PLuaStringDictionaryItem;
 begin
-  // проверка tpinfo
-  if (tpinfo = nil) then
-  ELua.Assert('TypeInfo of set is not defined', [], CodeAddr);
-  if (ptypeinfo(tpinfo).Kind <> tkSet) then ELua.Assert('TypeInfo of set is not correct: TypeKind = %s', [TypeKindName(ptypeinfo(tpinfo).Kind)], CodeAddr);
+  if (NativeUInt(TypeInfo) <= $ffff) then
+    raise ELua.Create('TypeInfo of set is not defined') at ReturnAddress;
 
-  // имя
-  Name := ptypeinfo(tpinfo).Name;
-
-  // поиск имеющегося
-  Result := internal_class_index(tpinfo);
-  if (Result < 0) then Result := internal_class_index_by_name(Name); 
-  if (Result >= 0) and (ClassesInfo[Result]._ClassKind <> ckSet) then ELua.Assert('Type "%s" is already registered', [Name], CodeAddr);
-
-  // добавление
-  if (Result < 0) then
+  if (PTypeInfo(TypeInfo).Kind <> tkSet) then
   begin
-    Result := internal_add_class_info();
-    FInitialized := false;
-
-    new(SetInfo);
-    with ClassesInfo[Result] do
-    begin
-      _Class := SetInfo;
-      _ClassKind := ckSet;
-      _ClassName := Name;
-      Ref := internal_register_metatable(CodeAddr, _ClassName, Result);
-
-      // добавить в список быстрого поиска
-      internal_add_class_index(_Class, Result);
-      internal_add_class_index_by_name(_ClassName, Result);
-      internal_add_class_index(tpinfo, Result);
-    end;
-
-    // заполнить поля
-    SetInfo.FName := Name;
-    SetInfo.FClassIndex := Result;
-    SetInfo.FTypeInfo := GetTypeData(tpinfo).{$ifdef fpc}CompType{$else}CompType^{$endif};
-    TypeData := GetTypeData(SetInfo.FTypeInfo);
-    SetInfo.FLow := TypeData.MinValue;
-    SetInfo.FHigh := TypeData.MaxValue;
-    if (SetInfo.FTypeInfo.Kind = tkEnumeration) and (not IsTypeInfo_Boolean(SetInfo.FTypeInfo)) then Self.RegEnum(SetInfo.FTypeInfo);
-
-    // расчёт размера множества
-    with SetInfo^ do
-    begin
-      {$ifdef fpc}
-         if (FHigh > 31) then FSize := 32 else FSize := 4;
-         FRealSize := FSize;
-         FCorrection := 0;
-         FAndMasks := $0000FFFF;
-      {$else}
-         FSize := (((FHigh+7+1)and MASK_3)-(FLow and MASK_3))shr 3;
-         FRealSize := FSize;
-         if (FSize = 3) then FSize := 4;
-         FCorrection := (FLow and MASK_3);
-         pchar(@FAndMasks)[0] := char($FF shr (7 - (FHigh and 7)));
-         pchar(@FAndMasks)[1] := char($FF shl (FLow - FCorrection));
-      {$endif}
-    end;
+    GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
+    raise ELua.CreateFmt('TypeInfo of set is not correct: TypeKind = %s',
+      [FStringBuffer.Default]) at ReturnAddress;
   end;
-end;   *)
+
+  Ptr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
+  if (Ptr = LUA_POINTER_INVALID) then
+  begin
+    ItemTypeInfo := GetTypeData(TypeInfo).CompType{$ifNdef FPC}^{$endif};
+    TypeData := GetTypeData(ItemTypeInfo);
+    Low := TypeData.MinValue;
+    High := TypeData.MaxValue;
+
+    unpack_lua_string(FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
+    NameItem := GetLuaNameItem(FStringBuffer.Lua);
+    Ptr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
+    if (Ptr = LUA_POINTER_INVALID) then
+    begin
+      Result := Pointer(InternalAddMetaType(mkSet, NameItem, TypeInfo, ReturnAddress));
+
+      Result.FItemTypeInfo := ItemTypeInfo;
+      Result.FLow := Low;
+      Result.FHigh := High;
+      with Result^ do
+      begin
+      {$ifdef FPC}
+        if (FHigh > 31) then FSize := 32 else FSize := 4;
+        FRealSize := FSize;
+        FCorrection := 0;
+        FAndMasks := $0000FFFF;
+      {$else}
+        FSize := (((FHigh + 7 + 1) and MASK_3) - (FLow and MASK_3))shr 3;
+        FRealSize := FSize;
+        if (FSize = 3) then FSize := 4;
+        FCorrection := (FLow and MASK_3);
+        FAndMasks := Integer(Byte($FF shr (7 - (FHigh and 7)))) +
+                     Integer(Byte($FF shl (FLow - FCorrection))) shl 8;
+      {$endif}
+      end;
+
+      if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanTypeInfo(ItemTypeInfo)) then
+      begin
+        //ToDo Self.RegEnum(SetInfo.FTypeInfo);
+      end;
+    end else
+    begin
+      Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+      if (Result.Kind <> mkSet) or (Result.Low <> Low) or (Result.High <> High) then
+        raise ETypeRegistered(NameItem.Key) at ReturnAddress;
+
+      TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
+    end;
+  end else
+  begin
+    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+  end;
+end;
 
 function  TLua.InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString;
   ArgsCount: Integer; const AProcKind: Byte{TLuaProcKind}; Address, ReturnAddress: Pointer): __luapointer;
@@ -13758,7 +13951,7 @@ begin
       PLuaRecordInfo(ClassInfo._Class).FOperatorCallback(Dest.instance^, X1.instance^, X1.instance^, TLuaOperator(Kind))
     end else
     begin
-      // инфертировать множество
+      // инвертировать множество
       with PLuaSetInfo(ClassInfo._Class)^ do
       SetInvert(Dest.instance, X1.instance, FAndMasks, FRealSize);
     end;
@@ -15813,35 +16006,55 @@ asm
 end;
 {$endif}
 
-          (*
-// tpinfo может быть:
-// - typeinfo(struct)
-// - typeinfo(DynArray of struct)
-// - sizeof(struct)
-function  __TLuaRegRecord(const Self: TLua; const Name: string; const tpinfo: ptypeinfo; const ReturnAddr: pointer): PLuaRecordInfo;
+function TLua.RegRecord(const Name: LuaString; const TypeInfo: PTypeInfo): PLuaRecordInfo;
+{$ifdef RETURNADDRESS}
 begin
-  Result := PLuaRecordInfo(Self.ClassesInfo[Self.InternalAddRecord(Name, tpinfo, ReturnAddr)]._Class);
+  Result := InternalAddRecord(Name, TypeInfo, ReturnAddress);
 end;
-
-function  TLua.RegRecord(const Name: string; const tpinfo: ptypeinfo): PLuaRecordInfo;
+{$else}
 asm
+  {$ifdef CPUX86}
   push [esp]
-  jmp __TLuaRegRecord
-end;             *)
-                        (*
-// itemtypeinfo - обычный тип или recordinfo или arrayinfo
-function  __TLuaRegArray(const Self: TLua; const Identifier: pointer; const itemtypeinfo: pointer; const Bounds: array of integer; const ReturnAddr: pointer): PLuaArrayInfo;
-begin
-  Result := Self.ClassesInfo[Self.InternalAddArray(Identifier, itemtypeinfo, ReturnAddr, Bounds)]._Class;
+  {$else .CPUX64}
+  mov r9, [rsp]
+  {$endif}
+  jmp TLua.InternalAddRecord
 end;
+{$endif}
 
-function  TLua.RegArray(const Identifier: pointer; const itemtypeinfo: pointer; const Bounds: array of integer): PLuaArrayInfo;
+function TLua.RegArray(const Identifier: Pointer; const ItemTypeInfo: PTypeInfo; const ABounds: array of Integer): PLuaArrayInfo;
+{$ifdef RETURNADDRESS}
+begin
+  Result := InternalAddArray(Identifier, ItemTypeInfo, ABounds, ReturnAddress);
+end;
+{$else}
 asm
+  {$ifdef CPUX86}
   pop ebp
   push [esp]
-  jmp __TLuaRegArray
+  {$else .CPUX64}
+  mov r11, [rsp]
+  {$endif}
+  jmp TLua.InternalAddArray
 end;
-          *)
+{$endif}
+
+function TLua.RegSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
+{$ifdef RETURNADDRESS}
+begin
+  Result := InternalAddSet(TypeInfo, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp TLua.InternalAddSet
+end;
+{$endif}
+
             (*
 function  __TLuaRegSet(const Self: TLua; const tpinfo: ptypeinfo; const ReturnAddr: pointer): PLuaSetInfo;
 begin

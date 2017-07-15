@@ -216,6 +216,9 @@ type
   // incorrect script use exception
   ELuaScript = class(ELua);
 
+  // script stack overflow
+  ELuaStackOverflow = class(ELuaScript);
+
   // Lua types, that is used between script and native side
   TLuaArgType = (
     // simple types
@@ -338,7 +341,8 @@ type
     function ForceTable: PLuaTable;
   end;
   TLuaArgs = array of TLuaArg;
-
+  TLuaArgList = array[0..High(Integer) div SizeOf(TLuaArg) - 1] of TLuaArg;
+  PLuaArgList = ^TLuaArgList;
                            (*
   // highlevel interface to traverse table items with pair <Key, Value>
   TLuaPair = object
@@ -798,39 +802,41 @@ type
   // <<-- внутренняя рутина для калбеков -------------------------------------
             *)
 
+  TLuaScriptBOM = (sbNone, sbUTF8, sbUTF16, sbUTF16BE, cbUTF32, cbUTF32BE);
+  TLuaBufferUnique = function(var Data: __luabuffer): NativeInt;
+  TLuaOnPreprocessScript = procedure(var Data, Source: __luabuffer; const UnitName: LuaString; const Unique: TLuaBufferUnique) of object;
 
-
-  TLuaUnitLineInfo = record
-    Str: pchar;
-    Length: integer;
+  TLuaUnitLine = record
+    Chars: __luadata;
+    Count: Integer;
   end;
-  TLuaUnitLineInfoDynArray = array of TLuaUnitLineInfo;
 
-  
   TLuaUnit = class(TObject)
-  private    (*
-    FName: string;
+  private
+    FLua: TLua;
+    FName: LuaString;
+    FNameLength: Integer;
+    FData: __luabuffer;
     FFileName: string;
-    FText: string;
-    FLinesCount: integer;
-    FLinesInfo: TLuaUnitLineInfoDynArray; *)
+    FLinesCount: Integer;
+    FLines: array of TLuaUnitLine;
      (*
-    procedure InitializeLinesInfo();
-    function GetLine(index: integer): string;
-    function GetLineInfo(index: integer): TLuaUnitLineInfo; *)
+    procedure InitializeLinesInfo();  *)
+    function GetItem(Index: Integer): LuaString;
+    function GetLine(Index: Integer): TLuaUnitLine;
   public
    (* procedure SaveToStream(const Stream: TStream);
     procedure SaveToFile(const FileName: string); overload;
-    procedure SaveToFile(); overload;
+    procedure SaveToFile(); overload; *)
 
-    property Name: string read FName;
+    property Lua: TLua read FLua;
+    property Name: LuaString read FName;
     property FileName: string read FFileName;
-    property Text: string read FText;
-    property LinesCount: integer read FLinesCount;
-    property Lines[index: integer]: string read GetLine; default;
-    property LinesInfo[index: integer]: TLuaUnitLineInfo read GetLineInfo;*)
+    property Data: __luabuffer read FData;
+    property LinesCount: Integer read FLinesCount;
+    property Items[Index: Integer]: LuaString read GetItem; default;
+    property Lines[Index: Integer]: TLuaUnitLine read GetLine;
   end;
-  TLuaUnitDynArray = array of TLuaUnit;
 
 
 { TLua class
@@ -928,6 +934,17 @@ type
     function GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
     function GetLuaName(const Value: LuaString): __luaname;
 
+   // FArgs: TLuaArgs;
+   // FArgsCount: integer;
+                (*
+    function  GetRecordInfo(const Name: string): PLuaRecordInfo;
+    function  GetArrayInfo(const Name: string): PLuaArrayInfo;
+    function  GetSetInfo(const Name: string): PLuaSetInfo;
+    function  GetVariable(const Name: string): Variant;
+    procedure SetVariable(const Name: string; const Value: Variant);
+    function  GetVariableEx(const Name: string): TLuaArg;
+    procedure SetVariableEx(const Name: string; const Value: TLuaArg);      *)
+
     // найти глобальную переменную. если false, то Index - place в hash списке глобальных имён
  //   function  GlobalVariablePos(const Name: pchar; const NameLength: integer; var Index: integer; const auto_create: boolean=false): boolean;
   private
@@ -997,46 +1014,50 @@ type
   private
     // scripts and units routine
     FPointPreprocess: Boolean;
-
+    FOnPreprocessScript: TLuaOnPreprocessScript;
 
          (*
     //FBufferArg: TLuaArg;
     FResultBuffer: TLuaResultBuffer;
- //   FReferences: TLuaReferenceDynArray; // список ссылок (LUA_REGISTRYINDEX)
-    FUnitsCount: integer;
-    FUnits: TLuaUnitDynArray; *)
- (*   procedure Check(const ret: integer; const CodeAddr: pointer; AUnit: TLuaUnit=nil); // проверить на ошибки
-    procedure InternalLoadScript(var Memory: string; const UnitName, FileName: string; CodeAddr: pointer);
-    function  InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
+ //   FReferences: TLuaReferenceDynArray; // список ссылок (LUA_REGISTRYINDEX)  *)
+    FUnitsCount: Integer;
+    FUnits: array of TLuaUnit;
+    procedure CheckScriptError(const ErrCode: Integer; const ReturnAddress: Pointer; AUnit: TLuaUnit = nil);
+    function  InternalConvertScript(var Data: __luabuffer): Integer;
+    procedure InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString; const FileName: string; const ReturnAddress: Pointer);
+ (*   function  InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
     function  StackArgument(const Index: integer): string;
-    function  GetUnit(const index: integer): TLuaUnit;
-    function  GetUnitByName(const Name: string): TLuaUnit;   *)
-  private
-   // FArgs: TLuaArgs;
-   // FArgsCount: integer;
-                (*
-    function  GetRecordInfo(const Name: string): PLuaRecordInfo;
-    function  GetArrayInfo(const Name: string): PLuaArrayInfo;
-    function  GetSetInfo(const Name: string): PLuaSetInfo;
-    function  GetVariable(const Name: string): Variant;
-    procedure SetVariable(const Name: string; const Value: Variant);
-    function  GetVariableEx(const Name: string): TLuaArg;
-    procedure SetVariableEx(const Name: string; const Value: TLuaArg);      *)
+    function  GetUnit(const index: integer): TLuaUnit;  *)
+    function  GetUnitByName(const Name: LuaString): TLuaUnit;
   public
     constructor Create;
     destructor Destroy; override;
-  (*  procedure GarbageCollection();
-    procedure SaveNameSpace(const FileName: string); dynamic;
+    procedure GarbageCollection;
+   (* procedure SaveNameSpace(const FileName: string); dynamic;
     function CreateReference(const global_name: string=''): TLuaReference;
     class function GetProcAddress(const ProcName: pchar; const throw_exception: boolean = false): pointer; // низкий уровень. адрес функции lua.dll
-                         *) (*
-    // загрузка и запуск скриптов
-    procedure RunScript(const Script: string);
+                         *)
+
+    // errors
+    procedure Error(const Text: LuaString); overload;
+    procedure Error(const FmtStr: LuaString; const Args: array of const); overload;
+
+    // scripts
+    procedure RunScript(const Script: LuaString);
     procedure LoadScript(const FileName: string); overload;
-    procedure LoadScript(const ScriptBuffer: pointer; const ScriptBufferSize: integer; const UnitName: string=''); overload;
- *)  (*
+    procedure LoadScript(const ScriptBuffer: Pointer; const ScriptBufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString = ''); overload;
+    {$ifNdef LUA_NOCLASSES}
+    procedure LoadScript(const Stream: TStream; const UnitName: LuaString; const ASize: Integer = -1); overload;
+    {$endif}
+    {$ifdef KOL}
+    procedure LoadScript(const Stream: KOL.PStream; const UnitName: LuaString; const ASize: Integer = -1); overload;
+    {$endif}
+    {$ifdef MSWINDOWS}
+    procedure LoadScript(const Instance: THandle; const Name, ResType: PChar; const UnitName: LuaString); overload;
+    {$endif}
+
+   (*
     // проверка при калбеке
-    procedure ScriptAssert(const FmtStr: string; const Args: array of const); // вызвать Exception из Lua
     function  CheckArgsCount(const ArgsCount: array of integer; const ProcName: string=''; const AClass: TClass=nil): integer; overload;
     function  CheckArgsCount(const ArgsCount: TIntegerDynArray; const ProcName: string=''; const AClass: TClass=nil): integer; overload;
     procedure CheckArgsCount(const ArgsCount: integer; const ProcName: string=''; const AClass: TClass=nil); overload;
@@ -1076,9 +1097,10 @@ type
 
     // script units
     property PointPreprocess: Boolean read FPointPreprocess write FPointPreprocess;
+    property OnPreprocessScript: TLuaOnPreprocessScript read FOnPreprocessScript write FOnPreprocessScript;
     (*    property UnitsCount: integer read FUnitsCount;
-    property Units[const index: integer]: TLuaUnit read GetUnit;
-    property UnitByName[const Name: string]: TLuaUnit read GetUnitByName;   *)
+    property Units[const index: integer]: TLuaUnit read GetUnit;   *)
+    property UnitByName[const Name: LuaString]: TLuaUnit read GetUnitByName;
   end;
 
 const
@@ -2847,6 +2869,21 @@ begin
 end;
 {$endif}
 
+function UniqueLuaBuffer(var Data: __luabuffer): NativeInt;
+begin
+  Result := NativeInt(Data);
+  if (Result = 0) then Exit;
+
+  {$ifdef NEXTGEN}
+    if (PDynArrayRec(Result - SizeOf(TDynArrayRec)).RefCount <> 1) then
+      Data := System.Copy(Data, Low(Data), Length(Data));
+  {$else}
+    UniqueString(AnsiString(Data));
+  {$endif}
+
+  Result := NativeInt(Data) - Result;
+end;
+
 var
   TypInfoGetStrProp: function(Instance: TObject; PropInfo: PPropInfo): string;
   TypInfoSetStrProp: procedure(Instance: TObject; PropInfo: PPropInfo; const Value: string);
@@ -3589,6 +3626,14 @@ type
     property Count: NativeInt read FCount;
   end;
 
+// x86 architecture compatibility
+{$ifNdef CPUX86}
+function Swap(const X: NativeUInt): NativeUInt; inline;
+begin
+  Result := (Byte(X) shl 8) + Byte(X shr 8);
+end;
+{$endif}
+
 procedure SwapPtr(var Left, Right: Pointer);
 var
   Temp: Pointer;
@@ -4130,7 +4175,6 @@ end;
 
 { TLuaArg }
 
-
 function LuaArgTypeToString(const Value: TLuaArgType; const Prefixes: Boolean): string;
 begin
   Result := GetEnumName(TypeInfo(TLuaArgType), Ord(Value));
@@ -4386,7 +4430,7 @@ end;
 {$ifdef RETURNADDRESS}
 procedure TLuaArg.SetVariant(const Value: Variant);
 {$else}
-procedure TLuaArgSetVariant(const Self: TLuaArg; const Value: Variant; const ReturnAddress: Pointer);
+procedure TLuaArgSetVariant(var Self: TLuaArg; const Value: Variant; const ReturnAddress: Pointer);
 {$endif}
 
   procedure DateTimeValue(const Self: PLuaArg; Value: TDateTime); far;
@@ -4474,7 +4518,7 @@ begin
 end;
 
 {$ifNdef RETURNADDRESS}
-function TLuaArg.GetClass: Class;
+function TLuaArg.GetClass: TClass;
 asm
   {$ifdef CPUX86}
   mov edx, [esp]
@@ -4512,7 +4556,7 @@ begin
 end;
 
 {$ifNdef RETURNADDRESS}
-function TLuaArg.GetObject: Object;
+function TLuaArg.GetObject: TObject;
 asm
   {$ifdef CPUX86}
   mov edx, [esp]
@@ -4561,7 +4605,7 @@ end;
 {$ifdef RETURNADDRESS}
 procedure TLuaArg.SetRecord(const Value: TLuaRecord);
 {$else}
-procedure TLuaArgSetRecord(const Self: TLuaArg; const Value: TLuaRecord; const ReturnAddress: Pointer);
+procedure TLuaArgSetRecord(var Self: TLuaArg; const Value: TLuaRecord; const ReturnAddress: Pointer);
 {$endif}
 begin
   Self.CheckDifficultSetter(Value, 'LuaRecord', ReturnAddress);
@@ -4607,7 +4651,7 @@ end;
 {$ifdef RETURNADDRESS}
 procedure TLuaArg.SetArray(const Value: TLuaArray);
 {$else}
-procedure TLuaArgSetArray(const Self: TLuaArg; const Value: TLuaArray; const ReturnAddress: Pointer);
+procedure TLuaArgSetArray(var Self: TLuaArg; const Value: TLuaArray; const ReturnAddress: Pointer);
 {$endif}
 begin
   Self.CheckDifficultSetter(Value, 'LuaArray', ReturnAddress);
@@ -4653,7 +4697,7 @@ end;
 {$ifdef RETURNADDRESS}
 procedure TLuaArg.SetSet(const Value: TLuaSet);
 {$else}
-procedure TLuaArgSetSet(const Self: TLuaArg; const Value: TLuaSet; const ReturnAddress: Pointer);
+procedure TLuaArgSetSet(var Self: TLuaArg; const Value: TLuaSet; const ReturnAddress: Pointer);
 {$endif}
 begin
   Self.CheckDifficultSetter(Value, 'LuaSet', ReturnAddress);
@@ -5850,7 +5894,7 @@ asm
   {$ifdef CPUX86}
   push [esp]
   {$else .CPUX64}
-  mov r10, [rsp]
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$endif}
   jmp __TLuaRecordInfoRegField_1
 end;
@@ -5874,7 +5918,7 @@ asm
   {$ifdef CPUX86}
   push [esp]
   {$else .CPUX64}
-  mov r11, [rsp]
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$endif}
   jmp __TLuaRecordInfoRegField_2
 end;
@@ -5896,7 +5940,7 @@ asm
   {$ifdef CPUX86}
   push [esp]
   {$else .CPUX64}
-  mov r10, [rsp]
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$endif}
   jmp __TLuaRecordInfoRegProc
 end;
@@ -7547,6 +7591,78 @@ begin
 
   inherited;
 end;
+
+procedure __TLuaError(const Self: TLua; const Text: LuaString; const ReturnAddress: Pointer);
+const
+  SLN_CONST: Cardinal = Ord('S') + (Ord('l') shl 8) + (Ord('n') shl 16);
+var
+  DebugInfo: lua_Debug;
+begin
+  // debug information
+  FillChar(DebugInfo, SizeOf(DebugInfo), #0);
+  lua_getstack(Self.Handle, 1, @DebugInfo);
+  lua_getinfo(Self.Handle, __luaname(Pointer(@SLN_CONST)), @DebugInfo);
+
+  // standard exception
+  if (DebugInfo.currentline < 0) then
+    raise ELua.Create(string(Text)) at ReturnAddress;
+
+  // script exception, format error to parse in Check
+  Self.unpack_lua_string(Self.FStringBuffer.Lua, __luaname(Pointer(@DebugInfo.short_src[4])));
+  {$ifdef UNICODE}
+    FmtStr(Self.FStringBuffer.Unicode, '%s:%d: %s', [Self.FStringBuffer.Lua, DebugInfo.currentline, Text]);
+    Self.push_unicode_string(Self.FStringBuffer.Unicode);
+  {$else}
+    WideFmtStr(Self.FStringBuffer.Wide, '%s:%d: %s', [Self.FStringBuffer.Lua, DebugInfo.currentline, Text]);
+    Self.push_wide_string(Self.FStringBuffer.Wide);
+  {$endif}
+  lua_error(Self.Handle);
+end;
+
+procedure TLua.Error(const Text: LuaString);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaError(Self, Text, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp __TLuaError
+end;
+{$endif}
+
+procedure __TLuaErrorFmt(const Self: TLua; const FmtStr: LuaString; const Args: array of const; const ReturnAddress: Pointer);
+{$ifNdef UNICODE}
+type
+  UnicodeString = WideString;
+{$endif}
+var
+  Fmt, Buffer: UnicodeString;
+begin
+  Fmt := UnicodeString(FmtStr);
+  Buffer := {$ifdef UNICODE}Format{$else}WideFormat{$endif}(Fmt, Args);
+  __TLuaError(Self, LuaString(Buffer), ReturnAddress);
+end;
+
+procedure TLua.Error(const FmtStr: LuaString; const Args: array of const);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaErrorFmt(Self, FmtStr, Args, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaErrorFmt
+end;
+{$endif}
 
 procedure TLua.SetCodePage(Value: Word);
 var
@@ -9593,21 +9709,6 @@ begin
   end;
 end;
 
-                 (*
-procedure __TLuaGarbageCollection(const Self: TLua; const ReturnAddr: pointer);
-var
-  ret: integer;
-begin
-  ret := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
-  if (ret <> 0) then Self.Check(ret, ReturnAddr);
-end;
-
-procedure TLua.GarbageCollection();
-asm
-  mov edx, [esp]
-  jmp __TLuaGarbageCollection
-end;        *)
-
               (*
 // сохранить неймспейс в файл
 type TLuaStringList = class(TStringList) public Lua: TLua; end;
@@ -10216,93 +10317,226 @@ asm
   jmp __TLuaCreateReference
 end;                  *)
 
-                     (*
 
-// проверить выполнение на ошибку
-procedure TLua.Check(const ret: integer; const CodeAddr: pointer; AUnit: TLuaUnit=nil);
+procedure __TLuaGarbageCollection(const Self: TLua; const ReturnAddress: Pointer);
+var
+  ErrCode: Integer;
+begin
+  ErrCode := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
+  if (ErrCode <> 0) then Self.CheckScriptError(ErrCode, ReturnAddress);
+end;
 
-  procedure ThrowAssertation();
+procedure TLua.GarbageCollection;
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaGarbageCollection(Self, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  mov edx, [esp]
+  {$else .CPUX64}
+  mov rdx, [rsp]
+  {$endif}
+  jmp __TLuaGarbageCollection
+end;
+{$endif}
+
+procedure TLua.CheckScriptError(const ErrCode: Integer; const ReturnAddress: Pointer; AUnit: TLuaUnit);
+const
+  LINE_MARKS: array[Boolean] of string = ('', '-->> ');
+var
+  Err, UnitName: ^LuaString;
+  P1, P2, Count, i: Integer;
+  UnitLine: Integer;
+  Text, LineFmt: ^string;
+  MinLine, MaxLine: Integer;
+  Line: TLuaUnitLine;
+  S: PChar;
+
+  function CharPos(const C: LuaChar; const Str: LuaString; const StartFrom: Integer = 1): Integer; far;
   var
-    Err: string;
-    err_str: pchar;
-    P1, P2, i: integer;
-    UnitName, line_fmt: string;
-    UnitLine: integer;
-    MinLine, MaxLine: integer;
+    S: PLuaChar;
+    Count: Integer;
   begin
-    lua_to_pascalstring(Err, Handle, -1);
-    stack_pop();
-    if (Err = '') then exit;
-
-    // изменить Err - узнать имя чанка и номер строки
-    UnitLine := 0;
-    if (Err[1] = '[') then
+    S := Pointer(Str);
+    if (S <> nil) then
     begin
-      P1 := CharPos('"', Err);
-      P2 := CharPos(']', Err);
-      if (P1 <> 0) and (P2 <> 0) then
-      begin
-        UnitName := Copy(Err, P1+1, P2-P1-2);
-        Delete(Err, 1, P2);
+      Count := PInteger(NativeInt(S) - SizeOf(Integer))^ {$ifdef LUA_LENGTH_SHIFT}shr 1{$endif};
+      Dec(Count, StartFrom - 1);
+      Inc(S, StartFrom - 1);
 
-        if (Err <> '') and (Err[1] = ':') then
+      if (Count > 0) then
+      repeat
+        if (S^ = C) then
         begin
-          P1 := 1;
-          P2 := CharPosEx(':', Err, 2);
-          if (P2 <> 0) then
-          begin
-            UnitLine := StrToIntDef(Copy(Err, P1+1, P2-P1-1), 0);
-            if (UnitLine > 0) then dec(UnitLine);
-            Delete(Err, 1, P2);
-            if (Err <> '') and (Err[1] = #32) then Delete(Err, 1, 1);
-          end;
+          Result := Integer(NativeInt(S) - NativeInt(Str) + 1);
+          Exit;
         end;
+
+        Dec(Count);
+        Inc(S);
+      until (Count = 0);
+    end;
+
+    Result := 0;
+  end;
+
+  function CharsToInt(S: PLuaChar; Count: Integer): Integer;
+  label
+    fail;
+  begin
+    if (Count <= 0) then goto fail;
+
+    Result := 0;
+    repeat
+      case S^ of
+        '0'..'9': Result := Result * 10 + Integer(Integer(S^) - Ord('0'));
+      else
+        goto fail;
       end;
+
+      Dec(Count);
+      Inc(S);
+    until (Count = 0);
+    Exit;
+
+  fail:
+    Result := 0;
+  end;
+
+  function EmptyLine(const AUnit: TLuaUnit; const AUnitLine: Integer): Boolean; far;
+  var
+    S: __luadata;
+    Count, i: Integer;
+  begin
+    Result := False;
+    S := AUnit.FLines[AUnitLine].Chars;
+    Count := AUnit.FLines[AUnitLine].Count;
+    for i := 1 to Count do
+    begin
+      if (Byte(S^) > 32) then Exit;
+      Inc(S);
     end;
 
-    // определиться с чанком
-    if (UnitName = '') then
-    begin
-      AUnit := nil;
-      UnitName := 'GLOBAL_NAME_SPACE';
-    end else
-    begin
-      if (AUnit = nil) then AUnit := Self.UnitByName[UnitName];
-      if (AUnit <> nil) and (dword(UnitLine) >= dword(AUnit.FLinesCount)) then AUnit := nil;
-    end;
-
-    // определиться с текстом сообщения
-    Err := Format('unit "%s", line %d.'#13'%s', [UnitName, UnitLine, Err]);
-
-    if (AUnit <> nil) then
-    begin
-      MinLine := UnitLine-2; if (MinLine < 0) then MinLine := 0;
-      if (MinLine <> UnitLine) and (Trim(AUnit[MinLine]) = '') then inc(MinLine);
-      MaxLine := UnitLine+2; if (MaxLine >= AUnit.FLinesCount) then MaxLine := AUnit.FLinesCount-1;
-      if (MaxLine <> UnitLine) and (Trim(AUnit[MaxLine]) = '') then dec(MaxLine);
-      line_fmt := Format(#13'%%%dd:  ', [Length(IntToStr(MaxLine))]);
-      Err := Err + #13#13'Code:';
-
-      for i := MinLine to MaxLine do
-      begin
-        Err := Err + Format(line_fmt, [i]);
-        if (i = UnitLine) then Err := Err + '-->> ';
-        Err := Err + AUnit[i];
-      end;
-    end;
-
-    // откорректировать #13 --> #10 (для случаев консоли)
-    err_str := pointer(Err);
-    for i := 0 to Length(Err)-1 do
-    if (err_str[i] = #13) then err_str[i] := #10;  
-
-    // exception
-    ELuaScript.Assert(Err, CodeAddr);
+    Result := True;
   end;
 
 begin
-  if (ret <> 0) then ThrowAssertation();
-end;             *)
+  if (ErrCode = 0) then Exit;
+
+  // error text
+  Err := @FStringBuffer.Lua;
+  stack_lua_string(Err^, -1);
+  stack_pop;
+  if (Pointer(Err^) = nil) then Exit;
+
+  // unit name buffer
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    {$ifdef UNICODE}
+      UnitName := @FStringBuffer.Unicode;
+    {$else}
+      UnitName := @FStringBuffer.Wide;
+    {$endif}
+  {$else}
+    UnitName := @FStringBuffer.Ansi;
+  {$ifend}
+
+  // change error text, detect chunk name, line number
+  UnitLine := 0;
+  if (Err^[1] = '[') then
+  begin
+    P1 := CharPos('"', Err^);
+    P2 := CharPos(']', Err^);
+    if (P1 <> 0) and (P2 <> 0) then
+    begin
+      // unit name
+      Count := P2 - P1 - 2;
+      SetLength(UnitName^, Count);
+      System.Move(PLuaChar(@PLuaChar(Pointer(Err^))[P1 {+ 1 - 1}])^, Pointer(UnitName^)^, Count * SizeOf(LuaChar));
+      Delete(Err^, 1, P2);
+
+      // unit line
+      if (Pointer(Err^) <> nil) and (Err^[1] = ':') then
+      begin
+        P1 := 1;
+        P2 := CharPos(':', Err^, 2);
+        if (P2 <> 0) then
+        begin
+          UnitLine := CharsToInt(PLuaChar(@PLuaChar(Pointer(Err^))[P1 {+ 1 - 1}]), P2 - P1 - 1);
+          if (UnitLine > 0) then Dec(UnitLine);
+          Delete(Err^, 1, P2);
+          if (Pointer(Err^) <> nil) and (Err^[1] = #32) then Delete(Err^, 1, 1);
+        end;
+      end;
+    end;
+  end;
+
+  // unit (chunk)
+  if (Pointer(UnitName^) = nil) then
+  begin
+    AUnit := nil;
+    UnitName^ := 'GLOBAL_NAME_SPACE';
+  end else
+  begin
+    if (AUnit = nil) then AUnit := Self.UnitByName[UnitName^];
+    if (AUnit <> nil) and (Cardinal(UnitLine) >= Cardinal(AUnit.FLinesCount)) then AUnit := nil;
+  end;
+
+  // availiable: unit instance, unit name, unit line, error text
+  // may be later it will be used in debug mode
+
+  // base output text
+  Text := @FStringBuffer.Default;
+  FmtStr(Text^, 'unit "%s", line %d.'#13'%s', [UnitName^, UnitLine, Err^]);
+
+  // unit output text lines
+  if (AUnit <> nil) then
+  begin
+    // min/max
+    MinLine := UnitLine - 2;
+    if (MinLine < 0) then MinLine := 0;
+    while (MinLine <> UnitLine) and (EmptyLine(AUnit, MinLine)) do Inc(MinLine);
+    MaxLine := UnitLine + 2;
+    if (MaxLine >= AUnit.FLinesCount) then MaxLine := AUnit.FLinesCount - 1;
+    while (MaxLine <> UnitLine) and (EmptyLine(AUnit, MaxLine)) do Dec(MaxLine);
+
+    // max digits
+    i := MaxLine;
+    Count := 0;
+    repeat
+      i := i div 10;
+      Inc(Count);
+    until (i = 0);
+
+    // line format
+    {$ifdef UNICODE}
+      LineFmt := @FStringBuffer.Unicode;
+    {$else}
+      LineFmt := @FStringBuffer.Ansi;
+    {$endif}
+    FmtStr(LineFmt^, '%%s'#10'%%%dd:  %%s%%s', [Count]);
+
+    // output text
+    Text^ := Text^ + #10#10'Code:';
+    for i := MinLine to MaxLine do
+    begin
+      Line := AUnit.GetLine(i);
+      Self.unpack_lua_string(FStringBuffer.Lua, Line.Chars, Line.Count);
+      FmtStr(Text^, LineFmt^, [Text^, i, LINE_MARKS[i = UnitLine], FStringBuffer.Lua]);
+    end;
+  end;
+
+  // correct: #13 --> #10 (for console cases)
+  S := Pointer(Text);
+  for i := 0 to Length(Text^) - 1 do
+  begin
+    if (S[i] = #13) then S[i] := #10;
+  end;
+
+  // exception
+  raise ELuaScript.Create(Text^) at ReturnAddress;
+end;
                    (*
 function  TLua.InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
 var
@@ -10363,239 +10597,7 @@ begin
   if (Result = '') then Result := 'nil';
 end;
 
-// вызвать Exception из Lua
-procedure __TLuaScriptAssert(const Self: TLua; const FmtStr: string; const Args: array of const; const ReturnAddr: pointer);
-var
-  S: string;
-  DebugInfo: lua_Debug;
-begin
-  // получить Debug-информацию
-  ZeroMemory(@DebugInfo, sizeof(DebugInfo));
-  lua_getstack(Self.Handle, 1, @DebugInfo);
-  lua_getinfo(Self.Handle, 'Sln', @DebugInfo);
-
-  if (DebugInfo.currentline < 0) then
-  ELua.Assert(FmtStr, Args, ReturnAddr); // ошибочный случай вызова TLua.ScriptAssert
-
-  // вывод сообщения (стандартный вид)
-  S := Format('%s:%d: ', [pchar(@DebugInfo.short_src[4]), DebugInfo.currentline]);
-  lua_push_pascalstring(Self.Handle, S + Format(FmtStr, Args));
-  lua_error(Self.Handle);
-end;
-
-procedure TLua.ScriptAssert(const FmtStr: string; const Args: array of const);
-asm
-  pop ebp
-  push [esp]
-  jmp __TLuaScriptAssert
-end;
-             *)
-                           (*
-// выполнить препроцессинг скрипта
-// на данный момент это только замена точек на двоеточие
-procedure PreprocessScript(var Memory: string);
-const
-  SPACES = [#32, #9];
-  ENTER = [#13, #10];
-  IGNORS = SPACES + ENTER;
-  STR_PREPS = ['!','?','.',',','"','''','`',':',';','#','№','$','%','&','(',')',
-               '[',']','{','}','/','|','\','~','^','*','+','-','<','=','>'] - ['_'];
-  STD_NAME_SPACES: array[0..7] of string = ('coroutine', 'package', 'string', 'table', 'math', 'io', 'os', 'debug');
-  STD_HASHES: array[0..7] of integer = ($5C958D0E, $61FFBC58, $37EF079, $1FF4007F, $4C000063, $4000046E, $40000457, $3E6C006F);
-
-  // определить "объект" перед точкой и сравнить на стандартный неймспейс
-  function TestStdNameSpace(P: integer): boolean;
-  var
-    obj, i: integer;
-    C: char;
-    S: string;
-  begin
-    Result := false;
-
-    obj := 0;
-    for i := P downto 1 do
-    begin
-      C := Memory[i];
-
-      if (obj <> 0) then
-      begin
-        if (C in (STR_PREPS + IGNORS)) then
-        begin
-          S := Copy(Memory, i+1, obj-i);
-          P := IntPos(StringHash(S), pointer(@STD_HASHES), Length(STD_HASHES));
-
-          Result := (P >= 0) and (SameStrings(S, STD_NAME_SPACES[P]));
-          exit;
-        end;
-      end else
-      if (not (C in IGNORS)) then
-      begin
-        obj := i;
-        if (C in STR_PREPS) then exit;
-      end;
-    end;
-  end;
-
-var
-  C: char;
-  FuncFound, IgnoresFound: boolean;
-  P, i: integer;
-begin
-  P := 0;
- 
-  while true do
-  begin
-    P := CharPosEx('(', Memory, P+1);
-    if (P = 0) then break;
-
-    FuncFound := false;
-    IgnoresFound := false;
-    for i := P-1 downto 1 do
-    begin
-      C := Memory[i];
-
-      if (FuncFound) then
-      begin
-        if (C = '.') then
-        begin
-          if (i <> 1) and (Memory[i-1] <> '.'{оператор ..})
-          and (not TestStdNameSpace(i-1)) then Memory[i] := ':'; {+Unique}
-
-          break;
-        end;
-
-        if (not IgnoresFound) then
-        begin
-          IgnoresFound := (C in IGNORS);
-          if (IgnoresFound) then continue;
-        end;
-
-        // если найден знак (и это не точка) то закончить цикл
-        if (C in STR_PREPS) then break;
-
-        // если найден не знак и не пропускаемый символ (хотя пропускаемые уже встречались) - значит это была неклассовая функция 
-        if (IgnoresFound) and (not (C in IGNORS)) then break;
-
-        continue;
-      end else
-      begin
-        FuncFound := not(C in SPACES);
-        if (FuncFound{не пробел}) and (C in (STR_PREPS + ENTER)) {операторы или другая строка} then break;
-        continue;
-      end;
-
-      break;
-    end;
-  end;
-end;             *)
-                       (*
-// загрузка скрипта
-procedure TLua.InternalLoadScript(var Memory: string; const UnitName, FileName: string; CodeAddr: pointer);
-var
-  ret, unit_index: integer;
-  internal_exception: Exception;
-  AUnit, LastUnit: TLuaUnit;
-  CW: word;
-
-  // в случае ошибки пытаемся восстановить старый чанк в Lua
-  // при этом сохраняем Exception - потом он будет использован
-  procedure OnExceptionRetrieve(const E: Exception);
-  begin
-    internal_exception := Exception(E.ClassType.NewInstance);
-    CopyObject(internal_exception, E);
-    AUnit.Free;
-
-    if (LastUnit <> nil) then
-    begin
-      Memory := LastUnit.Text;
-      PreprocessScript(Memory);
-      try
-        ret := luaL_loadbuffer(Handle, pchar(Memory), Length(Memory), pchar(LastUnit.Name));
-        if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
-        if (ret = 0) then {ret := }lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-      except
-      end;
-    end;
-  end;
-begin
-  // определиться с чанками
-  if (UnitName = '') then
-  begin
-    AUnit := nil;
-    LastUnit := nil;
-    unit_index := -1;
-  end else
-  begin
-    if (UnitName[1] = #32) or (UnitName[Length(UnitName)] = #32) then
-    ELua.Assert('Unit name "%s" contains left or/and right spaces', [UnitName], CodeAddr);
-    //UnitName := StringLower(UnitName);
-
-    // предыдущий чанк
-    LastUnit := Self.UnitByName[UnitName];
-    unit_index := IntPos(integer(LastUnit), pinteger(FUnits), Length(FUnits));
-
-    // либо текущий чанк - предыдущий, либо создаю новый и инициализирую
-    if (LastUnit <> nil) and (SameStrings(LastUnit.Text, Memory)) then
-    begin
-      AUnit := LastUnit;
-      LastUnit := nil;
-    end else
-    begin
-      AUnit := TLuaUnit.Create;
-      AUnit.FName := UnitName;
-      AUnit.FFileName := FileName;
-      AUnit.FText := Memory;
-      AUnit.InitializeLinesInfo();
-    end;
-  end;
-
-
-  // загрузить чанк
-  // если всё прошло отлично, то добавить/заменить чанк в архиве
-  // если конечно это не RunScript вызов
-  internal_exception := nil;
-  try
-    // выполнить препроцессинг
-    PreprocessScript(Memory);
-
-    // выполнить скрипт
-    if (not FInitialized) then INITIALIZE_NAME_SPACE();
-
-    // загрузить буфер
-    begin
-      CW := Get8087CW();
-      Set8087CW($037F {default intel C++ mode});
-      try
-        ret := luaL_loadbuffer(Handle, pansichar(Memory), Length(Memory), pansichar(UnitName));
-      finally
-        Set8087CW(CW);
-      end;
-    end;
-
-    // вызов, чистка, проверка
-    if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
-    if (ret = 0) then ret := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-    if (ret <> 0) then Check(ret, CodeAddr, AUnit);
-
-    // инициализация чанка прошла успешно, занести в массив чанков
-    if (unit_index{чанк с таким именем уже был} >= 0) then
-    begin
-      if (LastUnit <> nil) then LastUnit.Free;
-      FUnits[unit_index] := AUnit;
-    end else
-    if (AUnit <> nil) then
-    begin
-      unit_index := FUnitsCount;
-      inc(FUnitsCount);
-      SetLength(FUnits, FUnitsCount);
-      FUnits[unit_index] := AUnit;
-    end;
-  except
-    on E: Exception do OnExceptionRetrieve(E);
-  end;
-  
-  if (internal_exception <> nil) then raise internal_exception at CodeAddr;
-end;        *)
+    *)
 
 function TLua.global_alloc_ref: Integer;
 var
@@ -10766,74 +10768,980 @@ begin
     Index := Len;
   end;
 end;      *)
-            (*
 
-procedure __TLuaRunScript(const Self: TLua; const Script: string; const ReturnAddr: pointer);
+
+const
+  BOM_INFO: array[TLuaScriptBOM] of
+  record
+    Data: Cardinal;
+    Size: Cardinal;
+  end = (
+    (Data: $00000000; Size: 0 {ANSI}),
+    (Data: $00BFBBEF; Size: 3 {UTF-8}),
+    (Data: $0000FEFF; Size: 2 {UTF-16 LE}),
+    (Data: $0000FFFE; Size: 2 {UTF-16 BE}),
+    (Data: $0000FEFF; Size: 4 {UTF-32 LE}),
+    (Data: $FFFE0000; Size: 4 {UTF-32 BE})
+  );
+
+function TLua.InternalConvertScript(var Data: __luabuffer): Integer;
+label
+  fix_dest;
 var
-  Memory: string;
+  Size, Offset: Integer;
+  S, Dest: PByte;
+  Marker: Cardinal;
+  BOM: TLuaScriptBOM;
+  X, Y: NativeUInt;
+  {$ifdef LUA_UNICODE}
+  Buffer: __luabuffer;
+  {$endif}
 begin
-  Memory := Script;
-  Self.InternalLoadScript(Memory, '', '', ReturnAddr);
-end;        *)
-              (*
-procedure TLua.RunScript(const Script: string);
-asm
-  mov ecx, [esp]
-  jmp __TLuaRunScript
-end;          *)
-                (*
-procedure __TLuaLoadScript_file(const Self: TLua; const FileName: string; const ReturnAddr: pointer);
+  // detect BOM
+  Size := Length(Data);
+  S := Pointer(Data);
+  BOM := High(TLuaScriptBOM);
+  Offset := BOM_INFO[BOM].Size;
+  repeat
+    if (Size >= Offset) then
+    begin
+      Marker := 0;
+      System.Move(S^, Marker, Offset);
+      if (Marker = BOM_INFO[BOM].Data) then Break;
+    end;
+
+    Dec(BOM);
+    Offset := BOM_INFO[BOM].Size;
+  until (BOM = sbNone);
+  Inc(S, Offset);
+  Dec(Size, Offset);
+
+  // sbUTF16BE/cbUTF32/cbUTF32BE --> sbUTF16
+  if (BOM in [sbUTF16BE, cbUTF32, cbUTF32BE]) then
+  begin
+    Dest := S;
+    case BOM of
+      sbUTF16BE:
+      begin
+        while (Size >= SizeOf(Word)) do
+        begin
+          X := PWord(S)^;
+          Inc(S, SizeOf(Word));
+          Dec(Size, SizeOf(Word));
+
+          X := Swap(X);
+          PWord(Dest)^ := X;
+          Inc(Dest, SizeOf(Word));
+        end;
+      end;
+      cbUTF32, cbUTF32BE:
+      begin
+        while (Size >= SizeOf(Cardinal)) do
+        begin
+          X := PCardinal(S)^;
+          Inc(S, SizeOf(Cardinal));
+          Dec(Size, SizeOf(Cardinal));
+
+          if (BOM = cbUTF32BE) then
+          begin
+            X := (Swap(X) shl 16) + Swap(X shr 16);
+          end;
+
+          if (X <= $ffff) then
+          begin
+            if (X shr 11 = $1B) then PWord(Dest)^ := $fffd
+            else PWord(Dest)^ := X;
+
+            Inc(Dest, SizeOf(Word));
+          end else
+          begin
+            Y := (X - $10000) shr 10 + $d800;
+            X := (X - $10000) and $3ff + $dc00;
+            X := (X shl 16) + Y;
+
+            PCardinal(Dest)^ := X;
+            Inc(Dest, SizeOf(Cardinal));
+          end;
+        end;
+      end;
+    end;
+
+    Offset := 0;
+    Size := NativeInt(Dest) - NativeInt(Data);
+    S := Pointer(Data);
+    BOM := sbUTF16;
+  end;
+
+  // final convert
+  {$ifdef LUA_ANSI}
+  case BOM of
+    sbNone: ;
+    sbUTF8:
+    begin
+      // UTF8 --> ANSI
+      Size := AnsiFromUtf8(Pointer(Data), 0, Pointer(S), Size);
+      goto fix_dest;
+    end;
+    sbUTF16:
+    begin
+      // UTF16 --> ANSI
+      Size := AnsiFromUnicode(Pointer(Data), 0, Pointer(S), Size shr 1);
+      goto fix_dest;
+    end;
+  end;
+  {$else .LUA_UNICODE}
+  case BOM of
+    sbUTF8: ;
+    sbNone:
+    begin
+      // ANSI --> UTF8
+      SetLength(Buffer, Size * 3 + 1);
+      Size := Utf8FromAnsi(Pointer(Buffer), Pointer(S), 0, Size);
+      Data := Buffer;
+      goto fix_dest;
+    end;
+    sbUTF16:
+    begin
+      // UTF16 --> UTF8
+      SetLength(Buffer, (Size shr 1) * 3 + 1);
+      Size := Utf8FromUnicode(Pointer(Buffer), Pointer(S), Size shr 1);
+      Data := Buffer;
+      goto fix_dest;
+    end;
+  end;
+  {$endif}
+
+  // result
+  Result := Offset;
+  Exit;
+fix_dest:
+  {$ifdef LUA_UNICODE}
+  Buffer := nil;
+  {$endif}
+  SetLength(Data, Size);
+  {$ifNdef NEXTGEN}
+  S := Pointer(Data);
+  Inc(S, Size);
+  S^ := 0;
+  {$endif}
+  Result := 0;
+end;
+
+const
+  CHAR_NONE = 0;
+  CHAR_MINUS = 1;
+  CHAR_QUOTE = 2;
+  CHAR_SLASH = 3;
+  CHAR_BRACKET = 4;
+  CHAR_POINT = 5;
+  CHAR_COLON = 6;
+  CHAR_PUNCT = 7;
+  CHAR_CRLF = 8;
+  CHAR_SPACE = 9;
+
 var
-  F: TFileStream;
-  Size: integer;
-  Memory: string;
+  CHAR_TABLE: array[Byte] of Byte;
+
+procedure InitCharacterTable;
+begin
+  FillChar(CHAR_TABLE, 33, CHAR_SPACE);
+  CHAR_TABLE[13] := CHAR_CRLF;
+  CHAR_TABLE[10] := CHAR_CRLF;
+
+  CHAR_TABLE[Ord('-')] := CHAR_MINUS;
+  CHAR_TABLE[Ord('"')] := CHAR_QUOTE;
+  CHAR_TABLE[Ord('''')] := CHAR_QUOTE;
+  CHAR_TABLE[Ord('\')] := CHAR_SLASH;
+  CHAR_TABLE[Ord('(')] := CHAR_BRACKET;
+  CHAR_TABLE[Ord('.')] := CHAR_POINT;
+  CHAR_TABLE[Ord(':')] := CHAR_COLON;
+
+  CHAR_TABLE[Ord('!')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('#')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('$')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('%')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('&')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord(')')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('*')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('+')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord(',')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('/')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord(';')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('<')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('=')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('>')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('?')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('@')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('[')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord(']')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('^')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('`')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('{')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('}')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('|')] := CHAR_PUNCT;
+  CHAR_TABLE[Ord('~')] := CHAR_PUNCT;
+end;
+
+function SkipScriptStringIdentifier(S, Top: PByte): PByte;
+var
+  First, X: NativeUInt;
+begin
+  First := S^;
+  Inc(S);
+
+  repeat
+    if (S = Top) then Break;
+    X := CHAR_TABLE[S^];
+    Inc(S);
+    if (X = 0) then Continue;
+
+    case X of
+      CHAR_QUOTE:
+      begin
+        Dec(S);
+        X := S^;
+        Inc(S);
+        if (X = First) then Break;
+      end;
+      CHAR_SLASH:
+      begin
+        if (S = Top) then Break;
+        Inc(S);
+      end;
+      CHAR_CRLF: Break;
+    end;
+  until (False);
+
+  Result := S;
+end;
+
+// выполнить препроцессинг скрипта
+// на данный момент это только замена точек на двоеточие
+procedure PreprocessPointScript(var Buffer: __luabuffer; const Offset: Integer);
+label
+  replace, next_find;
+var
+  Start, Top, S, StoredS, StoredPoint, StoredLib: PByte;
+  Unique: Boolean;
+  Size: Integer;
+  X: NativeUInt;
+  PtrOffset: NativeInt;
+begin
+  // initialize buffer
+  Unique := False;
+  Size := Length(Buffer) - Offset;
+  NativeInt(Start) := NativeInt(Buffer) + Offset;
+  NativeInt(Top) := NativeInt(Start) + Size;
+  S := Start;
+
+  // replace loop
+  repeat
+    if (S = Top) then Exit;
+
+    // find '(' character
+    repeat
+      if (S = Top) then Exit;
+      X := CHAR_TABLE[S^];
+      Inc(S);
+      if (X = 0) then Continue;
+
+      case X of
+        CHAR_QUOTE:
+        begin
+          Dec(S);
+          S := SkipScriptStringIdentifier(S, Top);
+        end;
+        CHAR_SLASH:
+        begin
+          if (S = Top) then Exit;
+          Inc(S);
+        end;
+        CHAR_BRACKET:
+        begin
+          Break;
+        end;
+      end;
+    until (False);
+    StoredS := S;
+    Dec(S){'('};
+
+    // skip space chars: func..(
+    repeat
+      if (S = Start) then goto next_find;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X <> CHAR_SPACE);
+    if (X <> 0) then goto next_find;
+
+    // skip function name
+    repeat
+      if (S = Start) then goto next_find;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X <> 0);
+
+    // detect not digit "function name"
+    Inc(S);
+    case S^ of
+      Ord(0)..Ord('9'): Dec(S);
+    else
+      goto next_find;
+    end;
+
+    // skip spaces: point..func
+    if (X >= CHAR_CRLF) then
+    repeat
+      if (S = Start) then goto next_find;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X < CHAR_CRLF);
+
+    // detect and store point
+    if (X <> CHAR_POINT) then goto next_find;
+    StoredPoint := S;
+
+    // skip spaces: lib..point
+    repeat
+      if (S = Start) then goto next_find;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X < CHAR_CRLF);
+    if (X <> 0) then goto next_find;
+
+    // skip library name
+    StoredLib := S;
+    repeat
+      if (S = Start) then Break;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+      if (X <> 0) then
+      begin
+        Inc(S);
+        Break;
+      end;
+    until (False);
+
+    // detect library
+    with PMemoryItems(S)^ do
+    case (NativeUInt(StoredLib) - NativeUInt(S) + 1) of
+      2: case (Words[0]) of // "io", "os"
+           $6F69: goto replace; // "io"
+           $736F: goto replace; // "os"
+         end;
+      4: if (Cardinals[0] = $6874616D) then goto replace; // "math"
+      5: case (Cardinals[0]) of // "debug", "table"
+           $75626564: if (Bytes[4] = $67) then goto replace; // "debug"
+           $6C626174: if (Bytes[4] = $65) then goto replace; // "table"
+         end;
+      6: if (Cardinals[0] = $69727473) and (Words[2] = $676E) then goto replace; // "string"
+      7: if (Cardinals[0] = $6B636170) and (Cardinals3[0] shr 8 = $656761) then
+         goto replace; // "package"
+      9: if (Cardinals[0] = $6F726F63) and (Cardinals[1] = $6E697475) and
+         (Bytes[8] = $65) then // "coroutine"
+      begin
+      replace:
+        if (not Unique) then
+        begin
+          PtrOffset := UniqueLuaBuffer(Buffer);
+          Inc(NativeInt(Start), PtrOffset);
+          Inc(NativeInt(Top), PtrOffset);
+          Inc(NativeInt(StoredS), PtrOffset);
+          Inc(NativeInt(StoredPoint), PtrOffset);
+          Unique := True;
+        end;
+
+        StoredPoint^ := Ord(';');
+      end;
+    end;
+
+    // next pointer
+  next_find:
+    S := StoredS;
+  until (False);
+end;
+
+procedure TLua.InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString;
+  const FileName: string; const ReturnAddress: Pointer);
+label
+  clear_chars, replace, next_find;
+var
+  S, Start, Top, StoredS, StoredPrint: PByte;
+  Buffer: __luabuffer;
+  Unique: Boolean;
+  Offset, Size: Integer;
+  X: NativeUInt;
+  PtrOffset: NativeInt;
+begin
+  // convert data
+  Offset := InternalConvertScript(Data);
+
+  // initialize buffer
+  Unique := False;
+  Buffer := Data;
+  Size := Length(Buffer) - Offset;
+  NativeInt(S) := NativeInt(Buffer) + Offset;
+  NativeInt(Top) := NativeInt(S) + Size;
+
+  // remove comments
+  repeat
+    if (S = Top) then Break;
+    X := CHAR_TABLE[S^];
+    Inc(S);
+    if (X = 0) then Continue;
+
+    case X of
+      CHAR_QUOTE:
+      begin
+        Dec(S);
+        S := SkipScriptStringIdentifier(S, Top);
+      end;
+      CHAR_SLASH:
+      begin
+        if (S = Top) then Break;
+        Inc(S);
+      end;
+      CHAR_MINUS:
+      begin
+        Start := S;
+        if (S = Top) then Break;
+        if (S^ <> Ord('-')) then Continue;
+        Inc(S);
+        if (S = Top) then goto clear_chars;
+
+        if (S^ = Ord('[')) then
+        begin
+          Inc(S);
+          if (S = Top) or (S^ <> Ord('[')) then
+          begin
+            // line comment
+            repeat
+              if (S = Top) then Break;
+              X := CHAR_TABLE[S^];
+              Inc(S);
+              if (X = CHAR_CRLF) then Break;
+            until (False);
+          end else
+          begin
+            // multy-line comment
+            repeat
+              if (S = Top) then Break;
+              X := S^;
+              Inc(S);
+              if (X = Ord(']')) then
+              begin
+                if (S = Top) then Break;
+                X := S^;
+                Inc(S);
+                if (X = Ord(']')) then Break;
+              end;
+            until (False);
+          end;
+        end;
+
+      clear_chars:
+        if (not Unique) then
+        begin
+          PtrOffset := UniqueLuaBuffer(Buffer);
+          Inc(NativeInt(Start), PtrOffset);
+          Inc(NativeInt(S), PtrOffset);
+          Inc(NativeInt(Top), PtrOffset);
+          Unique := True;
+        end;
+
+        repeat
+          if (CHAR_TABLE[Start^] <> CHAR_CRLF) then Start^ := 32;
+          Inc(Start);
+        until (Start = S);
+      end;
+    end;
+  until (False);
+
+  // replace print --> _PNT_
+  NativeInt(Start) := NativeInt(Buffer) + Offset;
+  repeat
+    if (S = Top) then Break;
+
+    // find '(' character
+    repeat
+      if (S = Top) then Break;
+      X := CHAR_TABLE[S^];
+      Inc(S);
+      if (X = 0) then Continue;
+
+      case X of
+        CHAR_QUOTE:
+        begin
+          Dec(S);
+          S := SkipScriptStringIdentifier(S, Top);
+        end;
+        CHAR_SLASH:
+        begin
+          if (S = Top) then Exit;
+          Inc(S);
+        end;
+        CHAR_BRACKET:
+        begin
+          Break;
+        end;
+      end;
+    until (False);
+    StoredS := S;
+    Dec(S){'('};
+
+    // skip space chars: func..(
+    repeat
+      if (S = Start) then goto next_find;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X <> CHAR_SPACE);
+    if (X <> 0) then goto next_find;
+
+    // detect "print" function
+    if (S^ <> Ord('t')) then goto next_find;
+    if (S = Start) then goto next_find;
+    Dec(S);
+    if (S^ <> Ord('n')) then goto next_find;
+    if (S = Start) then goto next_find;
+    Dec(S);
+    if (S^ <> Ord('i')) then goto next_find;
+    if (S = Start) then goto next_find;
+    Dec(S);
+    if (S^ <> Ord('r')) then goto next_find;
+    if (S = Start) then goto next_find;
+    Dec(S);
+    if (S^ <> Ord('p')) then goto next_find;
+    StoredPrint := S;
+
+    // detect not "."/":" before "print"
+    repeat
+      if (S = Start) then goto replace;
+      Dec(S);
+      X := CHAR_TABLE[S^];
+    until (X < CHAR_CRLF);
+    if (X = CHAR_POINT) or (X = CHAR_COLON) then goto next_find;
+
+  replace:
+    if (not Unique) then
+    begin
+      PtrOffset := UniqueLuaBuffer(Buffer);
+      Inc(NativeInt(Start), PtrOffset);
+      Inc(NativeInt(Top), PtrOffset);
+      Inc(NativeInt(StoredPrint), PtrOffset);
+      Unique := True;
+    end;
+    S := StoredPrint;
+    S^ := Ord('_');
+    Inc(S);
+    S^ := Ord('P');
+    Inc(S);
+    S^ := Ord('N');
+    Inc(S);
+    S^ := Ord('T');
+    Inc(S);
+    S^ := Ord('_');
+
+  next_find:
+    S := StoredS;
+  until (False);
+
+  // point preprocess
+  if (FPointPreprocess) then
+    PreprocessPointScript(Buffer, Offset);
+
+  // user preprocessing
+  if (Assigned(FOnPreprocessScript)) then
+    FOnPreprocessScript(Buffer, Data, UnitName, UniqueLuaBuffer);
+
+  // ToDo
+end;
+                       (*
+// загрузка скрипта
+procedure TLua.InternalLoadScript(var Memory: string; const UnitName, FileName: string; CodeAddr: pointer);
+var
+  ret, unit_index: integer;
+  internal_exception: Exception;
+  AUnit, LastUnit: TLuaUnit;
+  CW: word;
+
+  // в случае ошибки пытаемся восстановить старый чанк в Lua
+  // при этом сохраняем Exception - потом он будет использован
+  procedure OnExceptionRetrieve(const E: Exception);
+  begin
+    internal_exception := Exception(E.ClassType.NewInstance);
+    CopyObject(internal_exception, E);
+    AUnit.Free;
+
+    if (LastUnit <> nil) then
+    begin
+      Memory := LastUnit.Text;
+      PreprocessScript(Memory);
+      try
+        ret := luaL_loadbuffer(Handle, pchar(Memory), Length(Memory), pchar(LastUnit.Name));
+        if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
+        if (ret = 0) then {ret := }lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
+      except
+      end;
+    end;
+  end;
+begin
+  // определиться с чанками
+  if (UnitName = '') then
+  begin
+    AUnit := nil;
+    LastUnit := nil;
+    unit_index := -1;
+  end else
+  begin
+    if (UnitName[1] = #32) or (UnitName[Length(UnitName)] = #32) then
+    ELua.Assert('Unit name "%s" contains left or/and right spaces', [UnitName], CodeAddr);
+    //UnitName := StringLower(UnitName);
+
+    // предыдущий чанк
+    LastUnit := Self.UnitByName[UnitName];
+    unit_index := IntPos(integer(LastUnit), pinteger(FUnits), Length(FUnits));
+
+    // либо текущий чанк - предыдущий, либо создаю новый и инициализирую
+    if (LastUnit <> nil) and (SameStrings(LastUnit.Text, Memory)) then
+    begin
+      AUnit := LastUnit;
+      LastUnit := nil;
+    end else
+    begin
+      AUnit := TLuaUnit.Create;
+      AUnit.FName := UnitName;
+      AUnit.FFileName := FileName;
+      AUnit.FText := Memory;
+      AUnit.InitializeLinesInfo();
+    end;
+  end;
+
+
+  // загрузить чанк
+  // если всё прошло отлично, то добавить/заменить чанк в архиве
+  // если конечно это не RunScript вызов
+  internal_exception := nil;
+  try
+    // выполнить препроцессинг
+    PreprocessScript(Memory);
+
+    // выполнить скрипт
+    if (not FInitialized) then INITIALIZE_NAME_SPACE();
+
+    // загрузить буфер
+    begin
+      CW := Get8087CW();
+      Set8087CW($037F {default intel C++ mode});
+      try
+        ret := luaL_loadbuffer(Handle, pansichar(Memory), Length(Memory), pansichar(UnitName));
+      finally
+        Set8087CW(CW);
+      end;
+    end;
+
+    // вызов, чистка, проверка
+    if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
+    if (ret = 0) then ret := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
+    if (ret <> 0) then Check(ret, CodeAddr, AUnit);
+
+    // инициализация чанка прошла успешно, занести в массив чанков
+    if (unit_index{чанк с таким именем уже был} >= 0) then
+    begin
+      if (LastUnit <> nil) then LastUnit.Free;
+      FUnits[unit_index] := AUnit;
+    end else
+    if (AUnit <> nil) then
+    begin
+      unit_index := FUnitsCount;
+      inc(FUnitsCount);
+      SetLength(FUnits, FUnitsCount);
+      FUnits[unit_index] := AUnit;
+    end;
+  except
+    on E: Exception do OnExceptionRetrieve(E);
+  end;
+
+  if (internal_exception <> nil) then raise internal_exception at CodeAddr;
+end;        *)
+
+procedure CheckScriptSize(const Size: Int64; const ReturnAddress: Pointer);
+begin
+  if (Size < 0) or (Size > $800000) then
+   raise ELuaScript.CreateFmt('Incorrect script size: %d', [Size]) at ReturnAddress;
+end;
+
+procedure __TLuaRunScript(const Self: TLua; const Script: LuaString; const ReturnAddress: Pointer);
+const
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    BOM: Cardinal = $0000FEFF;
+    BOM_SIZE = 2;
+  {$else}
+    BOM: Cardinal = $00000000;
+    BOM_SIZE = 0;
+  {$ifend}
+var
+  ScriptBufferSize: Integer;
+  Data: __luabuffer;
+begin
+  ScriptBufferSize := Length(Script) * SizeOf(LuaChar);
+  CheckScriptSize(ScriptBufferSize, ReturnAddress);
+
+  SetLength(Data, BOM_SIZE + ScriptBufferSize);
+  System.Move(BOM, Pointer(Data)^, BOM_SIZE);
+  System.Move(Pointer(Script)^, Pointer(NativeInt(Data) + BOM_SIZE)^, ScriptBufferSize);
+
+  Self.InternalLoadScript(Data, '', '', ReturnAddress);
+end;
+
+procedure TLua.RunScript(const Script: LuaString);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaRunScript(Self, Script, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  mov ecx, [esp]
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp __TLuaRunScript
+end;
+{$endif}
+
+procedure __TLuaLoadFileScript(const Self: TLua; const FileName: string; const ReturnAddress: Pointer);
+var
+  Handle: THandle;
+  {$ifdef MSWINDOWS}
+    P: TPoint;
+  {$endif}
+  {$ifdef POSIX}
+    S: _stat;
+  {$endif}
+  Size64: Int64;
+  Size: Integer;
+  Data: __luabuffer;
 begin
   if (not FileExists(FileName)) then
   begin
-    ELua.Assert('File "%s" not found', [FileName], ReturnAddr);
+    raise ELua.CreateFmt('File "%s" not found', [FileName]) at ReturnAddress;
   end;
 
-  F := SharedFileStream(FileName);
+  {$ifdef MSWINDOWS}
+  Handle := {$ifdef UNITSCOPENAMES}Winapi.{$endif}Windows.CreateFile(PChar(FileName), $0001{FILE_READ_DATA}, FILE_SHARE_READ, nil, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, 0);
+  {$else}
+  Handle := FileOpen(FileName, fmOpenRead or fmShareDenyNone);
+  {$endif}
+  if (Handle = INVALID_HANDLE_VALUE) then
+    raise ELua.CreateFmt('Cannot open file "%s"', [FileName]);
   try
-    Size := F.Size;
-    if (Size <> 0) then
-    begin
-      SetLength(Memory, Size);
-      F.Read(pointer(Memory)^, Size);
-    end;
+    {$ifdef MSWINDOWS}
+      P.X := {$ifdef UNITSCOPENAMES}Winapi.{$endif}Windows.GetFileSize(Handle, @P.Y);
+      if (P.Y = -1) then P.X := -1;
+      Size64 := PInt64(@P)^;
+    {$endif}
+    {$ifdef POSIX}
+      if (fstat(Handle, S) = 0) then
+        Size64 := S.st_size
+      else
+        Size64 := -1;
+    {$endif}
+
+    CheckScriptSize(Size64, ReturnAddress);
+    Size := Size64;
+
+    SetLength(Data, Size);
+    Size := FileRead(Handle, Pointer(Data)^, Size);
+    if (Size < 0) then {$ifdef KOL}RaiseLastWin32Error{$else}RaiseLastOSError{$endif};
+    SetLength(Data, Size);
+
+    Self.InternalLoadScript(Data, LuaString(ExtractFileName(FileName)), FileName, ReturnAddress);
   finally
-    F.Free;
+    FileClose(Handle);
   end;
+end;
 
-  Self.InternalLoadScript(Memory, ExtractFileName(FileName), FileName, ReturnAddr);
-end;            *)
-                  (*
 procedure TLua.LoadScript(const FileName: string);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaLoadFileScript(Self, FileName, ReturnAddress);
+end;
+{$else}
 asm
+  {$ifdef CPUX86}
   mov ecx, [esp]
-  jmp __TLuaLoadScript_file
+  {$else .CPUX64}
+  mov r8, [rsp]
+  {$endif}
+  jmp __TLuaLoadFileScript
+end;
+{$endif}
+
+procedure __TLuaLoadBufferScript(const Self: TLua; const ScriptBuffer: Pointer;
+  const ScriptBufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString;
+  const ReturnAddress: Pointer);
+var
+  Size: Integer;
+  Data: __luabuffer;
+begin
+  CheckScriptSize(ScriptBufferSize, ReturnAddress);
+
+  Size := BOM_INFO[BOM].Size;
+  SetLength(Data, Size + ScriptBufferSize);
+  System.Move(BOM_INFO[BOM].Data, Pointer(Data)^, Size);
+  System.Move(ScriptBuffer^, Pointer(NativeInt(Data) + Size)^, ScriptBufferSize);
+
+  Self.InternalLoadScript(Data, UnitName, '', ReturnAddress);
 end;
 
-procedure __TLuaLoadScript_buffer(const Self: TLua; const ScriptBuffer: pointer;
-          const ScriptBufferSize: integer; const UnitName: string; const ReturnAddr: pointer);
-var
-  Memory: string;
+procedure TLua.LoadScript(const ScriptBuffer: Pointer; const ScriptBufferSize: Integer;
+  const BOM: TLuaScriptBOM; const UnitName: LuaString);
+{$ifdef RETURNADDRESS}
 begin
-  if (ScriptBufferSize >= 0) then
+  __TLuaLoadBufferScript(Self, ScriptBuffer, ScriptBufferSize, BOM, UnitName, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaLoadBufferScript
+end;
+{$endif}
+
+{$ifNdef LUA_NOCLASSES}
+procedure __TLuaLoadStreamScript(const Self: TLua; const Stream: TStream;
+  const UnitName: LuaString; const ASize: Integer; const ReturnAddress: Pointer);
+var
+  Size64: Int64;
+  Size: Integer;
+  Data: __luabuffer;
+begin
+  Size64 := ASize;
+  if (ASize < 0) then Size64 := Stream.Size - Stream.Position;
+  CheckScriptSize(Size64, ReturnAddress);
+  Size := Size64;
+
+  SetLength(Data, Size);
+  Stream.ReadBuffer(Pointer(Data)^, Size);
+  Self.InternalLoadScript(Data, UnitName, '', ReturnAddress);
+end;
+
+procedure TLua.LoadScript(const Stream: TStream; const UnitName: LuaString; const ASize: Integer);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaLoadStreamScript(Self, Stream, UnitName, ASize, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaLoadStreamScript
+end;
+{$endif}
+{$endif}
+
+{$ifdef KOL}
+procedure __TLuaLoadKOLStreamScript(const Self: TLua; const Stream: KOL.PStream;
+  const UnitName: LuaString; const ASize: Integer; const ReturnAddress: Pointer);
+var
+  Size64: Int64;
+  Size: Integer;
+  Data: __luabuffer;
+begin
+  Size64 := ASize;
+  if (ASize < 0) then Size64 := Stream.Size - Stream.Position;
+  CheckScriptSize(Size64, ReturnAddress);
+  Size := Size64;
+
+  SetLength(Data, Size);
+  if (Stream.Read(Pointer(Data)^, Size) <> Size) then
+    raise ELua.Create('Stream read error') at ReturnAddress;
+  Self.InternalLoadScript(Data, UnitName, '', ReturnAddress);
+end;
+
+procedure TLua.LoadScript(const Stream: KOL.PStream; const UnitName: LuaString; const ASize: Integer);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaLoadKOLStreamScript(Self, Stream, UnitName, ASize, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  push, [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaLoadKOLStreamScript
+end;
+{$endif}
+{$endif}
+
+{$ifdef MSWINDOWS}
+procedure __TLuaLoadResourceScript(const Self: TLua; const Instance: THandle;
+  const Name, ResType: PChar; const UnitName: LuaString; const ReturnAddress: Pointer);
+
+  procedure RaiseNotFound(const Name, ResType: PChar; const ReturnAddress: Pointer);
+  var
+    V: NativeUInt;
+    N, T: string;
   begin
-    SetLength(Memory, ScriptBufferSize);
-    Move(ScriptBuffer^, pointer(Memory)^, ScriptBufferSize);
+    V := NativeUInt(Name);
+    if (V <= High(Word)) then N := '#' + string({$ifdef KOL}Int2Str{$else}IntToStr{$endif}(Integer(V)))
+    else N := '"' + string(Name) + '"';
+
+    V := NativeUInt(ResType);
+    if (V <= High(Word)) then T := '#' + string({$ifdef KOL}Int2Str{$else}IntToStr{$endif}(Integer(V)))
+    else T := '"' + string(ResType) + '"';
+
+    raise ELua.CreateFmt('Resource %s (%s) not found', [N, T]) at ReturnAddress;
   end;
 
-  Self.InternalLoadScript(Memory, UnitName, '', ReturnAddr);
+var
+  HResInfo: THandle;
+  HGlobal: THandle;
+  Size: Integer;
+  Data: __luabuffer;
+begin
+  HResInfo := {$ifdef UNITSCOPENAMES}Winapi.{$endif}Windows.FindResource(Instance, Name, ResType);
+  if (HResInfo = 0) then RaiseNotFound(Name, ResType, ReturnAddress);
+  HGlobal := LoadResource(Instance, HResInfo);
+  if (HGlobal = 0) then RaiseNotFound(Name, ResType, ReturnAddress);
+
+  try
+    Size := SizeOfResource(Instance, HResInfo);
+    CheckScriptSize(Size, ReturnAddress);
+
+    SetLength(Data, Size);
+    System.Move(LockResource(HGlobal)^, Pointer(Data)^, Size);
+
+    Self.InternalLoadScript(Data, UnitName, '', ReturnAddress);
+  finally
+    FreeResource(HGlobal);
+  end;
 end;
 
-procedure TLua.LoadScript(const ScriptBuffer: pointer; const ScriptBufferSize: integer; const UnitName: string);
+procedure TLua.LoadScript(const Instance: THandle; const Name, ResType: PChar;
+  const UnitName: LuaString);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaLoadResourceScript(Self, Instance, Name, ResType, UnitName, ReturnAddress);
+end;
+{$else}
 asm
-  pop ebp
+  {$ifdef CPUX86}
   push [esp]
-  jmp __TLuaLoadScript_buffer
-end;         *)
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaLoadResourceScript
+end;
+{$endif}
+{$endif}
 
                   (*
 function TLua.GetRecordInfo(const Name: string): PLuaRecordInfo;
@@ -16000,7 +16908,7 @@ asm
   pop ebp
   push [esp]
   {$else .CPUX64}
-  mov r10, [rsp]
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$endif}
   jmp __TLuaRegClasses
 end;
@@ -16033,7 +16941,7 @@ asm
   pop ebp
   push [esp]
   {$else .CPUX64}
-  mov r11, [rsp]
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$endif}
   jmp TLua.InternalAddArray
 end;
@@ -16249,20 +17157,26 @@ begin
   {$ifdef NO_CRYSTAL}TExcept{$else}EWrongParameter{$endif}.Assert('Can''t get unit[%d]. Units count = %d', [index, FUnitsCount]);
 
   GetUnit := FUnits[index];
-end;
+end;      *)
 
-function TLua.GetUnitByName(const Name: string): TLuaUnit;
+function TLua.GetUnitByName(const Name: LuaString): TLuaUnit;
 var
-  i: integer;
+  i, Count: Integer;
 begin
-  for i := 0 to FUnitsCount-1 do
+  if (Pointer(Name) <> nil) then
   begin
-    Result := FUnits[i];
-    if (EqualStrings(Result.FName, Name)) then exit;
+    Count := PInteger(NativeInt(Name) - SizeOf(Integer))^ {$ifdef LUA_LENGTH_SHIFT}shr 1{$endif};
+
+    for i := 0 to FUnitsCount - 1 do
+    begin
+      Result := FUnits[i];
+      if (Result.FNameLength = Count) and
+        (CompareMem(Pointer(Result.FName), Pointer(Name), Count * SizeOf(LuaChar))) then Exit;
+    end;
   end;
 
   Result := nil;
-end;         *)
+end;
 
 
 { TLuaUnit }
@@ -16329,28 +17243,29 @@ procedure TLuaUnit.SaveToFile();
 begin
   if (FileName <> '') then SaveToFile(FileName)
   else SaveToFile(Name);
+end;              *)
+
+function TLuaUnit.GetLine(Index: Integer): TLuaUnitLine;
+begin
+  if (Cardinal(Index) >= Cardinal(FLinesCount)) then
+    raise ELua.CreateFmt('Can''t get line %d from unit "%s". Lines count = %d', [Index, Name, FLinesCount]);
+
+  Result := FLines[Index];
 end;
 
-function TLuaUnit.GetLine(index: integer): string;
+function TLuaUnit.GetItem(Index: Integer): LuaString;
+var
+  Line: TLuaUnitLine;
 begin
-  if (dword(index) >= dword(FLinesCount)) then
-  {$ifdef NO_CRYSTAL}TExcept{$else}EWrongParameter{$endif}.Assert('Can''t get line %d from unit "%s". Lines count = %d', [index, Name, FLinesCount]);
-
-  with FLinesInfo[index] do
-  AnsiFromPCharLen(Result, Str, Length);
+  Line := Self.GetLine(Index);
+  FLua.unpack_lua_string(Result, Line.Chars, Line.Count);
 end;
 
-function TLuaUnit.GetLineInfo(index: integer): TLuaUnitLineInfo;
-begin
-  if (dword(index) >= dword(FLinesCount)) then
-  {$ifdef NO_CRYSTAL}TExcept{$else}EWrongParameter{$endif}.Assert('Can''t get line info %d from unit "%s". Lines count = %d', [index, Name, FLinesCount]);
-
-  GetLineInfo := FLinesInfo[index];
-end;     *)
 
 initialization
   InitUnicodeLookups;
   InitTypInfoProcs;
+  InitCharacterTable;
   {$ifdef LUA_INITIALIZE}Lua := CreateLua;{$endif}
 
 finalization

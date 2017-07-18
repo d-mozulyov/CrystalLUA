@@ -114,7 +114,7 @@ unit CrystalLUA;
 {$ifend}
 
 interface
-  uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo{$else}Types, TypInfo{$endif},
+  uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo, System.RTLConsts{$else}Types, TypInfo, RTLConsts{$endif},
        {$ifdef UNICODE}{$ifdef UNITSCOPENAMES}System.Character{$else}Character{$endif},{$endif}
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif},{$endif}
        {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread,{$endif}
@@ -804,7 +804,7 @@ type
 
   TLuaScriptBOM = (sbNone, sbUTF8, sbUTF16, sbUTF16BE, cbUTF32, cbUTF32BE);
   TLuaBufferUnique = function(var Data: __luabuffer): NativeInt;
-  TLuaOnPreprocessScript = procedure(var Data, Source: __luabuffer; const UnitName: LuaString; const Unique: TLuaBufferUnique) of object;
+  TLuaOnPreprocessScript = procedure(var Data, Source: __luabuffer; var Offset: Integer; const UnitName: LuaString; const Unique: TLuaBufferUnique) of object;
 
   TLuaUnitLine = record
     Chars: __luadata;
@@ -814,22 +814,30 @@ type
   TLuaUnit = class(TObject)
   private
     FLua: TLua;
+    FIndex: Integer;
     FName: LuaString;
     FNameLength: Integer;
     FData: __luabuffer;
+    FDataOffset: Integer;
     FFileName: string;
     FLinesCount: Integer;
     FLines: array of TLuaUnitLine;
-     (*
-    procedure InitializeLinesInfo();  *)
+ 
     function GetItem(Index: Integer): LuaString;
     function GetLine(Index: Integer): TLuaUnitLine;
+    procedure InitializeLines;
   public
-   (* procedure SaveToStream(const Stream: TStream);
+    {$ifNdef LUA_NOCLASSES}
+    procedure SaveToStream(const Stream: TStream);
+    {$endif}
+    {$ifdef KOL}
+    procedure SaveToStream(const Stream: KOL.PStream);
+    {$endif}
     procedure SaveToFile(const FileName: string); overload;
-    procedure SaveToFile(); overload; *)
+    procedure SaveToFile; overload;
 
     property Lua: TLua read FLua;
+    property Index: Integer read FIndex;
     property Name: LuaString read FName;
     property FileName: string read FFileName;
     property Data: __luabuffer read FData;
@@ -837,6 +845,42 @@ type
     property Items[Index: Integer]: LuaString read GetItem; default;
     property Lines[Index: Integer]: TLuaUnitLine read GetLine;
   end;
+
+
+{ TLuaResultBuffer object
+  Temporary memory and argument manager for registered callbacks }
+
+  TLuaResultBuffer = object
+  protected
+    FReturnAddress: Pointer;
+    FItems: PLuaArgList;
+    FCount: Integer;
+    FCapacity: Integer;
+    FParamItems: PLuaArgList;
+    FParamCount: Integer;
+    FParamCapacity: Integer;
+    FHeap: __TLuaMemoryHeap;
+    FMetaStructs: Pointer;
+
+      оптимизировать
+
+    procedure GrowCapacity(var List: PLuaArgList; var Capacity: Integer; const Value: Integer);
+    procedure SetCount(const Value: Integer);
+    procedure SetParamCount(const Value: Integer);
+    function Alloc(const Size: NativeUInt): Pointer;
+    function AllocMetaType(const MetaType: PLuaMetaType): Pointer;
+    procedure Clear;
+    procedure FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
+    procedure Finalize;
+  public
+    function  AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
+    function  AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
+    function  AllocSet(const SetInfo: PLuaSetInfo): Pointer;
+
+    property Items: PLuaArgList read FItems;
+    property Count: Integer read FCount write SetCount;
+  end;
+  PLuaResultBuffer = ^TLuaResultBuffer;
 
 
 { TLua class
@@ -934,8 +978,7 @@ type
     function GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
     function GetLuaName(const Value: LuaString): __luaname;
 
-   // FArgs: TLuaArgs;
-   // FArgsCount: integer;
+
                 (*
     function  GetRecordInfo(const Name: string): PLuaRecordInfo;
     function  GetArrayInfo(const Name: string): PLuaArrayInfo;
@@ -953,11 +996,6 @@ type
     FCFunctionHeap: __TLuaCFunctionHeap;
   //  FProcList: __TLuaList {TLuaProcInfo};
   //  FPropertiesList: __TLuaList {TLuaPropertyInfo};
-
-
-
-
-   // __luapointer
 
 
    (* FInitialized: boolean;
@@ -1015,19 +1053,26 @@ type
     // scripts and units routine
     FPointPreprocess: Boolean;
     FOnPreprocessScript: TLuaOnPreprocessScript;
+    FScriptStack: array[1..16] of TLuaResultBuffer;
+    FScriptStackIndex: NativeUInt;
+    FArgs: TLuaArgs;
+    FArgsCount: Integer;
 
          (*
-    //FBufferArg: TLuaArg;
-    FResultBuffer: TLuaResultBuffer;
  //   FReferences: TLuaReferenceDynArray; // список ссылок (LUA_REGISTRYINDEX)  *)
-    FUnitsCount: Integer;
+    FUnitCount: Integer;
     FUnits: array of TLuaUnit;
     procedure CheckScriptError(const ErrCode: Integer; const ReturnAddress: Pointer; AUnit: TLuaUnit = nil);
+    procedure BeginScriptStack(const ReturnAddress: Pointer);
+    procedure EndScriptStack(const ReturnAddress: Pointer);
+    function  GetResultBuffer: PLuaResultBuffer;
     function  InternalConvertScript(var Data: __luabuffer): Integer;
+    procedure InternalPreprocessScript(var Buffer: __luabuffer; const Offset: Integer);
+    function  InternalRunScript(var Data: __luabuffer; const Offset: Integer; const AUnitName: __luaname; const AUnit: TLuaUnit; const MakeResult: Boolean; const ReturnAddress: Pointer): Exception;
     procedure InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString; const FileName: string; const ReturnAddress: Pointer);
  (*   function  InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
-    function  StackArgument(const Index: integer): string;
-    function  GetUnit(const index: integer): TLuaUnit;  *)
+    function  StackArgument(const Index: integer): string; *)
+    function  GetUnit(const Index: Integer): TLuaUnit;
     function  GetUnitByName(const Name: LuaString): TLuaUnit;
   public
     constructor Create;
@@ -1080,11 +1125,11 @@ type
     procedure RegVariable(const VariableName: string; const X; const tpinfo: pointer; const IsConst: boolean = false);
     procedure RegConst(const ConstName: string; const Value: Variant); overload;
     procedure RegConst(const ConstName: string; const Value: TLuaArg); overload;
-    procedure RegEnum(const EnumTypeInfo: ptypeinfo); 
-                  *) (*
-    // вспомогательные свойства
-    property ResultBuffer: TLuaResultBuffer read FResultBuffer;
-    property Variable[const Name: string]: Variant read GetVariable write SetVariable;
+    procedure RegEnum(const EnumTypeInfo: ptypeinfo);
+                  *)
+    // advanced properties
+    property ResultBuffer: PLuaResultBuffer read GetResultBuffer;
+  (*  property Variable[const Name: string]: Variant read GetVariable write SetVariable;
     property VariableEx[const Name: string]: TLuaArg read GetVariableEx write SetVariableEx;
     property RecordInfo[const Name: string]: PLuaRecordInfo read GetRecordInfo;
     property ArrayInfo[const Name: string]: PLuaArrayInfo read GetArrayInfo;
@@ -1092,16 +1137,17 @@ type
    *)
     // basic properties
     property Handle: Pointer read FHandle;
-  (*  property Args: TLuaArgs read FArgs;
-    property ArgsCount: integer read FArgsCount;   *)
+    property Args: TLuaArgs read FArgs;
+    property ArgsCount: Integer read FArgsCount;
 
     // script units
     property PointPreprocess: Boolean read FPointPreprocess write FPointPreprocess;
     property OnPreprocessScript: TLuaOnPreprocessScript read FOnPreprocessScript write FOnPreprocessScript;
-    (*    property UnitsCount: integer read FUnitsCount;
-    property Units[const index: integer]: TLuaUnit read GetUnit;   *)
+    property UnitCount: Integer read FUnitCount;
+    property Units[const Index: Integer]: TLuaUnit read GetUnit;
     property UnitByName[const Name: LuaString]: TLuaUnit read GetUnitByName;
   end;
+
 
 const
   // special registering methods: constructor and Assign
@@ -1275,6 +1321,16 @@ end;
 function EInvalidFieldOffset(const Value: NativeInt): ELua;
 begin
   Result := ELua.CreateFmt('Invalid field offset %d', [Value]);
+end;
+
+function EInvalidArgument: ELua;
+begin
+  Result := ELua.CreateRes(Pointer(@sArgumentInvalid));
+end;
+
+function EInvalidScriptStackIndex(const Index: NativeUInt): ELuaStackOverflow;
+begin
+  Result := ELuaStackOverflow.CreateFmt('Invalid script stack index: %d', [Index]);
 end;
 
 
@@ -3706,12 +3762,16 @@ end;
 
 function TLuaMemoryHeap.GrowAlloc(const ASize: NativeInt): __luapointer;
 var
-  Count: NativeInt;
+  BufferSize, Count: NativeInt;
 begin
+  // buffer size
+  BufferSize := (ASize + (SizeOf(Pointer) - 1)) and -SizeOf(Pointer);
+  if (BufferSize < HEAP_BUFFER_SIZE) then BufferSize := HEAP_BUFFER_SIZE;
+
   // allocate buffer
   Count := Length(FBuffers);
   SetLength(FBuffers, Count + 1);
-  SetLength(FBuffers[Count], HEAP_BUFFER_SIZE);
+  SetLength(FBuffers[Count], BufferSize);
 
   // new current pointer
   {$ifdef SMALLINT}
@@ -3721,7 +3781,7 @@ begin
   {$endif}
 
   // allocate size
-  FMargin := HEAP_BUFFER_SIZE;
+  FMargin := BufferSize;
   Result := Alloc(ASize);
 end;
 
@@ -4170,6 +4230,278 @@ begin
   Result := nil;
   if (Assigned(Item)) then
     Result := Item.Value;
+end;
+
+
+{ TLuaResultBuffer }
+
+{$if Defined(FPC) or (CompilerVersion < 24)}
+function AtomicDecrement(var Target: Integer): Integer;
+asm
+  {$ifdef CPUX86}
+    or edx, -1
+    lock xadd [eax], edx
+    lea eax, [edx - 1]
+  {$else .CPUX64}
+    or eax, -1
+    lock xadd [rcx], eax
+    sub eax, 1
+  {$endif}
+end;
+{$ifend}
+
+procedure TLuaResultBuffer.GrowCapacity(var List: PLuaArgList; var Capacity: Integer; const Value: Integer);
+label
+  new, resize;
+var
+  i, LastCapacity, NewCapacity: Integer;
+  Rec: PDynArrayRec;
+begin
+  if (Capacity or Value < 0) then raise EInvalidArgument;
+
+  NewCapacity := Capacity;
+  if (NewCapacity = 0) then NewCapacity := 16;
+  while (NewCapacity < Value) do
+  begin
+    NewCapacity := NewCapacity shl 1;
+  end;
+
+  Rec := Pointer(List);
+  if (Rec = nil) then
+  begin
+  new:
+    GetMem(Rec, SizeOf(TDynArrayRec) + NewCapacity * SizeOf(TLuaArg));
+    Capacity := 0;
+  end else
+  begin
+    Dec(Rec);
+    if (Rec.RefCount = 1) then
+    begin
+    resize:
+      ReallocMem(Rec, SizeOf(TDynArrayRec) + NewCapacity * SizeOf(TLuaArg));
+    end else
+    begin
+      if (AtomicDecrement(Rec.RefCount) = 0) then
+      begin
+        Rec.RefCount := 1;
+        goto resize;
+      end;
+      goto new;
+    end;
+  end;
+
+  Rec.RefCount := 1;
+  Rec.Length := NewCapacity;
+  Inc(Rec);
+  Pointer(List) := Rec;
+  LastCapacity := Capacity;
+  Capacity := NewCapacity;
+
+  for i := LastCapacity to NewCapacity - 1 do
+  begin
+    Pointer(PLuaArgList(Rec)[i].FStringValue) := nil;
+  end;
+end;
+
+procedure TLuaResultBuffer.SetCount(const Value: Integer);
+var
+  Rec: PDynArrayRec;
+begin
+  if (FCount = Value) then Exit;
+  if (Cardinal(Value) > Cardinal(FCapacity)) then
+  begin
+    GrowCapacity(FItems, FCapacity, Value);
+  end;
+
+  FCount := Value;
+  if (Value <> 0) then
+  begin
+    Rec := Pointer(FItems);
+    Dec(Rec);
+    Rec.Length := Value;
+  end;
+end;
+
+procedure TLuaResultBuffer.SetParamCount(const Value: Integer);
+var
+  Rec: PDynArrayRec;
+begin
+  if (FParamCount = Value) then Exit;
+  if (Cardinal(Value) > Cardinal(FParamCapacity)) then
+  begin
+    GrowCapacity(FParamItems, FParamCapacity, Value);
+  end;
+
+  FParamCount := Value;
+  if (Value <> 0) then
+  begin
+    Rec := Pointer(FParamItems);
+    Dec(Rec);
+    Rec.Length := Value;
+  end;
+end;
+
+function TLuaResultBuffer.Alloc(const Size: NativeUInt): Pointer;
+var
+  Ptr: __luapointer;
+  Heap: ^TLuaMemoryHeap;
+  {$ifdef LARGEINT}
+  Value: NativeInt;
+  {$endif}
+begin
+  Heap := Pointer(@Heap);
+  Ptr := Heap.Alloc(Size);
+  {$ifdef SMALLINT}
+    Result := Pointer(Ptr);
+  {$else .LARGEINT}
+    Value := NativeInt(Ptr);
+    Result := Pointer(FBuffers[Value shr HEAP_BUFFER_SHIFT]);
+    Inc(NativeInt(Result), Value and HEAP_BUFFER_MASK);
+  {$endif}
+end;
+
+type
+  PMetaStruct = ^TMetaStruct;
+  TMetaStruct = record
+    MetaType: PLuaMetaType;
+    Next: PMetaStruct;
+  end;
+
+function TLuaResultBuffer.AllocMetaType(const MetaType: PLuaMetaType): Pointer;
+var
+  Size: NativeUInt;
+  MetaStruct: PMetaStruct;
+begin
+  if (MetaType = nil) then
+  begin
+    Result := nil;
+    Exit;
+  end;
+
+  case MetaType.F.Kind of
+    mkRecord:
+    begin
+      Size := PLuaRecordInfo(MetaType).FSize;
+    end;
+    mkArray:
+    begin
+      Size := PLuaArrayInfo(MetaType).FSize;
+    end;
+    mkSet:
+    begin
+      Size := PLuaSetInfo(MetaType).FSize;
+    end;
+  else
+    raise EInvalidArgument;
+  end;
+
+  Size := (Size + (SizeOf(Pointer) - 1)) and -SizeOf(Pointer);
+  MetaStruct := Alloc(SizeOf(TMetaStruct) + Size);
+  MetaStruct.MetaType := MetaType;
+  MetaStruct.Next := FMetaStructs;
+  FMetaStructs := MetaStruct;
+
+  Inc(MetaStruct);
+  if (Size = SizeOf(Pointer)) then
+  begin
+    PNativeUInt(MetaStruct)^ := 0;
+  end else
+  begin
+    FillChar(MetaStruct^, Size, #0);
+  end;
+  Result := MetaStruct;
+end;
+
+function  TLuaResultBuffer.AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
+begin
+  Result := AllocMetaType(RecordInfo);
+end;
+
+function  TLuaResultBuffer.AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
+begin
+  Result := AllocMetaType(ArrayInfo);
+end;
+
+function  TLuaResultBuffer.AllocSet(const SetInfo: PLuaSetInfo): Pointer;
+begin
+  Result := AllocMetaType(SetInfo);
+end;
+
+procedure TLuaResultBuffer.Clear;
+var
+  MetaStruct: PMetaStruct;
+  MetaType: PLuaMetaType;
+  TypeInfo: PTypeInfo;
+  ItemsCount: Integer;
+begin
+  repeat
+    MetaStruct := FMetaStructs;
+    if (MetaStruct = nil) then Break;
+    FMetaStructs := MetaStruct.Next;
+
+    TypeInfo := nil;
+    ItemsCount := 1;
+    MetaType := MetaStruct.MetaType;
+    case MetaType.F.Kind of
+      mkRecord:
+      begin
+        TypeInfo := PLuaRecordInfo(MetaType).F.TypeInfo;
+      end;
+      mkArray:
+      begin
+        TypeInfo := PLuaArrayInfo(MetaType).FFinalTypeInfo;
+        ItemsCount := PLuaArrayInfo(MetaType).FFinalItemsCount;
+      end;
+    end;
+
+    if (TypeInfo <> nil) then
+    begin
+      Inc(MetaStruct);
+      FinalizeArray(MetaStruct, TypeInfo, ItemsCount);
+    end;
+  until (False);
+
+  if (Pointer(TLuaMemoryHeap(FHeap).FBuffers) <> nil) then TLuaMemoryHeap(FHeap).Clear;
+  if (Cardinal(FCount) > 1) then SetCount(1);
+  FParamCount := 0;
+end;
+
+procedure TLuaResultBuffer.FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
+var
+  i, ItemsCount: Integer;
+  Rec: PDynArrayRec;
+begin
+  Rec := Pointer(List);
+  ItemsCount := Capacity;
+  List := nil;
+  Capacity := 0;
+  Count := 0;
+
+  if (Rec <> nil) then
+  begin
+    Dec(Rec);
+    if (Rec.RefCount = 1) or (AtomicDecrement(Rec.RefCount) = 0) then
+    begin
+      Inc(Rec);
+
+      for i := 0 to ItemsCount - 1 do
+      with PLuaArgList(Rec)[i] do
+      begin
+        if (Pointer(FStringValue) <> nil) then
+          FStringValue := '';
+      end;
+
+      Dec(Rec);
+      FreeMem(Rec);
+    end;
+  end;
+end;
+
+procedure TLuaResultBuffer.Finalize;
+begin
+  Clear;
+  FinalizeArgs(FItems, FCapacity, FCount);
+  FinalizeArgs(FParamItems, FParamCapacity, FParamCount);
 end;
 
 
@@ -7319,107 +7651,178 @@ begin
 end;          *)
 
 
-{ TLuaResultBuffer }
-                                  (*
-procedure TLuaResultBuffer.Finalize(const free_mem: boolean=false);
+{ TLuaUnit }
+
+const
+  BOM_INFO: array[TLuaScriptBOM] of
+  record
+    Data: Cardinal;
+    Size: Cardinal;
+  end = (
+    (Data: $00000000; Size: 0 {ANSI}),
+    (Data: $00BFBBEF; Size: 3 {UTF-8}),
+    (Data: $0000FEFF; Size: 2 {UTF-16 LE}),
+    (Data: $0000FFFE; Size: 2 {UTF-16 BE}),
+    (Data: $0000FEFF; Size: 4 {UTF-32 LE}),
+    (Data: $FFFE0000; Size: 4 {UTF-32 BE})
+  );
+
+function TLuaUnit.GetLine(Index: Integer): TLuaUnitLine;
 begin
-  if (tpinfo <> nil) then
-  begin
-    {$ifdef NO_CRYSTAL}
-      CrystalLUA.Finalize(Memory, tpinfo, items_count);
-    {$else}
-      SysUtilsEx.Finalize(Memory, tpinfo, items_count);
-    {$endif}
+  if (Cardinal(Index) >= Cardinal(FLinesCount)) then
+    raise ELua.CreateFmt('Can''t get line %d from unit "%s". Lines count = %d', [Index, Name, FLinesCount]);
 
-    tpinfo := nil;
-  end;
+  Result := FLines[Index];
+end;
 
-  if (free_mem) and (Memory <> nil) then
+function TLuaUnit.GetItem(Index: Integer): LuaString;
+var
+  Line: TLuaUnitLine;
+begin
+  Line := Self.GetLine(Index);
+  FLua.unpack_lua_string(Result, Line.Chars, Line.Count);
+end;
+
+procedure TLuaUnit.InitializeLines;
+var
+  Chars: PByte;
+  X: NativeUInt;
+  Index, Size: Integer;
+begin
+  // calculate lines count
+  Index := 0;
+  Size := Length(FData) - FDataOffset;
+  NativeInt(Chars) := NativeInt(FData) + FDataOffset;
+  if (Size > 0) then
+  repeat
+    if (Size = 0) then Break;
+    X := Chars^;
+    Inc(Chars);
+    Dec(Size);
+
+    if (X <= 13) then
+    case X of
+      10:
+      begin
+        Inc(Index);
+      end;
+      13:
+      begin
+        Inc(Index);
+        if (Size > 0) and (Chars^ = 10) then
+        begin
+          Inc(Chars);
+          Dec(Size);
+        end;
+      end;
+    end;
+  until (False);
+
+  // fill lines
+  FLinesCount := Index;
+  SetLength(FLines, Index);
+  Index := 0;
+  Size := Length(FData) - FDataOffset;
+  NativeInt(Chars) := NativeInt(FData) + FDataOffset;
+  if (Size > 0) then
   begin
-    FreeMem(Memory);
-    Memory := nil;
-    Size := 0;    
+    FLines[Index].Chars := Pointer(Chars);
+    repeat
+      if (Size = 0) then Break;
+      X := Chars^;
+      Inc(Chars);
+      Dec(Size);
+
+      if (X <= 13) then
+      case X of
+        10, 13:
+        begin
+          FLines[Index].Count := NativeInt(Chars) - NativeInt(FLines[Index].Chars);
+          Inc(Index);
+          if (X = 13) and (Size > 0) and (Chars^ = 10) then
+          begin
+            Inc(Chars);
+            Dec(Size);
+          end;
+        end;
+      end;
+    until (False);
   end;
 end;
 
-function  TLuaResultBuffer.AllocRecord(const RecordInfo: PLuaRecordInfo): pointer;
+{$ifNdef LUA_NOCLASSES}
+procedure TLuaUnit.SaveToStream(const Stream: TStream);
 var
-  NewSize: integer;
+  Chars: PByte;
+  Size: Integer;
 begin
-  if (tpinfo <> nil) then Finalize();
+  Size := Length(FData) - FDataOffset;
+  NativeInt(Chars) := NativeInt(FData) + FDataOffset;
 
-  if (RecordInfo = nil) then
+  {$ifdef LUA_UNICODE}
+  Stream.WriteBuffer(BOM_INFO[sbUTF8], 3);
+  {$endif}
+
+  if (Size > 0) then
+    Stream.WriteBuffer(Chars^, Size);
+end;
+{$endif}
+
+{$ifdef KOL}
+procedure TLuaUnit.SaveToStream(const Stream: KOL.PStream);
+var
+  Chars: PByte;
+  Size: Integer;
+begin
+  Size := Length(FData) - FDataOffset;
+  NativeInt(Chars) := NativeInt(FData) + FDataOffset;
+
+  {$ifdef LUA_UNICODE}
+  Stream.WriteBuffer(BOM_INFO[sbUTF8], 3);
+  {$endif}
+
+  if (Size > 0) then
+    Stream.WriteBuffer(Chars^, Size);
+end;
+{$endif}
+
+procedure TLuaUnit.SaveToFile(const FileName: string);
+var
+  Chars: PByte;
+  Size: Integer;
+  Handle: THandle;
+begin
+  Size := Length(FData) - FDataOffset;
+  NativeInt(Chars) := NativeInt(FData) + FDataOffset;
+
+  Handle := FileCreate(FileName);
+  if (Handle = INVALID_HANDLE_VALUE) then
   begin
-    AllocRecord := nil;
-    exit;
+    raise {$ifdef LUA_NOCLASSES}ELua{$else}EFCreateError{$endif}.CreateResFmt
+      (Pointer(@SFCreateErrorEx), [ExpandFileName(FileName), SysErrorMessage(GetLastError)]);
   end;
 
-  NewSize := (RecordInfo.FSize+3) and (not 3);
-  if (NewSize > Size) then
-  begin
-    Size := NewSize;
-    ReallocMem(Memory, Size);
+  try
+    if {$ifdef LUA_UNICODE}(FileWrite(Handle, BOM_INFO[sbUTF8], 3) <> 3) or {$endif}
+      ((Size > 0) and (FileWrite(Handle, Chars^, Size) <> Size)) then
+    begin
+      {$ifdef KOL}RaiseLastWin32Error{$else}RaiseLastOSError{$endif};
+    end;
+  finally
+    FileClose(Handle);
   end;
-
-  tpinfo := RecordInfo.FTypeInfo;
-  items_count := 1;
-  FillDword(Memory^, NewSize shr 2, 0); // ZeroMemory
-
-  AllocRecord := Memory;
 end;
 
-function TLuaResultBuffer.AllocArray(const ArrayInfo: PLuaArrayInfo): pointer;
-var
-  NewSize: integer;
+procedure TLuaUnit.SaveToFile;
 begin
-  if (tpinfo <> nil) then Finalize();
-
-  if (ArrayInfo = nil) then
+  if (FileName <> '') then
   begin
-    AllocArray := nil;
-    exit;
-  end;
-
-  NewSize := (ArrayInfo.FSize+3) and (not 3);
-  if (NewSize > Size) then
+    SaveToFile(FileName);
+  end else
   begin
-    Size := NewSize;
-    ReallocMem(Memory, Size);
+    SaveToFile(string(Name));
   end;
-
-  tpinfo := ArrayInfo.FTypeInfo;
-  items_count := ArrayInfo.FItemsCount;
-
-  if (NewSize = 4) then PInteger(Memory)^ := 0
-  else FillDword(Memory^, NewSize shr 2, 0); // ZeroMemory
-
-  AllocArray := Memory;
 end;
-
-function TLuaResultBuffer.AllocSet(const SetInfo: PLuaSetInfo): pointer;
-var
-  NewSize: integer;
-begin
-  if (tpinfo <> nil) then Finalize();
-
-  if (SetInfo = nil) then
-  begin
-    AllocSet := nil;
-    exit;
-  end;
-
-  NewSize := (SetInfo.FSize+3) and (not 3);
-  if (NewSize > Size) then
-  begin
-    Size := NewSize;
-    ReallocMem(Memory, Size);
-  end;
-
-  if (NewSize = 4) then PInteger(Memory)^ := 0
-  else FillDword(Memory^, NewSize shr 2, 0); // ZeroMemory
-
-  AllocSet := Memory;
-end;       *)
 
 
 { TLua }
@@ -7530,7 +7933,7 @@ begin
 end;
 
 // деструктор
-destructor TLua.Destroy();
+destructor TLua.Destroy;
 label
   clear_dictionary;
 var
@@ -7556,6 +7959,12 @@ begin
   for i := 0 to Length(FUnits)-1 do FUnits[i].Free;
   FUnits := nil;
   FUnitsCount := 0; *)
+
+  // script stack
+  Pointer(FArgs) := nil;
+  FArgsCount := 0;
+  for i := Low(FScriptStack) to High(FScriptStack) do
+    FScriptStack[i].Finalize;
 
   // finalize dynamic arrays
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
@@ -10537,6 +10946,68 @@ begin
   // exception
   raise ELuaScript.Create(Text^) at ReturnAddress;
 end;
+
+procedure TLua.BeginScriptStack(const ReturnAddress: Pointer);
+var
+  Index: NativeUInt;
+  Buffer: PLuaResultBuffer;
+begin
+  Index := FScriptStackIndex;
+  if (Index >= High(FScriptStack)) then
+    raise EInvalidScriptStackIndex(Index) at ReturnAddress;
+
+  Inc(Index);
+  FScriptStackIndex := Index;
+  Pointer(FArgs) := nil;
+  FArgsCount := 0;
+
+  Buffer := @FScriptStack[Index];
+  Buffer.FReturnAddress := ReturnAddress;
+  if (Buffer.Count <> 1) then Buffer.Count := 1;
+end;
+
+procedure TLua.EndScriptStack(const ReturnAddress: Pointer);
+var
+  Index: NativeUInt;
+  Buffer: PLuaResultBuffer;
+begin
+  Index := FScriptStackIndex;
+  Dec(Index);
+  if (Index > High(FScriptStack) - Low(FScriptStack)) then
+    raise EInvalidScriptStackIndex(Index + 1) at ReturnAddress;
+
+  FScriptStackIndex := Index;
+  Buffer := @FScriptStack[Index + 1];
+  Buffer.FParamCount := 0;
+  if (Buffer.FMetaStructs <> nil) or (Buffer.FCount <> 1) or
+    (Pointer(TLuaMemoryHeap(Buffer.FHeap).FBuffers) <> nil) then
+    Buffer.Clear;
+
+  Pointer(FArgs) := nil;
+  if (Index = 0) then
+  begin
+    FArgsCount := 0;
+  end else
+  begin
+    Dec(Buffer);
+    FArgsCount := Buffer.FParamCount;
+    if (Buffer.FParamCount <> 0) then
+      Pointer(FArgs) := Buffer.FParamItems;
+  end;
+end;
+
+function TLua.GetResultBuffer: PLuaResultBuffer;
+var
+  Index: NativeUInt;
+begin
+  Index := FScriptStackIndex;
+  if (Index - Low(FScriptStack) > High(FScriptStack) - Low(FScriptStack)) then
+    raise EInvalidScriptStackIndex(Index);
+
+  Result := @FScriptStack[Index];
+end;
+
+
                    (*
 function  TLua.InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
 var
@@ -10769,20 +11240,6 @@ begin
   end;
 end;      *)
 
-
-const
-  BOM_INFO: array[TLuaScriptBOM] of
-  record
-    Data: Cardinal;
-    Size: Cardinal;
-  end = (
-    (Data: $00000000; Size: 0 {ANSI}),
-    (Data: $00BFBBEF; Size: 3 {UTF-8}),
-    (Data: $0000FEFF; Size: 2 {UTF-16 LE}),
-    (Data: $0000FFFE; Size: 2 {UTF-16 BE}),
-    (Data: $0000FEFF; Size: 4 {UTF-32 LE}),
-    (Data: $FFFE0000; Size: 4 {UTF-32 BE})
-  );
 
 function TLua.InternalConvertScript(var Data: __luabuffer): Integer;
 label
@@ -11160,24 +11617,18 @@ begin
   until (False);
 end;
 
-procedure TLua.InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString;
-  const FileName: string; const ReturnAddress: Pointer);
+procedure TLua.InternalPreprocessScript(var Buffer: __luabuffer; const Offset: Integer);
 label
   clear_chars, replace, next_find;
 var
   S, Start, Top, StoredS, StoredPrint: PByte;
-  Buffer: __luabuffer;
   Unique: Boolean;
-  Offset, Size: Integer;
+  Size: Integer;
   X: NativeUInt;
   PtrOffset: NativeInt;
 begin
-  // convert data
-  Offset := InternalConvertScript(Data);
-
   // initialize buffer
   Unique := False;
-  Buffer := Data;
   Size := Length(Buffer) - Offset;
   NativeInt(S) := NativeInt(Buffer) + Offset;
   NativeInt(Top) := NativeInt(S) + Size;
@@ -11343,125 +11794,159 @@ begin
   next_find:
     S := StoredS;
   until (False);
-
-  // point preprocess
-  if (FPointPreprocess) then
-    PreprocessPointScript(Buffer, Offset);
-
-  // user preprocessing
-  if (Assigned(FOnPreprocessScript)) then
-    FOnPreprocessScript(Buffer, Data, UnitName, UniqueLuaBuffer);
-
-  // ToDo
 end;
-                       (*
-// загрузка скрипта
-procedure TLua.InternalLoadScript(var Memory: string; const UnitName, FileName: string; CodeAddr: pointer);
+
+function TLua.InternalRunScript(var Data: __luabuffer; const Offset: Integer; const AUnitName: __luaname;
+  const AUnit: TLuaUnit; const MakeResult: Boolean; const ReturnAddress: Pointer): Exception;
 var
-  ret, unit_index: integer;
-  internal_exception: Exception;
-  AUnit, LastUnit: TLuaUnit;
-  CW: word;
-
-  // в случае ошибки пытаемся восстановить старый чанк в Lua
-  // при этом сохраняем Exception - потом он будет использован
-  procedure OnExceptionRetrieve(const E: Exception);
-  begin
-    internal_exception := Exception(E.ClassType.NewInstance);
-    CopyObject(internal_exception, E);
-    AUnit.Free;
-
-    if (LastUnit <> nil) then
-    begin
-      Memory := LastUnit.Text;
-      PreprocessScript(Memory);
-      try
-        ret := luaL_loadbuffer(Handle, pchar(Memory), Length(Memory), pchar(LastUnit.Name));
-        if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
-        if (ret = 0) then {ret := }lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-      except
-      end;
-    end;
-  end;
+  Buffer: __luabuffer;
+  BufferOffset, ErrCode, Size: Integer;
+  Memory: __luadata;
+  {$ifdef CPUINTEL}
+  CW: Word;
+  {$endif}
 begin
-  // определиться с чанками
-  if (UnitName = '') then
-  begin
-    AUnit := nil;
-    LastUnit := nil;
-    unit_index := -1;
-  end else
-  begin
-    if (UnitName[1] = #32) or (UnitName[Length(UnitName)] = #32) then
-    ELua.Assert('Unit name "%s" contains left or/and right spaces', [UnitName], CodeAddr);
-    //UnitName := StringLower(UnitName);
-
-    // предыдущий чанк
-    LastUnit := Self.UnitByName[UnitName];
-    unit_index := IntPos(integer(LastUnit), pinteger(FUnits), Length(FUnits));
-
-    // либо текущий чанк - предыдущий, либо создаю новый и инициализирую
-    if (LastUnit <> nil) and (SameStrings(LastUnit.Text, Memory)) then
-    begin
-      AUnit := LastUnit;
-      LastUnit := nil;
-    end else
-    begin
-      AUnit := TLuaUnit.Create;
-      AUnit.FName := UnitName;
-      AUnit.FFileName := FileName;
-      AUnit.FText := Memory;
-      AUnit.InitializeLinesInfo();
-    end;
-  end;
-
-
-  // загрузить чанк
-  // если всё прошло отлично, то добавить/заменить чанк в архиве
-  // если конечно это не RunScript вызов
-  internal_exception := nil;
+  // preprocessing, compilation, execution
+  Result := nil;
   try
-    // выполнить препроцессинг
-    PreprocessScript(Memory);
+    // preprocess
+    Buffer := Data;
+    InternalPreprocessScript(Buffer, Offset);
 
-    // выполнить скрипт
-    if (not FInitialized) then INITIALIZE_NAME_SPACE();
+    // point preprocess
+    if (FPointPreprocess) then
+      PreprocessPointScript(Buffer, Offset);
 
-    // загрузить буфер
-    begin
-      CW := Get8087CW();
+    // user preprocessing
+    BufferOffset := Offset;
+    if (Assigned(FOnPreprocessScript)) then
+      FOnPreprocessScript(Buffer, Data, BufferOffset, AUnitName, UniqueLuaBuffer);
+
+    // compilation, execution
+    BeginScriptStack(ReturnAddress);
+    try
+      {$ifdef CPUINTEL}
+      {$WARN SYMBOL_PLATFORM OFF}
+      CW := Get8087CW;
       Set8087CW($037F {default intel C++ mode});
       try
-        ret := luaL_loadbuffer(Handle, pansichar(Memory), Length(Memory), pansichar(UnitName));
+      {$endif}
+      begin
+        Size := Length(Buffer) - BufferOffset;
+        NativeInt(Memory) := NativeInt(Buffer) + BufferOffset;
+        ErrCode := luaL_loadbuffer(Handle, Memory, Size, AUnitName);
+        if (ErrCode = 0) then ErrCode := lua_pcall(Handle, 0, 0, 0);
+        if (ErrCode = 0) then ErrCode := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
+        if (ErrCode <> 0) and (MakeResult) then CheckScriptError(ErrCode, ReturnAddress, AUnit);
+      end;
+      {$ifdef CPUINTEL}
       finally
         Set8087CW(CW);
       end;
-    end;
-
-    // вызов, чистка, проверка
-    if (ret = 0) then ret := lua_pcall(Handle, 0, 0, 0);
-    if (ret = 0) then ret := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-    if (ret <> 0) then Check(ret, CodeAddr, AUnit);
-
-    // инициализация чанка прошла успешно, занести в массив чанков
-    if (unit_index{чанк с таким именем уже был} >= 0) then
-    begin
-      if (LastUnit <> nil) then LastUnit.Free;
-      FUnits[unit_index] := AUnit;
-    end else
-    if (AUnit <> nil) then
-    begin
-      unit_index := FUnitsCount;
-      inc(FUnitsCount);
-      SetLength(FUnits, FUnitsCount);
-      FUnits[unit_index] := AUnit;
+      {$WARN SYMBOL_PLATFORM ON}
+      {$endif}
+    finally
+      EndScriptStack(ReturnAddress);
     end;
   except
-    on E: Exception do OnExceptionRetrieve(E);
+    on E: Exception do
+    if (MakeResult) then
+    begin
+      Result := Exception(E.ClassType.NewInstance);
+      CopyObject(Result, E);
+    end;
+  end;
+end;
+
+procedure TLua.InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString;
+  const FileName: string; const ReturnAddress: Pointer);
+const
+  MAX_UNITNAME_LENGTH = 255;
+var
+  Offset, Count: Integer;
+  LuaUnitName: __luaname;
+  LuaUnitNameBuffer: array[0..MAX_UNITNAME_LENGTH * 3] of AnsiChar;
+  AUnit, ALastUnit: TLuaUnit;
+  E: Exception;
+begin
+  // convert script data
+  Offset := InternalConvertScript(Data);
+
+  // unit name
+  Count := Length(UnitName);
+  if (Count = 0) then
+  begin
+    LuaUnitName := Pointer(@NULL_CHAR);
+  end else
+  begin
+    if (Ord(UnitName[1]) <= 32) or (Ord(UnitName[Count]) <= 32) or (Count > MAX_UNITNAME_LENGTH) then
+      raise ELua.Create('Invalid unit name') at ReturnAddress;
+
+    {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+      {$ifdef LUA_UNICODE}
+        Count := Utf8FromUnicode(Pointer(@UnitNameBuffer), Pointer(UnitName), Count);
+      {$else .LUA_ANSI}
+        Count := AnsiFromUnicode(Pointer(@UnitNameBuffer), 0, Pointer(UnitName), Count);
+      {$endif}
+    {$else .LUA_ANSI.ANSI}
+      System.Move(Pointer(UnitName)^, LuaUnitNameBuffer, Count);
+    {$ifend}
+
+    Byte(LuaUnitNameBuffer[Count]) := 0;
+    LuaUnitName := Pointer(@LuaUnitNameBuffer);
   end;
 
-  if (internal_exception <> nil) then raise internal_exception at CodeAddr;
-end;        *)
+  // unit, last unit
+  if (Count = 0) then
+  begin
+    ALastUnit := nil;
+    AUnit := nil;
+  end else
+  begin
+    ALastUnit := Self.GetUnitByName(UnitName);
+
+    AUnit := TLuaUnit.Create;
+    AUnit.FLua := Self;
+    AUnit.FIndex := -1;
+    AUnit.FName := UnitName;
+    AUnit.FNameLength := Length(UnitName);
+    AUnit.FData := Data;
+    AUnit.FDataOffset := Offset;
+    AUnit.FFileName := FileName;
+    AUnit.InitializeLines;
+  end;
+
+  // try run script
+  E := InternalRunScript(Data, Offset, LuaUnitName, AUnit, True, ReturnAddress);
+
+  // add/replace unit or cleanup and compile/run previous instance
+  if (E = nil) then
+  begin
+    if (Assigned(ALastUnit)) then
+    begin
+      AUnit.FIndex := ALastUnit.FIndex;
+      FUnits[AUnit.FIndex] := AUnit;
+      ALastUnit.Free;
+    end else
+    begin
+      AUnit.FIndex := FUnitCount;
+      Inc(FUnitCount);
+      SetLength(FUnits, FUnitCount);
+      FUnits[AUnit.FIndex] := AUnit;
+    end;
+  end else
+  begin
+    AUnit.Free;
+
+    if (Assigned(ALastUnit)) then
+    begin
+      InternalRunScript(ALastUnit.FData, ALastUnit.FDataOffset, LuaUnitName, ALastUnit,
+        False, ReturnAddress);
+    end;
+
+    raise E at ReturnAddress;
+  end;
+end;
 
 procedure CheckScriptSize(const Size: Int64; const ReturnAddress: Pointer);
 begin
@@ -17150,14 +17635,14 @@ asm
   jmp __TLuaRegEnum
 end;
          *)
-                         (*
-function TLua.GetUnit(const index: integer): TLuaUnit;
-begin
-  if (dword(index) >= dword(FUnitsCount)) then
-  {$ifdef NO_CRYSTAL}TExcept{$else}EWrongParameter{$endif}.Assert('Can''t get unit[%d]. Units count = %d', [index, FUnitsCount]);
 
-  GetUnit := FUnits[index];
-end;      *)
+function TLua.GetUnit(const Index: Integer): TLuaUnit;
+begin
+  if (Cardinal(Index) >= Cardinal(FUnitCount)) then
+    raise ELua.CreateFmt('Invalid unit index %d, unit count: %d', [Index, FUnitCount]);
+
+  Result := FUnits[Index];
+end;
 
 function TLua.GetUnitByName(const Name: LuaString): TLuaUnit;
 var
@@ -17167,7 +17652,7 @@ begin
   begin
     Count := PInteger(NativeInt(Name) - SizeOf(Integer))^ {$ifdef LUA_LENGTH_SHIFT}shr 1{$endif};
 
-    for i := 0 to FUnitsCount - 1 do
+    for i := 0 to FUnitCount - 1 do
     begin
       Result := FUnits[i];
       if (Result.FNameLength = Count) and
@@ -17176,89 +17661,6 @@ begin
   end;
 
   Result := nil;
-end;
-
-
-{ TLuaUnit }
-                     (*
-// анализировать Text, собрать информацию по строкам
-procedure TLuaUnit.InitializeLinesInfo();
-var
-  Last, Current, Max: pchar;
-
-  procedure Add();
-  begin
-    inc(FLinesCount);
-    SetLength(FLinesInfo, FLinesCount);
-    with FLinesInfo[FLinesCount-1] do
-    begin
-      Str := Last;
-      Length := integer(Current)-integer(Last);
-    end;
-
-    // inc Current
-    if (Current^ = #13) and (Current <> Max) and (Current[1] = #10) then inc(Current, 2)
-    else inc(Current, 1);
-
-    // Last
-    Last := Current;
-  end;
-begin
-  FLinesCount := 0;
-  FLinesInfo := nil;
-  if (FText = '') then exit;
-
-  Last := pchar(pointer(FText));
-  Current := Last;
-  Max := pchar(@Last[Length(FText)-1]);
-
-  while (integer(Current) <= integer(Max)) do
-  begin
-    if (Current^ in [#13, #10]) then Add()
-    else
-    inc(Current);
-  end;
-
-  if (Last <> Current) then Add();
-end;
-
-procedure TLuaUnit.SaveToStream(const Stream: TStream);
-begin
-  Stream.WriteBuffer(pointer(FText)^, Length(FText));
-end;
-
-procedure TLuaUnit.SaveToFile(const FileName: string);
-var
-  F: TFileStream;
-begin
-  F := TFileStream.Create(FileName, fmCreate);
-  try
-    SaveToStream(F);
-  finally
-    F.Free;
-  end;
-end;
-
-procedure TLuaUnit.SaveToFile();
-begin
-  if (FileName <> '') then SaveToFile(FileName)
-  else SaveToFile(Name);
-end;              *)
-
-function TLuaUnit.GetLine(Index: Integer): TLuaUnitLine;
-begin
-  if (Cardinal(Index) >= Cardinal(FLinesCount)) then
-    raise ELua.CreateFmt('Can''t get line %d from unit "%s". Lines count = %d', [Index, Name, FLinesCount]);
-
-  Result := FLines[Index];
-end;
-
-function TLuaUnit.GetItem(Index: Integer): LuaString;
-var
-  Line: TLuaUnitLine;
-begin
-  Line := Self.GetLine(Index);
-  FLua.unpack_lua_string(Result, Line.Chars, Line.Count);
 end;
 
 

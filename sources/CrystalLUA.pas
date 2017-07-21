@@ -859,15 +859,17 @@ type
     FParamItems: PLuaArgList;
     FParamCount: Integer;
     FParamCapacity: Integer;
+    FHeapCurrent: PByte;
+    FHeapOverflow: PByte;
+    FHeapEmpty: NativeInt;
     FHeap: __TLuaMemoryHeap;
     FMetaStructs: Pointer;
-
-      оптимизировать
 
     procedure GrowCapacity(var List: PLuaArgList; var Capacity: Integer; const Value: Integer);
     procedure SetCount(const Value: Integer);
     procedure SetParamCount(const Value: Integer);
-    function Alloc(const Size: NativeUInt): Pointer;
+    function GrowAlloc(Size: NativeUInt): Pointer;
+    function Alloc(Size: NativeUInt): Pointer;
     function AllocMetaType(const MetaType: PLuaMetaType): Pointer;
     procedure Clear;
     procedure FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
@@ -4341,24 +4343,51 @@ begin
   end;
 end;
 
-function TLuaResultBuffer.Alloc(const Size: NativeUInt): Pointer;
+function TLuaResultBuffer.GrowAlloc(Size: NativeUInt): Pointer;
 var
-  Ptr: __luapointer;
   Heap: ^TLuaMemoryHeap;
-  {$ifdef LARGEINT}
-  Value: NativeInt;
-  {$endif}
+  First: Boolean;
+  Ptr: NativeUInt;
 begin
-  Heap := Pointer(@Heap);
-  Ptr := Heap.Alloc(Size);
-  {$ifdef SMALLINT}
-    Result := Pointer(Ptr);
-  {$else .LARGEINT}
-    Value := NativeInt(Ptr);
-    Result := Pointer(FBuffers[Value shr HEAP_BUFFER_SHIFT]);
-    Inc(NativeInt(Result), Value and HEAP_BUFFER_MASK);
-  {$endif}
+  Heap := Pointer(@FHeap);
+  First := (Heap.FBuffers = nil);
+  Result := Heap.Unpack(Heap.GrowAlloc(Size));
+
+  Ptr := NativeUInt(Result) + Size;
+  NativeUInt(FHeapCurrent) := Ptr;
+  NativeUInt(FHeapOverflow) := Ptr + NativeUInt(Heap.FMargin);
+
+  if (First) then
+  begin
+    FHeapEmpty := Heap.FCurrent - NativeInt(Size);
+  end;
 end;
+
+function TLuaResultBuffer.Alloc(Size: NativeUInt): Pointer;
+var
+  Ptr: NativeUInt;
+begin
+  if (Size <> 0) then
+  begin
+    Size := (Size + (SizeOf(Pointer) - 1)) and -SizeOf(Pointer);
+    Ptr := NativeUInt(FHeapCurrent);
+    Inc(Ptr, Size);
+    if (Ptr <= NativeUInt(FHeapOverflow)) then
+    begin
+      NativeUInt(FHeapOverflow) := Ptr;
+      Dec(Ptr, Size);
+      Result := Pointer(Ptr);
+      Exit;
+    end else
+    begin
+      Result := GrowAlloc(Size);
+    end;
+  end else
+  begin
+    Result := nil;
+  end;
+end;
+
 
 type
   PMetaStruct = ^TMetaStruct;
@@ -4433,6 +4462,8 @@ var
   MetaType: PLuaMetaType;
   TypeInfo: PTypeInfo;
   ItemsCount: Integer;
+  Heap: ^TLuaMemoryHeap;
+  Rec: PDynArrayRec;
 begin
   repeat
     MetaStruct := FMetaStructs;
@@ -4461,9 +4492,19 @@ begin
     end;
   until (False);
 
-  if (Pointer(TLuaMemoryHeap(FHeap).FBuffers) <> nil) then TLuaMemoryHeap(FHeap).Clear;
-  if (Cardinal(FCount) > 1) then SetCount(1);
+  if (FCount <> 1) then SetCount(1);
   FParamCount := 0;
+  Heap := Pointer(@FHeap);
+  if (Heap.FCurrent <> FHeapEmpty) then
+  begin
+    Rec := Pointer(NativeUInt(Heap.FBuffers) - SizeOf(TDynArrayRec));
+    if (Rec.RefCount <> 1) or (Rec.Length <> 1) then SetLength(Heap.FBuffers, 1);
+    Rec := Pointer(NativeUInt(Heap.FBuffers[0]) - SizeOf(TDynArrayRec));
+    Heap.FCurrent := FHeapEmpty;
+    Heap.FMargin := Rec.Length;
+    FHeapCurrent := Pointer(Heap.FBuffers[0]);
+    NativeUInt(FHeapOverflow) := NativeUInt(FHeapCurrent) + NativeUInt(Heap.FMargin);
+  end;
 end;
 
 procedure TLuaResultBuffer.FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
@@ -4500,6 +4541,7 @@ end;
 procedure TLuaResultBuffer.Finalize;
 begin
   Clear;
+  TLuaMemoryHeap(FHeap).FBuffers := nil;
   FinalizeArgs(FItems, FCapacity, FCount);
   FinalizeArgs(FParamItems, FParamCapacity, FParamCount);
 end;
@@ -7669,8 +7711,9 @@ const
 
 function TLuaUnit.GetLine(Index: Integer): TLuaUnitLine;
 begin
+  Dec(Index);
   if (Cardinal(Index) >= Cardinal(FLinesCount)) then
-    raise ELua.CreateFmt('Can''t get line %d from unit "%s". Lines count = %d', [Index, Name, FLinesCount]);
+    raise ELua.CreateFmt('Can''t get line %d from unit "%s". Lines count = %d', [Index + 1, Name, FLinesCount]);
 
   Result := FLines[Index];
 end;
@@ -7694,29 +7737,32 @@ begin
   Size := Length(FData) - FDataOffset;
   NativeInt(Chars) := NativeInt(FData) + FDataOffset;
   if (Size > 0) then
-  repeat
-    if (Size = 0) then Break;
-    X := Chars^;
-    Inc(Chars);
-    Dec(Size);
+  begin
+    repeat
+      if (Size = 0) then Break;
+      X := Chars^;
+      Inc(Chars);
+      Dec(Size);
 
-    if (X <= 13) then
-    case X of
-      10:
-      begin
-        Inc(Index);
-      end;
-      13:
-      begin
-        Inc(Index);
-        if (Size > 0) and (Chars^ = 10) then
+      if (X <= 13) then
+      case X of
+        10:
         begin
-          Inc(Chars);
-          Dec(Size);
+          Inc(Index);
+        end;
+        13:
+        begin
+          Inc(Index);
+          if (Size > 0) and (Chars^ = 10) then
+          begin
+            Inc(Chars);
+            Dec(Size);
+          end;
         end;
       end;
-    end;
-  until (False);
+    until (False);
+    Inc(Index);
+  end;
 
   // fill lines
   FLinesCount := Index;
@@ -7744,9 +7790,11 @@ begin
             Inc(Chars);
             Dec(Size);
           end;
+          FLines[Index].Chars := Pointer(Chars);
         end;
       end;
     until (False);
+    FLines[Index].Count := NativeInt(Chars) - NativeInt(FLines[Index].Chars);
   end;
 end;
 
@@ -7901,7 +7949,7 @@ begin
   // Lua initialization
   if (not InitializeLua) then
     raise ELua.CreateFmt('Lua library was not initialized: "%s"', [LuaPath]);
-  FHandle := lua_open();
+  FHandle := lua_open;
   luaL_openlibs(Handle);
 
 
@@ -7941,6 +7989,9 @@ var
   MetaType: PLuaMetaType;
   Dictionary: ^TLuaDictionary;
 begin
+  // Lua
+  if (FHandle <> nil) then lua_close(FHandle);
+
  (* // внутренние данные
   FArgs := nil;
   if (FHandle <> nil) then lua_close(FHandle);
@@ -7959,6 +8010,13 @@ begin
   for i := 0 to Length(FUnits)-1 do FUnits[i].Free;
   FUnits := nil;
   FUnitsCount := 0; *)
+
+  // units
+  for i := 0 to FUnitCount - 1 do
+  begin
+    FUnits[i].Free;
+  end;
+  FUnits := nil;
 
   // script stack
   Pointer(FArgs) := nil;
@@ -8294,8 +8352,8 @@ begin
   // conversion loop
   if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
   {$ifdef SMALLINT}
-    X := Word(Source[0]);
-    U := Word(Source[1]);
+    X := PCardinal(@Source[0])^;
+    U := PCardinal(@Source[2])^;
     if ((X or U) and Integer(MASK_FF80) = 0) then
   {$else}
     X := PNativeUInt(Source)^;
@@ -8322,8 +8380,8 @@ begin
 
       if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
     {$ifdef SMALLINT}
-      X := Word(Source[0]);
-      U := Word(Source[1]);
+      X := PCardinal(@Source[0])^;
+      U := PCardinal(@Source[2])^;
     until ((X or U) and Integer(MASK_FF80) <> 0);
     {$else}
       X := PNativeUInt(Source)^;
@@ -8422,8 +8480,8 @@ begin
 
   if (NativeUInt(Source) > Count{TopSource}) then goto small_length;
   {$ifdef SMALLINT}
-    X := Word(Source[0]);
-    U := Word(Source[1]);
+    X := PCardinal(@Source[0])^;
+    U := PCardinal(@Source[2])^;
     if ((X or U) and Integer(MASK_FF80) = 0) then goto process4;
   {$else}
     X := PNativeUInt(Source)^;
@@ -10779,7 +10837,7 @@ var
       repeat
         if (S^ = C) then
         begin
-          Result := Integer(NativeInt(S) - NativeInt(Str) + 1);
+          Result := Integer((NativeUInt(S) - NativeUInt(Str)) div SizeOf(LuaChar)) + 1;
           Exit;
         end;
 
@@ -10820,8 +10878,8 @@ var
     Count, i: Integer;
   begin
     Result := False;
-    S := AUnit.FLines[AUnitLine].Chars;
-    Count := AUnit.FLines[AUnitLine].Count;
+    S := AUnit.FLines[AUnitLine - 1].Chars;
+    Count := AUnit.FLines[AUnitLine - 1].Count;
     for i := 1 to Count do
     begin
       if (Byte(S^) > 32) then Exit;
@@ -10852,7 +10910,7 @@ begin
   {$ifend}
 
   // change error text, detect chunk name, line number
-  UnitLine := 0;
+  UnitLine := -1;
   if (Err^[1] = '[') then
   begin
     P1 := CharPos('"', Err^);
@@ -10873,7 +10931,6 @@ begin
         if (P2 <> 0) then
         begin
           UnitLine := CharsToInt(PLuaChar(@PLuaChar(Pointer(Err^))[P1 {+ 1 - 1}]), P2 - P1 - 1);
-          if (UnitLine > 0) then Dec(UnitLine);
           Delete(Err^, 1, P2);
           if (Pointer(Err^) <> nil) and (Err^[1] = #32) then Delete(Err^, 1, 1);
         end;
@@ -10884,30 +10941,26 @@ begin
   // unit (chunk)
   if (Pointer(UnitName^) = nil) then
   begin
-    AUnit := nil;
     UnitName^ := 'GLOBAL_NAME_SPACE';
-  end else
-  begin
-    if (AUnit = nil) then AUnit := Self.UnitByName[UnitName^];
-    if (AUnit <> nil) and (Cardinal(UnitLine) >= Cardinal(AUnit.FLinesCount)) then AUnit := nil;
   end;
+  if (AUnit <> nil) and (Cardinal(UnitLine) > Cardinal(AUnit.FLinesCount)) then AUnit := nil;
 
   // availiable: unit instance, unit name, unit line, error text
   // may be later it will be used in debug mode
 
   // base output text
   Text := @FStringBuffer.Default;
-  FmtStr(Text^, 'unit "%s", line %d.'#13'%s', [UnitName^, UnitLine, Err^]);
+  FmtStr(Text^, 'unit "%s", line %d.'#10'%s', [UnitName^, UnitLine, Err^]);
 
   // unit output text lines
   if (AUnit <> nil) then
   begin
     // min/max
     MinLine := UnitLine - 2;
-    if (MinLine < 0) then MinLine := 0;
+    if (MinLine < 1) then MinLine := 1;
     while (MinLine <> UnitLine) and (EmptyLine(AUnit, MinLine)) do Inc(MinLine);
     MaxLine := UnitLine + 2;
-    if (MaxLine >= AUnit.FLinesCount) then MaxLine := AUnit.FLinesCount - 1;
+    if (MaxLine > AUnit.FLinesCount) then MaxLine := AUnit.FLinesCount;
     while (MaxLine <> UnitLine) and (EmptyLine(AUnit, MaxLine)) do Dec(MaxLine);
 
     // max digits
@@ -10980,7 +11033,7 @@ begin
   Buffer := @FScriptStack[Index + 1];
   Buffer.FParamCount := 0;
   if (Buffer.FMetaStructs <> nil) or (Buffer.FCount <> 1) or
-    (Pointer(TLuaMemoryHeap(Buffer.FHeap).FBuffers) <> nil) then
+    (Buffer.FHeapEmpty <> TLuaMemoryHeap(Buffer.FHeap).FCurrent) then
     Buffer.Clear;
 
   Pointer(FArgs) := nil;
@@ -11276,7 +11329,7 @@ begin
   // sbUTF16BE/cbUTF32/cbUTF32BE --> sbUTF16
   if (BOM in [sbUTF16BE, cbUTF32, cbUTF32BE]) then
   begin
-    Dest := S;
+    Dest := Pointer(Data);
     case BOM of
       sbUTF16BE:
       begin
@@ -11373,7 +11426,7 @@ begin
   Exit;
 fix_dest:
   {$ifdef LUA_UNICODE}
-  Buffer := nil;
+  Buffer := {$ifdef NEXTGEN}nil{$else}''{$endif};
   {$endif}
   SetLength(Data, Size);
   {$ifNdef NEXTGEN}
@@ -11476,7 +11529,7 @@ end;
 // на данный момент это только замена точек на двоеточие
 procedure PreprocessPointScript(var Buffer: __luabuffer; const Offset: Integer);
 label
-  replace, next_find;
+  next_find;
 var
   Start, Top, S, StoredS, StoredPoint, StoredLib: PByte;
   Unique: Boolean;
@@ -11540,9 +11593,9 @@ begin
     // detect not digit "function name"
     Inc(S);
     case S^ of
-      Ord(0)..Ord('9'): Dec(S);
+      Ord(0)..Ord('9'): goto next_find;
     else
-      goto next_find;
+      Dec(S);
     end;
 
     // skip spaces: point..func
@@ -11582,34 +11635,32 @@ begin
     with PMemoryItems(S)^ do
     case (NativeUInt(StoredLib) - NativeUInt(S) + 1) of
       2: case (Words[0]) of // "io", "os"
-           $6F69: goto replace; // "io"
-           $736F: goto replace; // "os"
+           $6F69: goto next_find; // "io"
+           $736F: goto next_find; // "os"
          end;
-      4: if (Cardinals[0] = $6874616D) then goto replace; // "math"
+      4: if (Cardinals[0] = $6874616D) then goto next_find; // "math"
       5: case (Cardinals[0]) of // "debug", "table"
-           $75626564: if (Bytes[4] = $67) then goto replace; // "debug"
-           $6C626174: if (Bytes[4] = $65) then goto replace; // "table"
+           $75626564: if (Bytes[4] = $67) then goto next_find; // "debug"
+           $6C626174: if (Bytes[4] = $65) then goto next_find; // "table"
          end;
-      6: if (Cardinals[0] = $69727473) and (Words[2] = $676E) then goto replace; // "string"
+      6: if (Cardinals[0] = $69727473) and (Words[2] = $676E) then goto next_find; // "string"
       7: if (Cardinals[0] = $6B636170) and (Cardinals3[0] shr 8 = $656761) then
-         goto replace; // "package"
+         goto next_find; // "package"
       9: if (Cardinals[0] = $6F726F63) and (Cardinals[1] = $6E697475) and
-         (Bytes[8] = $65) then // "coroutine"
-      begin
-      replace:
-        if (not Unique) then
-        begin
-          PtrOffset := UniqueLuaBuffer(Buffer);
-          Inc(NativeInt(Start), PtrOffset);
-          Inc(NativeInt(Top), PtrOffset);
-          Inc(NativeInt(StoredS), PtrOffset);
-          Inc(NativeInt(StoredPoint), PtrOffset);
-          Unique := True;
-        end;
-
-        StoredPoint^ := Ord(';');
-      end;
+         (Bytes[8] = $65) then goto next_find; // "coroutine"
     end;
+
+    // replace
+    if (not Unique) then
+    begin
+      PtrOffset := UniqueLuaBuffer(Buffer);
+      Inc(NativeInt(Start), PtrOffset);
+      Inc(NativeInt(Top), PtrOffset);
+      Inc(NativeInt(StoredS), PtrOffset);
+      Inc(NativeInt(StoredPoint), PtrOffset);
+      Unique := True;
+    end;
+    StoredPoint^ := Ord(':');
 
     // next pointer
   next_find:
@@ -11619,7 +11670,7 @@ end;
 
 procedure TLua.InternalPreprocessScript(var Buffer: __luabuffer; const Offset: Integer);
 label
-  clear_chars, replace, next_find;
+  line_comment, clear_chars, replace, next_find;
 var
   S, Start, Top, StoredS, StoredPrint: PByte;
   Unique: Boolean;
@@ -11654,6 +11705,7 @@ begin
       CHAR_MINUS:
       begin
         Start := S;
+        Dec(Start);
         if (S = Top) then Break;
         if (S^ <> Ord('-')) then Continue;
         Inc(S);
@@ -11661,32 +11713,30 @@ begin
 
         if (S^ = Ord('[')) then
         begin
+          // multy-line comment
           Inc(S);
-          if (S = Top) or (S^ <> Ord('[')) then
-          begin
-            // line comment
-            repeat
-              if (S = Top) then Break;
-              X := CHAR_TABLE[S^];
-              Inc(S);
-              if (X = CHAR_CRLF) then Break;
-            until (False);
-          end else
-          begin
-            // multy-line comment
-            repeat
+          if (S = Top) or (S^ <> Ord('[')) then goto line_comment;
+          repeat
+            if (S = Top) then Break;
+            X := S^;
+            Inc(S);
+            if (X = Ord(']')) then
+            begin
               if (S = Top) then Break;
               X := S^;
               Inc(S);
-              if (X = Ord(']')) then
-              begin
-                if (S = Top) then Break;
-                X := S^;
-                Inc(S);
-                if (X = Ord(']')) then Break;
-              end;
-            until (False);
-          end;
+              if (X = Ord(']')) then Break;
+            end;
+          until (False);
+        end else
+        begin
+        line_comment:
+          repeat
+            if (S = Top) then Break;
+            X := CHAR_TABLE[S^];
+            Inc(S);
+            if (X = CHAR_CRLF) then Break;
+          until (False);
         end;
 
       clear_chars:
@@ -11709,6 +11759,7 @@ begin
 
   // replace print --> _PNT_
   NativeInt(Start) := NativeInt(Buffer) + Offset;
+  S := Start;
   repeat
     if (S = Top) then Break;
 
@@ -11778,6 +11829,7 @@ begin
       Inc(NativeInt(Start), PtrOffset);
       Inc(NativeInt(Top), PtrOffset);
       Inc(NativeInt(StoredPrint), PtrOffset);
+      Inc(NativeInt(StoredS), PtrOffset);
       Unique := True;
     end;
     S := StoredPrint;
@@ -11820,7 +11872,7 @@ begin
     // user preprocessing
     BufferOffset := Offset;
     if (Assigned(FOnPreprocessScript)) then
-      FOnPreprocessScript(Buffer, Data, BufferOffset, AUnitName, UniqueLuaBuffer);
+      FOnPreprocessScript(Buffer, Data, BufferOffset, UnitName, UniqueLuaBuffer);
 
     // compilation, execution
     BeginScriptStack(ReturnAddress);
@@ -11884,9 +11936,9 @@ begin
 
     {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
       {$ifdef LUA_UNICODE}
-        Count := Utf8FromUnicode(Pointer(@UnitNameBuffer), Pointer(UnitName), Count);
+        Count := Utf8FromUnicode(Pointer(@LuaUnitNameBuffer), Pointer(UnitName), Count);
       {$else .LUA_ANSI}
-        Count := AnsiFromUnicode(Pointer(@UnitNameBuffer), 0, Pointer(UnitName), Count);
+        Count := AnsiFromUnicode(Pointer(@LuaUnitNameBuffer), 0, Pointer(UnitName), Count);
       {$endif}
     {$else .LUA_ANSI.ANSI}
       System.Move(Pointer(UnitName)^, LuaUnitNameBuffer, Count);
@@ -11900,21 +11952,19 @@ begin
   if (Count = 0) then
   begin
     ALastUnit := nil;
-    AUnit := nil;
   end else
   begin
     ALastUnit := Self.GetUnitByName(UnitName);
-
-    AUnit := TLuaUnit.Create;
-    AUnit.FLua := Self;
-    AUnit.FIndex := -1;
-    AUnit.FName := UnitName;
-    AUnit.FNameLength := Length(UnitName);
-    AUnit.FData := Data;
-    AUnit.FDataOffset := Offset;
-    AUnit.FFileName := FileName;
-    AUnit.InitializeLines;
   end;
+  AUnit := TLuaUnit.Create;
+  AUnit.FLua := Self;
+  AUnit.FIndex := -1;
+  AUnit.FName := UnitName;
+  AUnit.FNameLength := Length(UnitName);
+  AUnit.FData := Data;
+  AUnit.FDataOffset := Offset;
+  AUnit.FFileName := FileName;
+  AUnit.InitializeLines;
 
   // try run script
   E := InternalRunScript(Data, Offset, LuaUnitName, AUnit, True, ReturnAddress);

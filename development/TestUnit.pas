@@ -8,6 +8,7 @@ interface
   Windows,
   {$endif}
   SysUtils,
+  Classes,
   CrystalLUA;
 
 
@@ -39,7 +40,7 @@ begin
     Windows.MessageBox(0, PChar(BreakPoint), 'Сообщение:', 0);
   {$endif}
 
-  Halt;
+  //Halt;
 end;
 
 procedure ShowMessage(const StrFmt: string; const Args: array of const);

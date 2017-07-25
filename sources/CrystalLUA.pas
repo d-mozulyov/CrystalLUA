@@ -847,10 +847,10 @@ type
   end;
 
 
-{ TLuaResultBuffer object
+{ TLuaResult/Buffer object
   Temporary memory and argument manager for registered callbacks }
 
-  TLuaResultBuffer = object
+  TLuaResult = object
   protected
     FReturnAddress: Pointer;
     FItems: PLuaArgList;
@@ -875,12 +875,16 @@ type
     procedure FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
     procedure Finalize;
   public
+    property Items: PLuaArgList read FItems;
+    property Count: Integer read FCount write SetCount;
+  end;
+  PLuaResult = ^TLuaResult;
+
+  TLuaResultBuffer = object(TLuaResult)
+  public
     function  AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
     function  AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
     function  AllocSet(const SetInfo: PLuaSetInfo): Pointer;
-
-    property Items: PLuaArgList read FItems;
-    property Count: Integer read FCount write SetCount;
   end;
   PLuaResultBuffer = ^TLuaResultBuffer;
 
@@ -964,6 +968,7 @@ type
     FNames: __TLuaStringDictionary{<LuaString,__luaname>};
     FMetaTypes: __TLuaDictionary {Pointer, PMetaType};
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
+    FGlobalMetaTable: Integer;
 
     // глобальные процедуры, переменные, калбеки глобальных переменных из Lua
    (* GlobalNative: TLuaClassInfo; // нативные: методы и перменные
@@ -977,18 +982,22 @@ type
     procedure global_push_value(const Ref: Integer);
 
     // dictionaty: find or add (+ internal reference)
-    function GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
-    function GetLuaName(const Value: LuaString): __luaname;
+    function GetLuaNameScoped(const Value: LuaString): Pointer{LuaString}; {$ifNdef UNITSCOPENAMES}{$ifdef INLINESUPPORTSIMPLE}inline;{$endif}{$endif}
+    function GetLuaNameItem(const Value: LuaString; const ModeCreate: Boolean): Pointer{PLuaStringDictionaryItem};
 
-
-                (*
-    function  GetRecordInfo(const Name: string): PLuaRecordInfo;
-    function  GetArrayInfo(const Name: string): PLuaArrayInfo;
-    function  GetSetInfo(const Name: string): PLuaSetInfo;
-    function  GetVariable(const Name: string): Variant;
-    procedure SetVariable(const Name: string; const Value: Variant);
-    function  GetVariableEx(const Name: string): TLuaArg;
-    procedure SetVariableEx(const Name: string; const Value: TLuaArg);      *)
+    // public globals
+    function GetGlobalEntity(const Name: LuaString; const ModeCreate: Boolean): Pointer{PLuaGlobalEntity};
+    function GetRecordInfo(const Name: LuaString): PLuaRecordInfo;
+    function GetArrayInfo(const Name: LuaString): PLuaArrayInfo;
+    function GetSetInfo(const Name: LuaString): PLuaSetInfo;
+    function GetVariable(const Name: LuaString): Variant;
+    procedure SetVariable(const Name: LuaString; const Value: Variant);
+    function GetVariableEx(const Name: LuaString): TLuaArg;
+    procedure SetVariableEx(const Name: LuaString; const Value: TLuaArg);
+    function GetTableVariable(const Table, Name: LuaString): Variant;
+    procedure SetTableVariable(const Table, Name: LuaString; const Value: Variant);
+    function GetTableVariableEx(const Table, Name: LuaString): TLuaArg;
+    procedure SetTableVariableEx(const Table, Name: LuaString; const Value: TLuaArg);
 
     // найти глобальную переменную. если false, то Index - place в hash списке глобальных имён
  //   function  GlobalVariablePos(const Name: pchar; const NameLength: integer; var Index: integer; const auto_create: boolean=false): boolean;
@@ -1016,6 +1025,7 @@ type
     EnumerationList: TIntegerDynArray; // список enumeration typeinfo, чтобы по несколько раз не регистрировать Enum-ы
   *)     (*
     procedure INITIALIZE_NAME_SPACE();    *)
+    procedure InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1: __luapointer = -1; const P2: __luapointer = -1);
     function  InternalNearestClass(const AClass: TClass): PLuaMetaType;
     function  InternalRegMetaTable(const MetaType: PLuaMetaType = nil): Integer;
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
@@ -1042,10 +1052,10 @@ type
     function __operator(const ClassInfo: TLuaClassInfo; const Kind: integer): integer;
     function __constructor(const ClassInfo: TLuaClassInfo; const __create: boolean): integer;
     function __destructor(const ClassInfo: TLuaClassInfo; const __free: boolean): integer;
-    function __call(const ClassInfo: TLuaClassInfo): integer;
-    function __global_index(const native: boolean; const info: TLuaGlobalModifyInfo): integer;
-    function __global_newindex(const native: boolean; const info: TLuaGlobalModifyInfo): integer;
-    function __array_index(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
+    function __call(const ClassInfo: TLuaClassInfo): integer;   *)
+    function __global_index(const ModifyLow, ModifyHigh: Cardinal): Integer;
+    function __global_newindex(const ModifyLow, ModifyHigh: Cardinal): Integer;
+(*    function __array_index(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
     function __array_newindex(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
     function __array_dynamic_resize(): integer;
     function __array_include(const mode: integer{constructor, include, concat}): integer;
@@ -1055,7 +1065,7 @@ type
     // scripts and units routine
     FPointPreprocess: Boolean;
     FOnPreprocessScript: TLuaOnPreprocessScript;
-    FScriptStack: array[1..16] of TLuaResultBuffer;
+    FScriptStack: array[1 - 1{Call buffer}..16] of TLuaResultBuffer;
     FScriptStackIndex: NativeUInt;
     FArgs: TLuaArgs;
     FArgsCount: Integer;
@@ -1070,7 +1080,7 @@ type
     function  GetResultBuffer: PLuaResultBuffer;
     function  InternalConvertScript(var Data: __luabuffer): Integer;
     procedure InternalPreprocessScript(var Buffer: __luabuffer; const Offset: Integer);
-    function  InternalRunScript(var Data: __luabuffer; const Offset: Integer; const AUnitName: __luaname; const AUnit: TLuaUnit; const MakeResult: Boolean; const ReturnAddress: Pointer): Exception;
+    function  InternalRunScript(var Data: __luabuffer; const Offset: Integer; const AUnitName: __luaname; const AUnit: TLuaUnit; const MakeResult: Boolean; var ExceptionAddress: Pointer; const ReturnAddress: Pointer): Exception;
     procedure InternalLoadScript(var Data: __luabuffer; const UnitName: LuaString; const FileName: string; const ReturnAddress: Pointer);
  (*   function  InternalCheckArgsCount(PArgs: pinteger; ArgsCount: integer; const ProcName: string; const AClass: TClass): integer;
     function  StackArgument(const Index: integer): string; *)
@@ -1092,7 +1102,7 @@ type
     // scripts
     procedure RunScript(const Script: LuaString);
     procedure LoadScript(const FileName: string); overload;
-    procedure LoadScript(const ScriptBuffer: Pointer; const ScriptBufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString = ''); overload;
+    procedure LoadScript(const Buffer: Pointer; const BufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString = ''); overload;
     {$ifNdef LUA_NOCLASSES}
     procedure LoadScript(const Stream: TStream; const UnitName: LuaString; const ASize: Integer = -1); overload;
     {$endif}
@@ -1108,13 +1118,17 @@ type
     function  CheckArgsCount(const ArgsCount: array of integer; const ProcName: string=''; const AClass: TClass=nil): integer; overload;
     function  CheckArgsCount(const ArgsCount: TIntegerDynArray; const ProcName: string=''; const AClass: TClass=nil): integer; overload;
     procedure CheckArgsCount(const ArgsCount: integer; const ProcName: string=''; const AClass: TClass=nil); overload;
-      *)  (*
-    // вызовы
-    function VariableExists(const Name: string): boolean;
-    function ProcExists(const ProcName: string): boolean;
-    function Call(const ProcName: string; const Args: TLuaArgs): TLuaArg; overload;
-    function Call(const ProcName: string; const Args: array of const): TLuaArg;  overload;
-        *)
+      *)
+    // methods
+    function VariableExists(const Name: LuaString): Boolean; overload;
+    function ProcExists(const Name: LuaString): Boolean; overload;
+    function VariableExists(const Table, Name: LuaString): Boolean; overload;
+    function ProcExists(const Table, Name: LuaString): Boolean; overload;
+    function Call(const ProcName: LuaString; const Args: array of TLuaArg): PLuaResult; overload;
+    function Call(const ProcName: LuaString; const Args: array of const): PLuaResult; overload;
+    function Call(const Table, ProcName: LuaString; const Args: array of TLuaArg): PLuaResult; overload;
+    function Call(const Table, ProcName: LuaString; const Args: array of const): PLuaResult; overload;
+
     // registrations
     procedure RegClass(const AClass: TClass; const UsePublished: Boolean = True);
     procedure RegClasses(const AClasses: array of TClass; const UsePublished: Boolean = True);
@@ -1131,12 +1145,14 @@ type
                   *)
     // advanced properties
     property ResultBuffer: PLuaResultBuffer read GetResultBuffer;
-  (*  property Variable[const Name: string]: Variant read GetVariable write SetVariable;
-    property VariableEx[const Name: string]: TLuaArg read GetVariableEx write SetVariableEx;
-    property RecordInfo[const Name: string]: PLuaRecordInfo read GetRecordInfo;
-    property ArrayInfo[const Name: string]: PLuaArrayInfo read GetArrayInfo;
-    property SetInfo[const Name: string]: PLuaSetInfo read GetSetInfo;
-   *)
+    property Variable[const Name: LuaString]: Variant read GetVariable write SetVariable;
+    property VariableEx[const Name: LuaString]: TLuaArg read GetVariableEx write SetVariableEx;
+    property TableVariable[const Table, Name: LuaString]: Variant read GetTableVariable write SetTableVariable;
+    property TableVariableEx[const Table, Name: LuaString]: TLuaArg read GetTableVariableEx write SetTableVariableEx;
+    property RecordInfo[const Name: LuaString]: PLuaRecordInfo read GetRecordInfo;
+    property ArrayInfo[const Name: LuaString]: PLuaArrayInfo read GetArrayInfo;
+    property SetInfo[const Name: LuaString]: PLuaSetInfo read GetSetInfo;
+
     // basic properties
     property Handle: Pointer read FHandle;
     property Args: TLuaArgs read FArgs;
@@ -4235,7 +4251,7 @@ begin
 end;
 
 
-{ TLuaResultBuffer }
+{ TLuaResult }
 
 {$if Defined(FPC) or (CompilerVersion < 24)}
 function AtomicDecrement(var Target: Integer): Integer;
@@ -4252,7 +4268,7 @@ asm
 end;
 {$ifend}
 
-procedure TLuaResultBuffer.GrowCapacity(var List: PLuaArgList; var Capacity: Integer; const Value: Integer);
+procedure TLuaResult.GrowCapacity(var List: PLuaArgList; var Capacity: Integer; const Value: Integer);
 label
   new, resize;
 var
@@ -4305,7 +4321,7 @@ begin
   end;
 end;
 
-procedure TLuaResultBuffer.SetCount(const Value: Integer);
+procedure TLuaResult.SetCount(const Value: Integer);
 var
   Rec: PDynArrayRec;
 begin
@@ -4324,7 +4340,7 @@ begin
   end;
 end;
 
-procedure TLuaResultBuffer.SetParamCount(const Value: Integer);
+procedure TLuaResult.SetParamCount(const Value: Integer);
 var
   Rec: PDynArrayRec;
 begin
@@ -4343,7 +4359,7 @@ begin
   end;
 end;
 
-function TLuaResultBuffer.GrowAlloc(Size: NativeUInt): Pointer;
+function TLuaResult.GrowAlloc(Size: NativeUInt): Pointer;
 var
   Heap: ^TLuaMemoryHeap;
   First: Boolean;
@@ -4363,7 +4379,7 @@ begin
   end;
 end;
 
-function TLuaResultBuffer.Alloc(Size: NativeUInt): Pointer;
+function TLuaResult.Alloc(Size: NativeUInt): Pointer;
 var
   Ptr: NativeUInt;
 begin
@@ -4396,7 +4412,7 @@ type
     Next: PMetaStruct;
   end;
 
-function TLuaResultBuffer.AllocMetaType(const MetaType: PLuaMetaType): Pointer;
+function TLuaResult.AllocMetaType(const MetaType: PLuaMetaType): Pointer;
 var
   Size: NativeUInt;
   MetaStruct: PMetaStruct;
@@ -4441,22 +4457,7 @@ begin
   Result := MetaStruct;
 end;
 
-function  TLuaResultBuffer.AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
-begin
-  Result := AllocMetaType(RecordInfo);
-end;
-
-function  TLuaResultBuffer.AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
-begin
-  Result := AllocMetaType(ArrayInfo);
-end;
-
-function  TLuaResultBuffer.AllocSet(const SetInfo: PLuaSetInfo): Pointer;
-begin
-  Result := AllocMetaType(SetInfo);
-end;
-
-procedure TLuaResultBuffer.Clear;
+procedure TLuaResult.Clear;
 var
   MetaStruct: PMetaStruct;
   MetaType: PLuaMetaType;
@@ -4507,7 +4508,7 @@ begin
   end;
 end;
 
-procedure TLuaResultBuffer.FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
+procedure TLuaResult.FinalizeArgs(var List: PLuaArgList; var Capacity, ACount: Integer);
 var
   i, ItemsCount: Integer;
   Rec: PDynArrayRec;
@@ -4538,12 +4539,29 @@ begin
   end;
 end;
 
-procedure TLuaResultBuffer.Finalize;
+procedure TLuaResult.Finalize;
 begin
   Clear;
   TLuaMemoryHeap(FHeap).FBuffers := nil;
   FinalizeArgs(FItems, FCapacity, FCount);
   FinalizeArgs(FParamItems, FParamCapacity, FParamCount);
+end;
+
+{ TLuaResultBuffer }
+
+function  TLuaResultBuffer.AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
+begin
+  Result := AllocMetaType(RecordInfo);
+end;
+
+function  TLuaResultBuffer.AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
+begin
+  Result := AllocMetaType(ArrayInfo);
+end;
+
+function  TLuaResultBuffer.AllocSet(const SetInfo: PLuaSetInfo): Pointer;
+begin
+  Result := AllocMetaType(SetInfo);
 end;
 
 
@@ -6266,6 +6284,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -6290,6 +6309,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -6312,6 +6332,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -6465,19 +6486,18 @@ type
     ReturnAddress: Pointer; // native exception call address
 
     case Integer of
-      0: (IsConst: Boolean); // used during __index_prop_push
+      0: (ConstMode: Boolean); // used during __index_prop_push
       1: (StackIndex: Integer); // used during __newindex_prop_set
   end;
 
   // global entity
-  TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst, gkScriptVariable);
-  TLuaGlobalEntity = packed record
-    Name: __luaname;
+  TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst{Script}, gkScriptVariable);
+  TLuaGlobalEntity = record
     Kind: TLuaGlobalKind;
-    IsConst: Boolean; // True means can't be changed by native Variables[] property
+    ConstMode: Boolean; // True means can't be changed by native Variables[] property
     case Integer of
-      0: (Ref: Integer); // script entity LUA_GLOBALSINDEX index
-      1: (Ptr: __luapointer);
+      0: (Ptr: __luapointer);
+      1: (Ref: Integer); // script entity LUA_GLOBALSINDEX index
   end;
   PLuaGlobalEntity = ^TLuaGlobalEntity;
 
@@ -6489,7 +6509,7 @@ type
 
     Kind: TLuaUserDataKind;
     ArrayParams: Byte; // Count(4bits) and Filled(4bits) for difficult properties
-    IsConst: Boolean;
+    ConstMode: Boolean;
     GcDestroy: Boolean; // automatically call finalizer/destructor
 
     MetaType: __luapointer;
@@ -7746,14 +7766,10 @@ begin
 
       if (X <= 13) then
       case X of
-        10:
+        10, 13:
         begin
           Inc(Index);
-        end;
-        13:
-        begin
-          Inc(Index);
-          if (Size > 0) and (Chars^ = 10) then
+          if (Size > 0) and (Chars^ = X xor 7) then
           begin
             Inc(Chars);
             Dec(Size);
@@ -7783,9 +7799,9 @@ begin
       case X of
         10, 13:
         begin
-          FLines[Index].Count := NativeInt(Chars) - NativeInt(FLines[Index].Chars);
+          FLines[Index].Count := NativeInt(Chars) - NativeInt(FLines[Index].Chars) - 1;
           Inc(Index);
-          if (X = 13) and (Size > 0) and (Chars^ = 10) then
+          if (Size > 0) and (Chars^ = X xor 7) then
           begin
             Inc(Chars);
             Dec(Size);
@@ -7874,6 +7890,25 @@ end;
 
 
 { TLua }
+
+const
+  ID_INDEX: array[0..7] of Byte = (Ord('_'), Ord('_'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
+  ID_NEWINDEX: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('n'), Ord('e'), Ord('w'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
+  ID_LEN: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), Ord('n'), 0);
+  ID_CALL: array[0..6] of Byte = (Ord('_'), Ord('_'), Ord('c'), Ord('a'), Ord('l'), Ord('l'), 0);
+  ID_GC: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('g'), Ord('c'), 0);
+  ID_TOSTRING: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('t'), Ord('o'), Ord('s'), Ord('t'), Ord('r'), Ord('i'), Ord('n'), Ord('g'), 0);
+  ID_UNM: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('u'), Ord('n'), Ord('m'), 0);
+  ID_ADD: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('a'), Ord('d'), Ord('d'), 0);
+  ID_SUB: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('s'), Ord('u'), Ord('b'), 0);
+  ID_MUL: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('m'), Ord('u'), Ord('l'), 0);
+  ID_DIV: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('d'), Ord('i'), Ord('v'), 0);
+  ID_MOD: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('m'), Ord('o'), Ord('d'), 0);
+  ID_POW: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('p'), Ord('o'), Ord('w'), 0);
+  ID_EQ: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('e'), Ord('q'), 0);
+  ID_LT: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('t'), 0);
+  ID_LE: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), 0);
+  ID_CONCAT: array[0..8] of Byte = (Ord('_'), Ord('_'), Ord('c'), Ord('o'), Ord('n'), Ord('c'), Ord('a'), Ord('t'), 0);
                              (*
 // низкий уровень. адрес функции lua.dll
 function __TLuaGetProcAddress(const Self: TClass; const ProcName: pchar;
@@ -7952,6 +7987,17 @@ begin
   FHandle := lua_open;
   luaL_openlibs(Handle);
 
+  // global callbacks
+  FGlobalMetaTable := InternalRegMetaTable;
+  global_push_value(FGlobalMetaTable);
+  InternalRegisterCallback(Pointer(@ID_INDEX), @TLua.__global_index, 0, 0);
+  InternalRegisterCallback(Pointer(@ID_NEWINDEX), @TLua.__global_newindex, 0, 0);
+  lua_settop(Handle, 0);
+
+  //InternalAddClass(TObject, False, nil)
+
+//  RegClass(TObject, False);
+//  Reg
 
   (*
   // метатаблица для сложных свойств
@@ -8123,6 +8169,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -10121,7 +10168,7 @@ begin
             Data := UserData.Instance;
             Info := Pointer(MetaType);
             FIsRef := not UserData.GcDestroy;
-            FIsConst := UserData.IsConst;
+            FIsConst := UserData.ConstMode;
           end;
         end;
         ukProperty:
@@ -10942,6 +10989,10 @@ begin
   if (Pointer(UnitName^) = nil) then
   begin
     UnitName^ := 'GLOBAL_NAME_SPACE';
+  end else
+  if (AUnit = nil) then
+  begin
+    AUnit := GetUnitByName(UnitName^);
   end;
   if (AUnit <> nil) and (Cardinal(UnitLine) > Cardinal(AUnit.FLinesCount)) then AUnit := nil;
 
@@ -11026,7 +11077,7 @@ var
 begin
   Index := FScriptStackIndex;
   Dec(Index);
-  if (Index > High(FScriptStack) - Low(FScriptStack)) then
+  if (Index > High(FScriptStack) - 1{Low(FScriptStack)}) then
     raise EInvalidScriptStackIndex(Index + 1) at ReturnAddress;
 
   FScriptStackIndex := Index;
@@ -11054,7 +11105,7 @@ var
   Index: NativeUInt;
 begin
   Index := FScriptStackIndex;
-  if (Index - Low(FScriptStack) > High(FScriptStack) - Low(FScriptStack)) then
+  if (Index - 1{Low(FScriptStack)} > High(FScriptStack) - 1{Low(FScriptStack)}) then
     raise EInvalidScriptStackIndex(Index);
 
   Result := @FScriptStack[Index];
@@ -11183,16 +11234,12 @@ begin
   end;
 end;
 
-function TLua.GetLuaNameItem(const Value: LuaString): Pointer{PLuaStringDictionaryItem};
-label
-  has_item;
+function TLua.GetLuaNameScoped(const Value: LuaString): Pointer{LuaString};
+{$ifdef UNITSCOPENAMES}
 var
-  {$ifdef UNITSCOPENAMES}
   i, j: Integer;
   S: PLuaChar;
-  {$endif}
-  Item: ^TLuaStringDictionaryItem;
-  Ref: Integer;
+{$endif}
 begin
   {$ifdef UNITSCOPENAMES}
     S := Pointer(Value);
@@ -11210,18 +11257,26 @@ begin
           Inc(S);
         end;
 
-        Item := TLuaStringDictionary(FNames).InternalFind(FStringBuffer.Lua, True);
-        goto has_item;
+        Result := Pointer(FStringBuffer.Lua);
+        Exit;
       end;
 
       Inc(S);
     end;
   {$endif}
 
-  Item := TLuaStringDictionary(FNames).InternalFind(Value, True);
+  Result := Pointer(Value);
+end;
 
-has_item:
-  if (Item.Value = nil) then
+function TLua.GetLuaNameItem(const Value: LuaString; const ModeCreate: Boolean): Pointer{PLuaStringDictionaryItem};
+label
+  has_item;
+var
+  Item: ^TLuaStringDictionaryItem;
+  Ref: Integer;
+begin
+  Item := TLuaStringDictionary(FNames).InternalFind(LuaString(GetLuaNameScoped(Value)), ModeCreate);
+  if (Assigned(Item)) and (Item.Value = nil) then
   begin
     Ref := global_alloc_ref;
     push_lua_string(Value);
@@ -11232,67 +11287,741 @@ has_item:
   Result := Item;
 end;
 
-function TLua.GetLuaName(const Value: LuaString): __luaname;
+function TLua.GetGlobalEntity(const Name: LuaString; const ModeCreate: Boolean): Pointer;
+label
+  not_found;
+var
+  ScopedName: Pointer;
+  Item: ^TLuaStringDictionaryItem;
+  EntityItem: ^TLuaDictionaryItem;
+  Ref: Integer;
+  LuaName: __luaname;
+  Ptr: __luapointer;
 begin
-  Result := PLuaStringDictionaryItem(GetLuaNameItem(Value)).Value;
+  ScopedName := GetLuaNameScoped(Name);
+  Item := TLuaStringDictionary(FNames).InternalFind(LuaString(ScopedName), ModeCreate);
+
+  if (Assigned(Item)) and (Item.Value <> nil) then
+  begin
+    // known unicode/ansi name: find global entity
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(Item.Value, ModeCreate);
+    if (not Assigned(EntityItem)) then goto not_found;
+  end else
+  begin
+    // unknown unicode/ansi name
+    // get __luaname value
+    Ref := global_alloc_ref;
+    push_lua_string(Name);
+    LuaName := lua_tolstring(Handle, -1, nil);
+    global_fill_value(Ref);
+
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(LuaName, ModeCreate);
+    if (Assigned(EntityItem)) then
+    begin
+      // found or added: add known unicode/ansi name
+      if (not Assigned(Item)) then Item := TLuaStringDictionary(FNames).InternalFind(LuaString(ScopedName), True);
+      Item.Value := LuaName;
+    end else
+    begin
+      // find mode, name not exists: release __luaname, return empty
+      global_free_ref(Ref);
+    not_found:
+      Result := nil;
+      Exit;
+    end;
+  end;
+
+  // retreave or add empty global entity
+  Ptr := EntityItem.Value;
+  if (Ptr = LUA_POINTER_INVALID) then
+  begin
+    Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaGlobalEntity));
+    EntityItem.Value := Ptr;
+    Result := {$ifdef SMALLINT}Pointer(Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr){$endif};
+    PInteger(Result)^ := 0;
+    PLuaGlobalEntity(Result).Ptr := LUA_POINTER_INVALID;
+  end else
+  begin
+    Result := {$ifdef SMALLINT}Pointer(Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr){$endif};
+  end;
 end;
 
-                          (*
-// Index - позиция переменной в глобальном списке GlobalVariables если результат = true
-// если false, то Index = place в массиве NameSpaceHash
-// если выставлен флаг auto_create, то переменная создаётся, но результат всёравно False
-function  TLua.GlobalVariablePos(const Name: pchar; const NameLength: integer; var Index: integer; const auto_create: boolean): boolean;
+function TLua.GetRecordInfo(const Name: LuaString): PLuaRecordInfo;
 var
-  NameHash, Len, Ret: integer;
+  Entity: PLuaGlobalEntity;
 begin
-  NameHash := StringHash(Name, NameLength);
-  Len := Length(NameSpaceHash);
-  Ret := InsortedPlace8(NameHash, pointer(NameSpaceHash), Len);
-
-  // найти
-  while (Ret < Len) and (NameSpaceHash[Ret].Hash = NameHash) do
+  Entity := GetGlobalEntity(Name, False);
+  if (Assigned(Entity)) and (Entity.Kind = gkMetaType) then
   begin
-    Index := NameSpaceHash[Ret].Index;
-    if (SameStrings(GlobalVariables[Index]._Name, Name, NameLength)) then
-    begin
-      Result := true;
-      exit;
-    end;
-
-    inc(Ret);
+    Result := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+    if (Result.F.Kind = mkRecord) then Exit;
   end;
 
-  // не найден
-  Index := Ret;
-  Result := false;
+  Result := nil;
+end;
 
-  // если необходимо создать
-  if (auto_create) then
+function TLua.GetArrayInfo(const Name: LuaString): PLuaArrayInfo;
+var
+  Entity: PLuaGlobalEntity;
+begin
+  Entity := GetGlobalEntity(Name, False);
+  if (Assigned(Entity)) and (Entity.Kind = gkMetaType) then
   begin
-    Len := Length(GlobalVariables);
-    SetLength(GlobalVariables, Len+1);
-
-    // инициализация переменной
-    with GlobalVariables[Len] do
-    begin
-      _Name := Name;
-      _Kind := low(TLuaGlobalKind);
-      IsConst := false;
-      Ref := 0; 
-    end;
-
-    // добавление в Hash-список
-    with TLuaHashIndex(DynArrayInsert(GlobalNative.NameSpace, typeinfo(TLuaHashIndexDynArray), Ret)^) do
-    begin
-      Hash := NameHash;
-      Index := Len;
-    end;
-
-    // результат
-    Index := Len;
+    Result := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+    if (Result.F.Kind = mkArray) then Exit;
   end;
-end;      *)
 
+  Result := nil;
+end;
+
+function TLua.GetSetInfo(const Name: LuaString): PLuaSetInfo;
+var
+  Entity: PLuaGlobalEntity;
+begin
+  Entity := GetGlobalEntity(Name, False);
+  if (Assigned(Entity)) and (Entity.Kind = gkMetaType) then
+  begin
+    Result := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+    if (Result.F.Kind = mkSet) then Exit;
+  end;
+
+  Result := nil;
+end;
+
+type
+  TLuaGlobalModify = record
+    Name: ^LuaString;
+    ReturnAddress: Pointer;
+    VariantMode: Boolean;
+    case Boolean of
+      False: (Arg: PLuaArg);
+       True: (V: PVariant);
+  end;
+
+procedure __TLuaGetVariable(const Self: TLua; const Name: LuaString; var Result: Variant; const ReturnAddress: Pointer);
+var
+  Modify: TLuaGlobalModify;
+  Ptr: NativeUInt;
+begin
+  Modify.Name := @Name;
+  Modify.ReturnAddress := ReturnAddress;
+  Modify.VariantMode := True;
+  Modify.V := @Result;
+
+  Ptr := NativeUInt(@Modify);
+  Self.__global_index(Cardinal(Ptr), {$ifdef LARGEINT}Ptr shr 32{$else}0{$endif});
+end;
+
+function TLua.GetVariable(const Name: LuaString): Variant;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    push [esp]
+  {$else .CPUX64}
+    mov r9, [rsp]
+  {$endif}
+  jmp __TLuaGetVariable
+end;
+{$else}
+begin
+  __TLuaGetVariable(Self, Name, Result, ReturnAddress);
+end;
+{$endif}
+
+procedure __TLuaSetVariable(const Self: TLua; const Name: LuaString; const Value: Variant; const ReturnAddress: Pointer);
+var
+  Modify: TLuaGlobalModify;
+  Ptr: NativeUInt;
+begin
+  Modify.Name := @Name;
+  Modify.ReturnAddress := ReturnAddress;
+  Modify.VariantMode := True;
+  Modify.V := @Value;
+
+  Ptr := NativeUInt(@Modify);
+  Self.__global_newindex(Cardinal(Ptr), {$ifdef LARGEINT}Ptr shr 32{$else}0{$endif});
+end;
+
+procedure TLua.SetVariable(const Name: LuaString; const Value: Variant);
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    push [esp]
+  {$else .CPUX64}
+    mov r9, [rsp]
+  {$endif}
+  jmp __TLuaSetVariable
+end;
+{$else}
+begin
+  __TLuaSetVariable(Self, Name, Value, ReturnAddress);
+end;
+{$endif}
+
+procedure __TLuaGetVariableEx(const Self: TLua; const Name: LuaString; var Result: TLuaArg; const ReturnAddress: Pointer);
+var
+  Modify: TLuaGlobalModify;
+  Ptr: NativeUInt;
+begin
+  Modify.Name := @Name;
+  Modify.ReturnAddress := ReturnAddress;
+  Modify.VariantMode := False;
+  Modify.Arg := @Result;
+
+  Ptr := NativeUInt(@Modify);
+  Self.__global_index(Cardinal(Ptr), {$ifdef LARGEINT}Ptr shr 32{$else}0{$endif});
+end;
+
+function TLua.GetVariableEx(const Name: LuaString): TLuaArg;
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    push [esp]
+  {$else .CPUX64}
+    mov r9, [rsp]
+  {$endif}
+  jmp __TLuaGetVariable
+end;
+{$else}
+begin
+  __TLuaGetVariableEx(Self, Name, Result, ReturnAddress);
+end;
+{$endif}
+
+procedure __TLuaSetVariableEx(const Self: TLua; const Name: LuaString; const Value: TLuaArg; const ReturnAddress: Pointer);
+var
+  Modify: TLuaGlobalModify;
+  Ptr: NativeUInt;
+begin
+  Modify.Name := @Name;
+  Modify.ReturnAddress := ReturnAddress;
+  Modify.VariantMode := False;
+  Modify.Arg := @Value;
+
+  Ptr := NativeUInt(@Modify);
+  Self.__global_newindex(Cardinal(Ptr), {$ifdef LARGEINT}Ptr shr 32{$else}0{$endif});
+end;
+
+procedure TLua.SetVariableEx(const Name: LuaString; const Value: TLuaArg);
+{$ifdef CPUINTEL}
+asm
+  {$ifdef CPUX86}
+    push [esp]
+  {$else .CPUX64}
+    mov r9, [rsp]
+  {$endif}
+  jmp __TLuaSetVariable
+end;
+{$else}
+begin
+  __TLuaSetVariableEx(Self, Name, Value, ReturnAddress);
+end;
+{$endif}
+
+function TLua.VariableExists(const Name: LuaString): Boolean;
+var
+  Entity: PLuaGlobalEntity;
+  LuaType: Integer;
+begin
+  Entity := GetGlobalEntity(Name, False);
+  if (Assigned(Entity)) then
+  begin
+    if (Entity.Kind in [gkMetaType, gkVariable, gkConst]) then
+    begin
+      Result := True;
+      Exit;
+    end else
+    if (Entity.Kind = gkScriptVariable) then
+    begin
+      global_push_value(Entity.Ref);
+      LuaType := lua_type(Handle, -1);
+      stack_pop;
+
+      Result := (LuaType <> LUA_TNONE) and (LuaType <> LUA_TFUNCTION);
+      Exit;
+    end;
+  end;
+
+  Result := False;
+end;
+
+function TLua.ProcExists(const Name: LuaString): Boolean;
+var
+  Entity: PLuaGlobalEntity;
+  LuaType: Integer;
+begin
+  Entity := GetGlobalEntity(Name, False);
+  if (Assigned(Entity)) then
+  begin
+    if (Entity.Kind = gkProc) then
+    begin
+      Result := True;
+      Exit;
+    end else
+    if (Entity.Kind = gkScriptVariable) then
+    begin
+      global_push_value(Entity.Ref);
+      LuaType := lua_type(Handle, -1);
+      stack_pop;
+
+      Result := (LuaType = LUA_TFUNCTION);
+      Exit;
+    end;
+  end;
+
+  Result := False;
+end;
+
+function InternalLuaTableVariable(const Self: TLua; const Table: LuaString; const Name: PLuaString): Boolean;
+var
+  Entity: PLuaGlobalEntity;
+begin
+  Entity := Self.GetGlobalEntity(Table, False);
+  if (Assigned(Entity)) and (Entity.Kind = gkScriptVariable) then
+  begin
+    Self.global_push_value(Entity.Ref);
+    if (lua_type(Self.Handle, -1) = LUA_TTABLE) then
+    begin
+      if (Assigned(Name)) then
+      begin
+        Self.push_lua_string(Name^);
+        lua_rawget(Self.Handle, -2);
+      end;
+
+      Result := True;
+      Exit;
+    end;
+    lua_settop(Self.Handle, 0);
+  end;
+
+  Result := False;
+end;
+
+procedure __TLuaGetTableVariable(const Self: TLua; const Table, Name: LuaString;
+  const Result: Pointer; const ReturnAddress: Pointer; const VariantMode: Boolean);
+var
+  LuaType: Integer;
+  Supported: Boolean;
+begin
+  if (InternalLuaTableVariable(Self, Table, @Name)) then
+  begin
+    LuaType := lua_type(Self.Handle, -1);
+    if (LuaType > LUA_TNIL) and (LuaType <> LUA_TFUNCTION) then
+    begin
+      if (VariantMode) then
+      begin
+        Supported := Self.stack_variant(PVariant(Result)^, -1);
+      end else
+      begin
+        Supported := Self.stack_luaarg(PLuaArg(Result)^, -1, False);
+      end;
+
+      lua_settop(Self.Handle, 0);
+      if (not Supported) then
+      begin
+        raise ELua.CreateFmt('Can''t get variable "%s.%s" of type "%s"', [Table, Name,
+          Self.FStringBuffer.Default]) at ReturnAddress;
+      end;
+      Exit;
+    end else
+    begin
+      lua_settop(Self.Handle, 0);
+    end;
+  end;
+
+  raise ELua.CreateFmt('Table variable "%s.%s" not found', [Table, Name]) at ReturnAddress;
+end;
+
+function TLua.GetTableVariable(const Table, Name: LuaString): Variant;
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaGetTableVariable(Self, Table, Name, @Result, ReturnAddress, True);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push 1
+  push [esp + 4]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaGetTableVariable
+end;
+{$endif}
+
+function TLua.GetTableVariableEx(const Table, Name: LuaString): TLuaArg;
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaGetTableVariable(Self, Table, Name, @Result, ReturnAddress, False);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push 0
+  push [esp + 4]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaGetTableVariable
+end;
+{$endif}
+
+procedure __TLuaSetTableVariable(const Self: TLua; const Table, Name: LuaString;
+  const Value: Pointer; const ReturnAddress: Pointer; const VariantMode: Boolean);
+var
+  Supported: Boolean;
+begin
+  if (InternalLuaTableVariable(Self, Table, nil)) then
+  begin
+    Self.push_lua_string(Name);
+
+    if (VariantMode) then
+    begin
+      Supported := Self.push_variant(PVariant(Value)^);
+    end else
+    begin
+      Supported := Self.push_luaarg(PLuaArg(Value)^);
+    end;
+
+    if (Supported) then
+    begin
+      lua_rawset(Self.Handle, -3);
+      lua_settop(Self.Handle, 0);
+    end else
+    begin
+      lua_settop(Self.Handle, 0);
+      raise ELua.CreateFmt('Can''t set variable "%s.%s" of type "%s"', [Table, Name,
+        Self.FStringBuffer.Default]) at ReturnAddress;
+    end;
+    Exit;
+  end;
+
+  raise ELua.CreateFmt('Table "%s" not found', [Table]) at ReturnAddress;
+end;
+
+procedure TLua.SetTableVariable(const Table, Name: LuaString; const Value: Variant);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaSetTableVariable(Self, Table, Name, @Value, ReturnAddress, True);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push 1
+  push [esp + 4]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaSetTableVariable
+end;
+{$endif}
+
+procedure TLua.SetTableVariableEx(const Table, Name: LuaString; const Value: TLuaArg);
+{$ifdef RETURNADDRESS}
+begin
+  __TLuaSetTableVariable(Self, Table, Name, @Value, ReturnAddress, False);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push 0
+  push [esp + 4]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaSetTableVariable
+end;
+{$endif}
+
+function TLua.VariableExists(const Table, Name: LuaString): Boolean;
+var
+  LuaType: Integer;
+begin
+  if (InternalLuaTableVariable(Self, Table, @Name)) then
+  begin
+    LuaType := lua_type(Handle, -1);
+    lua_settop(Handle, 0);
+    Result := (LuaType > LUA_TNIL) and (LuaType <> LUA_TFUNCTION);
+    Exit;
+  end;
+
+  Result := False;
+end;
+
+function TLua.ProcExists(const Table, Name: LuaString): Boolean;
+var
+  LuaType: Integer;
+begin
+  if (InternalLuaTableVariable(Self, Table, @Name)) then
+  begin
+    LuaType := lua_type(Handle, -1);
+    lua_settop(Handle, 0);
+    Result := (LuaType = LUA_TFUNCTION);
+    Exit;
+  end;
+
+  Result := False;
+end;
+
+type
+  TLuaCallOptions = record
+    Table: ^LuaString;
+    ProcName: ^LuaString;
+    ReturnAddress: Pointer;
+    Count: Integer;
+    VarRecMode: Boolean;
+    case Boolean of
+      False: (Arg: PLuaArg);
+       True: (V: PVarRec);
+  end;
+
+function InternalLuaCall(const Self: TLua; const Options: TLuaCallOptions): PLuaResult;
+label
+  clear_not_found, not_found, fail_argument;
+var
+  Entity: PLuaGlobalEntity;
+  Proc: ^TLuaProcInfo;
+  Arg: PLuaArg;
+  V: PVarRec;
+  i, Count, ErrCode: Integer;
+begin
+  Self.BeginScriptStack(Options.ReturnAddress);
+  try
+    if (Assigned(Options.Table)) then
+    begin
+      // push table function
+      Entity := Self.GetGlobalEntity(Options.Table^, False);
+      if (Assigned(Entity)) then
+      begin
+        if (Entity.Kind <> gkScriptVariable) then goto not_found;
+        Self.global_push_value(Entity.Ref);
+        if (lua_type(Self.Handle, -1) <> LUA_TTABLE) then goto clear_not_found;
+        Self.push_lua_string(Options.ProcName^);
+        lua_rawget(Self.Handle, -2);
+        if (lua_type(Self.Handle, -1) <> LUA_TFUNCTION) then goto clear_not_found;
+        lua_insert(Self.Handle, -2);
+      end;
+    end else
+    begin
+      // push global function
+      Entity := Self.GetGlobalEntity(Options.ProcName^, False);
+      if (Assigned(Entity)) then
+      begin
+        case Entity.Kind of
+          gkProc:
+          begin
+            Proc := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(Self.FMemoryHeap).Unpack(Entity.Ptr){$endif};
+            lua_pushcclosure(Self.Handle, Proc.CFunction, 0);
+          end;
+          gkScriptVariable:
+          begin
+            Self.global_push_value(Entity.Ref);
+            if (lua_type(Self.Handle, -1) <> LUA_TFUNCTION) then
+            begin
+            clear_not_found:
+              lua_settop(Self.Handle, 0);
+              goto not_found;
+            end;
+          end;
+        else
+        not_found:
+          Entity := nil;
+        end;
+      end;
+    end;
+
+    // check not found
+    if (not Assigned(Entity)) then
+    begin
+      Result := nil;
+      if (Assigned(Options.Table)) then
+      begin
+        raise ELua.CreateFmt('Lua table function "%s:%s" not found',
+          [Options.Table^, Options.ProcName^]) at Options.ReturnAddress;
+      end else
+      begin
+        raise ELua.CreateFmt('Lua function "%s" not found', [Options.ProcName^]) at Options.ReturnAddress;
+      end;
+    end;
+
+    // push arguments
+    if (Options.VarRecMode) then
+    begin
+      V := Options.V;
+      for i := 1 to Options.Count do
+      begin
+        if (not Self.push_argument(V^)) then
+        begin
+          ErrCode := i;
+          goto fail_argument;
+        end;
+        Inc(V);
+      end;
+    end else
+    begin
+      Arg := Options.Arg;
+      for i := 1 to Options.Count do
+      begin
+        if (not Self.push_luaarg(Arg^)) then
+        begin
+          ErrCode := i;
+        fail_argument:
+          lua_settop(Self.Handle, 0);
+          raise ELua.CreateFmt('Unknown argument type "%s" (arg N%d)', [Self.FStringBuffer.Default, ErrCode]) at Options.ReturnAddress;
+        end;
+        Inc(Arg);
+      end;
+    end;
+
+    // call
+    ErrCode := lua_pcall(Self.Handle, Options.Count + Ord(Assigned(Options.Table)), LUA_MULTRET, 0);
+    if (ErrCode = 0) then ErrCode := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
+    if (ErrCode <> 0) then Self.CheckScriptError(ErrCode, Options.ReturnAddress, nil);
+
+    // fill buffer
+    Result := @Self.FScriptStack[Self.FScriptStackIndex - 1];
+    Count := lua_gettop(Self.Handle);
+    Result.Count := Count;
+    for i := 0 to Count - 1 do
+    begin
+      if (not Self.stack_luaarg(Result.Items[i], i + 1, False)) then
+        Result.Items[i].F.LuaType := ltEmpty;
+    end;
+
+    // clear stack
+    lua_settop(Self.Handle, 0);
+  finally
+    Self.EndScriptStack(Options.ReturnAddress);
+  end;
+end;
+
+function __TLuaCall_luaargs(const Self: TLua; const ProcName: LuaString;
+  const Args: array of TLuaArg; const ReturnAddress: Pointer): PLuaResult;
+var
+  Options: TLuaCallOptions;
+begin
+  Options.Table := nil;
+  Options.ProcName := @ProcName;
+  Options.ReturnAddress := ReturnAddress;
+  Options.Count := Length(Args);
+  Options.VarRecMode := False;
+  Options.Arg := Pointer(@Args[0]);
+  Result := InternalLuaCall(Self, Options);
+end;
+
+function TLua.Call(const ProcName: LuaString; const Args: array of TLuaArg): PLuaResult;
+{$ifdef RETURNADDRESS}
+begin
+  Result := __TLuaCall_luaargs(Self, ProcName, Args, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaCall_luaargs
+end;
+{$endif}
+
+function __TLuaCall__arguments(const Self: TLua; const ProcName: LuaString;
+  const Args: array of const; const ReturnAddress: Pointer): PLuaResult;
+var
+  Options: TLuaCallOptions;
+begin
+  Options.Table := nil;
+  Options.ProcName := @ProcName;
+  Options.ReturnAddress := ReturnAddress;
+  Options.Count := Length(Args);
+  Options.VarRecMode := True;
+  Options.Arg := Pointer(@Args[0]);
+  Result := InternalLuaCall(Self, Options);
+end;
+
+function TLua.Call(const ProcName: LuaString; const Args: array of const): PLuaResult;
+{$ifdef RETURNADDRESS}
+begin
+  Result := __TLuaCall__arguments(Self, ProcName, Args, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaCall__arguments
+end;
+{$endif}
+
+function __TLuaTableCall_luaargs(const Self: TLua; const Table, ProcName: LuaString;
+  const Args: array of TLuaArg; const ReturnAddress: Pointer): PLuaResult;
+var
+  Options: TLuaCallOptions;
+begin
+  Options.Table := @Table;
+  Options.ProcName := @ProcName;
+  Options.ReturnAddress := ReturnAddress;
+  Options.Count := Length(Args);
+  Options.VarRecMode := False;
+  Options.Arg := Pointer(@Args[0]);
+  Result := InternalLuaCall(Self, Options);
+end;
+
+function TLua.Call(const Table, ProcName: LuaString; const Args: array of TLuaArg): PLuaResult;
+{$ifdef RETURNADDRESS}
+begin
+  Result := __TLuaTableCall_luaargs(Self, Table, ProcName, Args, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaTableCall_luaargs
+end;
+{$endif}
+
+function __TLuaTableCall__arguments(const Self: TLua; const Table, ProcName: LuaString;
+  const Args: array of const; const ReturnAddress: Pointer): PLuaResult;
+var
+  Options: TLuaCallOptions;
+begin
+  Options.Table := @Table;
+  Options.ProcName := @ProcName;
+  Options.ReturnAddress := ReturnAddress;
+  Options.Count := Length(Args);
+  Options.VarRecMode := True;
+  Options.Arg := Pointer(@Args[0]);
+  Result := InternalLuaCall(Self, Options);
+end;
+
+function TLua.Call(const Table, ProcName: LuaString; const Args: array of const): PLuaResult;
+{$ifdef RETURNADDRESS}
+begin
+  Result := __TLuaTableCall__arguments(Self, Table, ProcName, Args, ReturnAddress);
+end;
+{$else}
+asm
+  {$ifdef CPUX86}
+  pop ebp
+  push [esp]
+  {$else .CPUX64}
+    {$MESSAGE ERROR 'Unknown compiler'}
+  {$endif}
+  jmp __TLuaTableCall__arguments
+end;
+{$endif}
 
 function TLua.InternalConvertScript(var Data: __luabuffer): Integer;
 label
@@ -11797,7 +12526,7 @@ begin
       X := CHAR_TABLE[S^];
     until (X <> CHAR_SPACE);
     if (X <> 0) then goto next_find;
-
+                (*
     // detect "print" function
     if (S^ <> Ord('t')) then goto next_find;
     if (S = Start) then goto next_find;
@@ -11812,7 +12541,7 @@ begin
     if (S = Start) then goto next_find;
     Dec(S);
     if (S^ <> Ord('p')) then goto next_find;
-    StoredPrint := S;
+    StoredPrint := S;  *) goto next_find; {$message '<-- здесь'}
 
     // detect not "."/":" before "print"
     repeat
@@ -11849,7 +12578,7 @@ begin
 end;
 
 function TLua.InternalRunScript(var Data: __luabuffer; const Offset: Integer; const AUnitName: __luaname;
-  const AUnit: TLuaUnit; const MakeResult: Boolean; const ReturnAddress: Pointer): Exception;
+  const AUnit: TLuaUnit; const MakeResult: Boolean; var ExceptionAddress: Pointer; const ReturnAddress: Pointer): Exception;
 var
   Buffer: __luabuffer;
   BufferOffset, ErrCode, Size: Integer;
@@ -11904,8 +12633,9 @@ begin
     on E: Exception do
     if (MakeResult) then
     begin
-      Result := Exception(E.ClassType.NewInstance);
-      CopyObject(Result, E);
+      AcquireExceptionObject;
+      ExceptionAddress := ExceptAddr;
+      Result := E;
     end;
   end;
 end;
@@ -11920,6 +12650,7 @@ var
   LuaUnitNameBuffer: array[0..MAX_UNITNAME_LENGTH * 3] of AnsiChar;
   AUnit, ALastUnit: TLuaUnit;
   E: Exception;
+  ExceptAddress, Temp: Pointer;
 begin
   // convert script data
   Offset := InternalConvertScript(Data);
@@ -11967,7 +12698,7 @@ begin
   AUnit.InitializeLines;
 
   // try run script
-  E := InternalRunScript(Data, Offset, LuaUnitName, AUnit, True, ReturnAddress);
+  E := InternalRunScript(Data, Offset, LuaUnitName, AUnit, True, ExceptAddress, ReturnAddress);
 
   // add/replace unit or cleanup and compile/run previous instance
   if (E = nil) then
@@ -11991,10 +12722,10 @@ begin
     if (Assigned(ALastUnit)) then
     begin
       InternalRunScript(ALastUnit.FData, ALastUnit.FDataOffset, LuaUnitName, ALastUnit,
-        False, ReturnAddress);
+        False, Temp, ReturnAddress);
     end;
 
-    raise E at ReturnAddress;
+    raise E at ExceptAddress;
   end;
 end;
 
@@ -12014,15 +12745,15 @@ const
     BOM_SIZE = 0;
   {$ifend}
 var
-  ScriptBufferSize: Integer;
+  BufferSize: Integer;
   Data: __luabuffer;
 begin
-  ScriptBufferSize := Length(Script) * SizeOf(LuaChar);
-  CheckScriptSize(ScriptBufferSize, ReturnAddress);
+  BufferSize := Length(Script) * SizeOf(LuaChar);
+  CheckScriptSize(BufferSize, ReturnAddress);
 
-  SetLength(Data, BOM_SIZE + ScriptBufferSize);
+  SetLength(Data, BOM_SIZE + BufferSize);
   System.Move(BOM, Pointer(Data)^, BOM_SIZE);
-  System.Move(Pointer(Script)^, Pointer(NativeInt(Data) + BOM_SIZE)^, ScriptBufferSize);
+  System.Move(Pointer(Script)^, Pointer(NativeInt(Data) + BOM_SIZE)^, BufferSize);
 
   Self.InternalLoadScript(Data, '', '', ReturnAddress);
 end;
@@ -12111,32 +12842,33 @@ asm
 end;
 {$endif}
 
-procedure __TLuaLoadBufferScript(const Self: TLua; const ScriptBuffer: Pointer;
-  const ScriptBufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString;
+procedure __TLuaLoadBufferScript(const Self: TLua; const Buffer: Pointer;
+  const BufferSize: Integer; const BOM: TLuaScriptBOM; const UnitName: LuaString;
   const ReturnAddress: Pointer);
 var
   Size: Integer;
   Data: __luabuffer;
 begin
-  CheckScriptSize(ScriptBufferSize, ReturnAddress);
+  CheckScriptSize(BufferSize, ReturnAddress);
 
   Size := BOM_INFO[BOM].Size;
-  SetLength(Data, Size + ScriptBufferSize);
+  SetLength(Data, Size + BufferSize);
   System.Move(BOM_INFO[BOM].Data, Pointer(Data)^, Size);
-  System.Move(ScriptBuffer^, Pointer(NativeInt(Data) + Size)^, ScriptBufferSize);
+  System.Move(Buffer^, Pointer(NativeInt(Data) + Size)^, BufferSize);
 
   Self.InternalLoadScript(Data, UnitName, '', ReturnAddress);
 end;
 
-procedure TLua.LoadScript(const ScriptBuffer: Pointer; const ScriptBufferSize: Integer;
+procedure TLua.LoadScript(const Buffer: Pointer; const BufferSize: Integer;
   const BOM: TLuaScriptBOM; const UnitName: LuaString);
 {$ifdef RETURNADDRESS}
 begin
-  __TLuaLoadBufferScript(Self, ScriptBuffer, ScriptBufferSize, BOM, UnitName, ReturnAddress);
+  __TLuaLoadBufferScript(Self, Buffer, BufferSize, BOM, UnitName, ReturnAddress);
 end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -12171,6 +12903,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -12269,6 +13002,7 @@ end;
 {$else}
 asm
   {$ifdef CPUX86}
+  pop ebp
   push [esp]
   {$else .CPUX64}
     {$MESSAGE ERROR 'Unknown compiler'}
@@ -12277,122 +13011,6 @@ asm
 end;
 {$endif}
 {$endif}
-
-                  (*
-function TLua.GetRecordInfo(const Name: string): PLuaRecordInfo;
-var
-  Index: integer;
-begin
-  Index := internal_class_index_by_name(Name);
-
-  if (Index < 0) then GetRecordInfo := nil
-  else
-  with ClassesInfo[Index] do
-  if (_ClassKind <> ckRecord) then GetRecordInfo := nil
-  else
-  GetRecordInfo := _Class;
-end;          *)
-                (*
-function TLua.GetArrayInfo(const Name: string): PLuaArrayInfo;
-var
-  Index: integer;
-begin
-  Index := internal_class_index_by_name(Name);
-
-  if (Index < 0) then GetArrayInfo := nil
-  else
-  with ClassesInfo[Index] do
-  if (_ClassKind <> ckArray) then GetArrayInfo := nil
-  else
-  GetArrayInfo := _Class;
-end;       *)
-             (*
-function TLua.GetSetInfo(const Name: string): PLuaSetInfo;
-var
-  Index: integer;
-begin
-  Index := internal_class_index_by_name(Name);
-
-  if (Index < 0) then GetSetInfo := nil
-  else
-  with ClassesInfo[Index] do
-  if (_ClassKind <> ckSet) then GetSetInfo := nil
-  else
-  GetSetInfo := _Class;
-end;       *)
-             (*
-procedure __TLuaGetVariable(const Self: TLua; const Name: string; var Result: Variant; const ReturnAddr: pointer);
-var
-  modify_info: TLuaGlobalModifyInfo;
-begin
-  modify_info.Name := Name;
-  modify_info.CodeAddr := ReturnAddr;
-  modify_info.IsVariant := true;
-  modify_info.V := @Result;
-
-  Self.__global_index(true, modify_info);
-end;      *)
-          (*
-function TLua.GetVariable(const Name: string): Variant;
-asm
-  push [esp]
-  jmp __TLuaGetVariable
-end;   *)
-
-                  (*
-procedure __TLuaSetVariable(const Self: TLua; const Name: string; const Value: Variant; const ReturnAddr: pointer);
-var
-  modify_info: TLuaGlobalModifyInfo;
-begin
-  modify_info.Name := Name;
-  modify_info.CodeAddr := ReturnAddr;
-  modify_info.IsVariant := true;
-  modify_info.V := @Value;
-
-  Self.__global_newindex(true, modify_info);
-end;
-
-procedure TLua.SetVariable(const Name: string; const Value: Variant);
-asm
-  push [esp]
-  jmp __TLuaSetVariable
-end;                    *)
-                          (*
-procedure __TLuaGetVariableEx(const Self: TLua; const Name: string; var Result: TLuaArg; const ReturnAddr: pointer);
-var
-  modify_info: TLuaGlobalModifyInfo;
-begin
-  modify_info.Name := Name;
-  modify_info.CodeAddr := ReturnAddr;
-  modify_info.IsVariant := false;
-  modify_info.Arg := @Result;
-
-  Self.__global_index(true, modify_info);
-end;              *)
-                      (*
-function  TLua.GetVariableEx(const Name: string): TLuaArg;
-asm
-  push [esp]
-  jmp __TLuaGetVariableEx
-end;                *)
-                      (*
-procedure __TLuaSetVariableEx(const Self: TLua; const Name: string; const Value: TLuaArg; const ReturnAddr: pointer);
-var
-  modify_info: TLuaGlobalModifyInfo;
-begin
-  modify_info.Name := Name;
-  modify_info.CodeAddr := ReturnAddr;
-  modify_info.IsVariant := false;
-  modify_info.Arg := @Value;
-
-  Self.__global_newindex(true, modify_info);
-end;             *)
-                   (*
-procedure TLua.SetVariableEx(const Name: string; const Value: TLuaArg);
-asm
-  push [esp]
-  jmp __TLuaSetVariableEx
-end;              *)
 
 const
   // TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst, gkScriptVariable);
@@ -12415,10 +13033,8 @@ begin
   end;
   global_fill_value(Result);
 
-  if (Assigned(MetaType){ToDo: check}) then
+  if (not Assigned(MetaType)) then
   begin
-    MetaType.F.Ref := Result;
-
     if (LUA_VERSION_52) then
     begin
       lua_rawgeti(Handle, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
@@ -12432,6 +13048,8 @@ begin
     end;
   end else
   begin
+    MetaType.F.Ref := Result;
+
     global_push_value(Result);
     lua_pushvalue(Handle, 1);
     lua_setmetatable(Handle, -2);
@@ -12456,7 +13074,6 @@ begin
     Value := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaGlobalEntity));
     Item.Value := Value;
     Entity := TLuaMemoryHeap(FMemoryHeap).Unpack(Value);
-    Entity.Name := Name;
 
     if (Kind in NATIVE_GLOBAL_KINDS) then
     begin
@@ -12496,10 +13113,8 @@ begin
   end;
 
   Entity.Kind := Kind;
-  Entity.IsConst := (Kind in CONST_GLOBAL_KINDS);
+  Entity.ConstMode := (Kind in CONST_GLOBAL_KINDS);
   Result := Entity;
-
-  // ToDo: if (Kind <> gkConst) then FInitialized := False;
 end;
 
 function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem};
@@ -12571,6 +13186,13 @@ begin
   ClassInfo._DefaultProperty := -1;
   ClassInfo.ParentIndex := -1;
 end;          *)
+
+procedure TLua.InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1, P2: __luapointer);
+begin
+  lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
+  lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, P1, P2, Callback), 0);
+  lua_rawset(Handle, -3);
+end;
 
 function TLua.InternalNearestClass(const AClass: TClass): PLuaMetaType;
 var
@@ -12780,7 +13402,7 @@ begin
   end else
   begin
     // check existing name (type)
-    ClassNameItem := GetLuaNameItem(ClassName);
+    ClassNameItem := GetLuaNameItem(ClassName, True);
     if (TLuaDictionary(FMetaTypes).Find(ClassNameItem.Value) <> nil) then
       raise ETypeRegistered(ClassNameItem.Key) at ReturnAddress;
 
@@ -12889,7 +13511,7 @@ begin
   begin
     RecordPtr := LUA_POINTER_INVALID;
   end;
-  NameItem := GetLuaNameItem(Name);
+  NameItem := GetLuaNameItem(Name, True);
   if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
 
   if (RecordPtr <> LUA_POINTER_INVALID) then
@@ -13034,7 +13656,7 @@ begin
   if (Assigned(ArrayTypeInfo)) then ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(ArrayTypeInfo);
   if (ArrayPtr = LUA_POINTER_INVALID) then
   begin
-    NameItem := GetLuaNameItem(FStringBuffer.Lua);
+    NameItem := GetLuaNameItem(FStringBuffer.Lua, True);
     ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
     if (ArrayPtr = LUA_POINTER_INVALID) then
     begin
@@ -13119,7 +13741,7 @@ begin
     High := TypeData.MaxValue;
 
     unpack_lua_string(FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
-    NameItem := GetLuaNameItem(FStringBuffer.Lua);
+    NameItem := GetLuaNameItem(FStringBuffer.Lua, True);
     Ptr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
     if (Ptr = LUA_POINTER_INVALID) then
     begin
@@ -13531,7 +14153,7 @@ var
       register_callback('__len', @TLua.__len);
       register_callback('__call', @TLua.__call);
       register_callback('__gc', @TLua.__destructor, PTR_FALSE);
-      
+
 
       // персональные функции-конструкторы/деструкторы
       if (ClassInfo._ClassKind = ckClass) then ClassInfo.__Create := pointer(AddLuaCallbackProc(Self, @ClassInfo, PTR_TRUE, @TLua.__constructor));
@@ -13544,14 +14166,14 @@ var
                     if (@PLuaRecordInfo(ClassInfo._Class).FOperatorCallback = nil) then Operators := [];
                   end;
 
-           ckSet: Operators := [loNeg, loAdd, loSub, loMul, loCompare];                  
+           ckSet: Operators := [loNeg, loAdd, loSub, loMul, loCompare];
       else
          Operators := [];
       end;
       if (ClassInfo._ClassKind <> ckClass) then
       for i := OPERATOR_NEG to OPERATOR_LESS_EQUAL do register_operator(i);
     end;
-    
+
     // глобальный калбек __tostring
     if (@ClassInfo <> @GlobalNative) then
     begin
@@ -15738,284 +16360,208 @@ begin
   end;
 end;
              *)
-               (*
-// основная функция по взятию значения глобальной переменной
-// причём в двух вариантах
-// native - значит нужно вернуть значение в info
-// иначе - вызывается из lua, надо вернуть значение в стек
-// или Exception !
-function TLua.__global_index(const native: boolean; const info: TLuaGlobalModifyInfo): integer;
+
+function TLua.__global_index(const ModifyLow, ModifyHigh: Cardinal): Integer;
+label
+  unsupported;
 var
-  Name: pchar;
-  luatype, NameLen, Ind: integer;
-
-  // вызвать ошибку
-  procedure Assert(const FmtStr: string; const Args: array of const);
-  begin
-    if (native) then ELua.Assert(FmtStr, Args, info.CodeAddr)
-    else ScriptAssert(FmtStr, Args);
-  end;
-
-  // если не получилось заполнить Variant или TLuaArg
-  // вызывается в native случае
-  procedure AssertUnsupported();
-  begin
-    lua_settop(Handle, -1-1); //stack_pop(); - убрать значение из стека
-    Assert('Can''t get global variable "%s" of type "%s"', [info.Name, FBufferArg.str_data]);
-  end;
-
-  // запушить глобальную переменную
-  procedure PushGlobalProp(const Index: integer; const IsConst: boolean);
-  var
-    prop_struct: TLuaPropertyStruct;
-  begin
-    prop_struct.PropertyInfo := @GlobalNative.Properties[not Index];
-    prop_struct.Instance := nil;
-    prop_struct.IsConst := IsConst;
-    prop_struct.Index := nil;
-    prop_struct.ReturnAddr := nil;
-    if (native) then prop_struct.ReturnAddr := info.CodeAddr;
-    
-    Self.__index_prop_push(GlobalNative, @prop_struct);
-  end;
-
+  NativeModify: ^TLuaGlobalModify;
+  Entity: PLuaGlobalEntity;
+  LuaType: Integer;
+  EntityItem: ^TLuaDictionaryItem;
+  MetaType: ^TLuaMetaType;
+  Prop: ^TLuaPropertyInfoBase;
+  Proc: ^TLuaProcInfo;
 begin
-  // количество возвращаемых аргументов
-  Result := ord(not native);
+  NativeUInt(NativeModify) := {$ifdef LARGEINT}(NativeUInt(ModifyHigh) shl 32) +{$endif} ModifyLow;
 
-  // получение имени. проверка
-  if (native) then
+  // entity
+  if (Assigned(NativeModify)) then
   begin
-    Name := pchar(info.Name);
-    NameLen := Length(info.Name);
+    Entity := GetGlobalEntity(NativeModify.Name^, False);
   end else
   begin
-    luatype := lua_type(Handle, 2);
-    if (luatype <> LUA_TSTRING) then Assert('Global key should be a string. Type %s is not available as global key', [LuaTypeName(luatype)]);
-    Name := lua_tolstring(Handle, 2, @NameLen);
+    LuaType := lua_type(Handle, 2);
+    if (LuaType <> LUA_TSTRING) then
+    begin
+      GetLuaTypeName(FStringBuffer.Default, LuaType);
+      Error('Global key should be a string. Type %s is not available as a global key', [FStringBuffer.Default]);
+    end;
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(lua_tolstring(Handle, 2, nil), False);
+
+    Entity := nil;
+    if (Assigned(EntityItem)) then
+    begin
+      Entity := {$ifdef SMALLINT}Pointer(EntityItem.Value){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(EntityItem.Value){$endif};
+    end;
+  end;
+  if (not Assigned(Entity)) then
+  begin
+    if (Assigned(NativeModify)) then
+    begin
+      raise ELua.CreateFmt('Global variable "%s" not found', [NativeModify.Name^]) at NativeModify.ReturnAddress;
+    end else
+    begin
+      stack_lua_string(FStringBuffer.Lua, 2);
+      Error('Global variable "%s" not found', [FStringBuffer.Lua]);
+    end;
   end;
 
-  // указатель или ошибка
-  if (not GlobalVariablePos(Name, NameLen, Ind)) then
-  Assert('Global variable "%s" not found', [Name]);
-
-  // блок: если вызывается из кода lua
-  if (not native) then
-  begin
-    with GlobalVariables[Ind] do
+  // push entity value
+  case Entity.Kind of
+    gkMetaType:
     begin
-      if (_Kind in GLOBAL_INDEX_KINDS) then
-      begin
-        lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-      end else
-      if (Index >= 0) then
-      begin
-        lua_pushcclosure(Handle, GlobalNative.Procs[Index].lua_CFunction, 0);
-      end else
-      begin
-        // поместить значение глобальной переменной в луа-стек
-        PushGlobalProp(Index, IsConst);
-      end;
+      MetaType := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+      global_push_value(MetaType.Ref);
     end;
-
-    exit;
+    gkVariable:
+    begin
+      Prop := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+      {$message 'ToDo'}
+    end;
+    gkProc:
+    begin
+      Proc := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+      lua_pushcclosure(Handle, Proc.CFunction, 0);
+    end;
+  else
+    // gkConst, gkScriptVariable
+    global_push_value(Entity.Ref);
   end;
 
-  // блок: результат надо вернуть в info.Arg^
-  if (not info.IsVariant) then
+  if (Assigned(NativeModify)) then
   begin
-    with GlobalVariables[Ind] do
+    if (NativeModify.VariantMode) then
     begin
-      if (_Kind in GLOBAL_INDEX_KINDS) then
+      if (not stack_variant(NativeModify.V^, -1)) then goto unsupported;
+    end else
+    begin
+      if (not stack_luaarg(NativeModify.Arg^, -1, False)) then
       begin
-        lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-        if (not stack_luaarg(info.Arg^, -1, false)) then AssertUnsupported();
-        lua_settop(Handle, -1-1); //stack_pop();
-      end else
-      if (Index >= 0) then
-      begin
-        info.Arg.AsPointer := GlobalNative.Procs[Index].Address;
-      end else
-      begin
-        PushGlobalProp(Index, IsConst);
-        if (not stack_luaarg(info.Arg^, -1, false)) then AssertUnsupported();
-        lua_settop(Handle, -1-1); //stack_pop();        
+      unsupported:
+        stack_pop;
+        raise ELua.CreateFmt('Can''t get global variable "%s" of type "%s"', [NativeModify.Name^,
+          FStringBuffer.Default]) at NativeModify.ReturnAddress;
       end;
     end;
-
-    exit;
+    stack_pop;
   end;
 
-  // блок: результат надо вернуть в info.V^: variant
-  begin
-    with GlobalVariables[Ind] do
-    begin
-      if (_Kind in GLOBAL_INDEX_KINDS) then
-      begin
-        lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-        if (not stack_variant(info.V^, -1)) then AssertUnsupported();
-        lua_settop(Handle, -1-1); //stack_pop();
-      end else
-      if (Index >= 0) then
-      begin
-        Assert('"%s" is a method. Variant type does not support methods', [Name]);
-      end else
-      begin
-        // прочитать проперти, но не в Arg, а в Variant
-        PushGlobalProp(Index, IsConst);
-        if (not stack_variant(info.V^, -1)) then AssertUnsupported();
-        lua_settop(Handle, -1-1); //stack_pop();
-      end;
-    end;
-
-    exit;
-  end;      
+  Result := 1;
 end;
-         *) (*
-// основная функция по изменению значения глобальной переменной
-// в двух вариантах
-// native - значит имя и значения берутся из info
-// иначе - из стека
-// если глобальная переменная неизменяема, то Exception !
-function TLua.__global_newindex(const native: boolean; const info: TLuaGlobalModifyInfo): integer;
-type
-  TIntToStr = procedure(const Value: integer; var Ret: string);
 
+function TLua.__global_newindex(const ModifyLow, ModifyHigh: Cardinal): Integer;
+label
+  script_variable, unsupported;
 var
-  Name: pchar;
-  luatype, NameLen, Ind: integer;
-  GlobalVariable: ^TLuaGlobalVariable;
-
-  // вызвать ошибку
-  procedure Assert(const FmtStr: string; const Args: array of const);
-  begin
-    if (native) then ELua.Assert(FmtStr, Args, info.CodeAddr)
-    else ScriptAssert(FmtStr, Args);
-  end;
-
-  // push выдал ошибку, поэтому надо вызвать Exception
-  procedure AssertUnsupported();
-  const
-    DESCRIPTION: array[boolean] of string = ('argument', 'variant');
-  begin
-    Assert('Unsupported %s type = "%s"', [DESCRIPTION[info.IsVariant], FBufferArg.str_data]);
-  end;
-
-  // взять значение из стека и присвоить новое значение глобальной переменной
-  procedure FillGlobalProp(const Index: integer);
-  var
-    prop_struct: TLuaPropertyStruct;
-  begin
-    prop_struct.PropertyInfo := @GlobalNative.Properties[not Index];
-    prop_struct.Instance := nil;
-    prop_struct.StackIndex := -1;
-    prop_struct.Index := nil;
-    prop_struct.ReturnAddr := nil;
-    if (native) then prop_struct.ReturnAddr := info.CodeAddr;
-
-    Self.__newindex_prop_set(GlobalNative, @prop_struct);
-  end;
-
+  NativeModify: ^TLuaGlobalModify;
+  Entity: PLuaGlobalEntity;
+  LuaType: Integer;
+  LuaName: __luaname;
+  EntityItem: ^TLuaDictionaryItem;
+  Ptr: __luapointer;
+  Prop: ^TLuaPropertyInfoBase;
 begin
-  Result := 0;
+  NativeUInt(NativeModify) := {$ifdef LARGEINT}(NativeUInt(ModifyHigh) shl 32) +{$endif} ModifyLow;
 
-  // получение имени. проверка
-  if (native) then
+  // entity
+  if (Assigned(NativeModify)) then
   begin
-    Name := pchar(info.Name);
-    NameLen := Length(info.Name);
+    Entity := GetGlobalEntity(NativeModify.Name^, True);
   end else
   begin
-    luatype := lua_type(Handle, 2);
-    if (luatype <> LUA_TSTRING) then Assert('Global key should be a string. Type %s is not available as global key', [LuaTypeName(luatype)]);
-    Name := lua_tolstring(Handle, 2, @NameLen);
-  end;
-
-  // блок: найти глобальную переменную
-  // если не найдена, то создать новую (тип gkLuaData), заполнить значением
-  if (not GlobalVariablePos(Name, NameLen, Ind, true)) then
-  begin
-    with GlobalVariables[Ind] do
+    LuaType := lua_type(Handle, 2);
+    if (LuaType <> LUA_TSTRING) then
     begin
-      _Kind := gkLuaData;
-      IsConst := false;
-      global_alloc_ref(Ref);
-
-      if (not native) then lua_pushvalue(Handle, 3)
-      else
-      if (not info.IsVariant) then
-      begin
-        if (not push_luaarg(info.Arg^)) then AssertUnsupported()
-      end else
-      if (not push_variant(info.V^)) then AssertUnsupported();
-
-      global_fill_value(Ref);
+      GetLuaTypeName(FStringBuffer.Default, LuaType);
+      Error('Global key should be a string. Type %s is not available as a global key', [FStringBuffer.Default]);
     end;
+    LuaName := lua_tolstring(Handle, 2, nil);
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(LuaName, True);
 
-    exit;    
+    Ptr := EntityItem.Value;
+    if (Ptr = LUA_POINTER_INVALID) then
+    begin
+      lua_pushvalue(Handle, 2);
+      global_fill_value(global_alloc_ref);
+      Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaGlobalEntity));
+      EntityItem.Value := Ptr;
+      Entity := {$ifdef SMALLINT}Pointer(Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr){$endif};
+      PInteger(Entity)^ := 0;
+      PLuaGlobalEntity(Entity).Ptr := LUA_POINTER_INVALID;
+    end else
+    begin
+      Entity := {$ifdef SMALLINT}Pointer(Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr){$endif};
+    end;
   end;
 
-  // проверка на возможность изменения
-  GlobalVariable := @GlobalVariables[Ind];
-  if (GlobalVariable.IsConst) then
-  Assert('Global const "%s" can not be changed', [Name]);
-
-  { на текущий момент возможны следующие переменные: }
-  { gkLuaData и gkVariable. Всё ! Причём Variable 100% не константная! }
-
-
-  // блок: заполнение происходит из кода lua
-  if (not native) then
+  if (Entity.Ptr = LUA_POINTER_INVALID) then
   begin
-    with GlobalVariable^ do
-    if (_Kind = gkLuaData) then
+    // new item
+    Entity.Kind := gkScriptVariable;
+    Entity.Ref := global_alloc_ref;
+    goto script_variable;
+  end else
+  if (Entity.ConstMode) then
+  begin
+    if (Assigned(NativeModify)) then
+    begin
+      raise ELua.CreateFmt('Global const "%s" can not be changed', [NativeModify.Name^]) at NativeModify.ReturnAddress;
+    end else
+    begin
+      stack_lua_string(FStringBuffer.Lua, 2);
+      Error('Global const "%s" can not be changed', [FStringBuffer.Lua]);
+    end;
+  end else
+  if (Entity.Kind = gkScriptVariable) then
+  begin
+  script_variable:
+    if (NativeModify = nil) then
     begin
       lua_pushvalue(Handle, 3);
-      lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref); //global_fill_value(Ref);
+    end else
+    if (NativeModify.VariantMode) then
+    begin
+      if (not push_variant(NativeModify.V^)) then goto unsupported;
     end else
     begin
-      // взять зачение из стека и положить в глобальную переменную
-      FillGlobalProp(Index);
+      if (not push_luaarg(NativeModify.Arg^)) then
+      begin
+      unsupported:
+        raise ELua.CreateFmt('Can''t set global variable "%s" of type "%s"', [NativeModify.Name^,
+          FStringBuffer.Default]) at NativeModify.ReturnAddress;
+      end;
     end;
-
-    exit;
-  end;
-
-  // блок: заполнение происходит из info.Arg^
-  if (not info.IsVariant) then
+    global_fill_value(Entity.Ref);
+  end else
   begin
-    with GlobalVariable^ do
-    if (_Kind = gkLuaData) then
+    // gkVariable
+    // optional push native value
+    if (Assigned(NativeModify)) then
     begin
-      if (not push_luaarg(info.Arg^)) then AssertUnsupported();
-      lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref); //global_fill_value(Ref);
-    end else
-    begin
-      if (not push_luaarg(info.Arg^)) then AssertUnsupported();
-      FillGlobalProp(Index);
-      lua_settop(Handle, -1-1); //stack_pop();
+      if (NativeModify.VariantMode) then
+      begin
+        if (not push_variant(NativeModify.V^)) then goto unsupported;
+      end else
+      begin
+        if (not push_luaarg(NativeModify.Arg^)) then goto unsupported;
+      end;
     end;
 
-    exit;
-  end;
+    // fill property
+    Prop := {$ifdef SMALLINT}Pointer(Entity.Ptr){$else}TLuaMemoryHeap(FMemoryHeap).Unpack(Entity.Ptr){$endif};
+    {$message 'ToDo'}
+    Prop.F.Information := Pointer(100500);
 
-  // блок: заполнение происходит из info.V^: Variant
-  begin
-    with GlobalVariable^ do
-    if (_Kind = gkLuaData) then
+    // optional pop native value
+    if (Assigned(NativeModify)) then
     begin
-      if (not push_variant(info.V^)) then AssertUnsupported();
-      lua_rawseti(Handle, LUA_REGISTRYINDEX, Ref); //global_fill_value(Ref);
-    end else
-    begin
-      if (not push_variant(info.V^)) then AssertUnsupported();
-      FillGlobalProp(Index);
-      lua_settop(Handle, -1-1); //stack_pop();
+      stack_pop;
     end;
-
-    exit;       
   end;
-end;     *)
+
+  Result := 0;
+end;
            (*
 // описание вида Prefix[...][...][Value][...][...][...]
 // или Prefix[...][...].Value
@@ -17151,191 +17697,8 @@ begin
   if (not push_luaarg(FBufferArg)) then ELua.Assert('Can''t return value type "%s"', [FBufferArg.str_data], proc_address);
   Result := 1; // т.е. результат всегда есть, даже если nil
 end;    *)
-          (*
-function TLua.VariableExists(const Name: string): boolean;
-var
-  Ind: integer;
-  luatype: integer;
-begin
-  if (not FInitialized) then INITIALIZE_NAME_SPACE();
 
-  if (GlobalVariablePos(pchar(Name), Length(Name), Ind)) then
-  with GlobalVariables[Ind] do
-  if (_Kind in [gkType, gkVariable, gkConst]) then
-  begin
-    // тип (класс/структура), нативная переменная или Enum
-    Result := true;
-    exit;
-  end else
-  if (_Kind = gkLuaData) then
-  begin
-    // переменная в глобальной таблице
-    lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-    luatype := (lua_type(Handle, -1));
-    lua_settop(Handle, -1-1); //stack_pop();
-
-    Result := (luatype <> LUA_TNONE) and (luatype <> LUA_TFUNCTION);
-    exit;
-  end;
-
-  Result := false;
-end;   *)
-         (*
-function TLua.ProcExists(const ProcName: string): boolean;
-var
-  Ind: integer;
-begin
-  if (not FInitialized) then INITIALIZE_NAME_SPACE();
-
-  if (GlobalVariablePos(pchar(ProcName), Length(ProcName), Ind)) then
-  with GlobalVariables[Ind] do
-  if (_Kind = gkProc) then
-  begin
-    // нативная глобальная процедура
-    Result := true;
-    exit;
-  end else
-  if (_Kind = gkLuaData) then
-  begin
-    // переменная в глобальной таблице
-    lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-    Result := (lua_type(Handle, -1) = LUA_TFUNCTION);
-    lua_settop(Handle, -1-1); //stack_pop();
-    exit;
-  end;
-
-  Result := false;
-end;    *)
-          (*
-procedure __TLuaCall_luaargs(const Self: TLua; const ProcName: string; const _Args: TLuaArgs;
-                            var Result: TLuaArg; const ReturnAddr: pointer);
-var
-  Found: boolean;
-  i, Ind, ret,RetCount: integer;    
-begin
-  with Self do
-  begin
-    if (not FInitialized) then INITIALIZE_NAME_SPACE();
-
-    // запушить соответствующую cfunction если найден
-    Found := GlobalVariablePos(pchar(ProcName), Length(ProcName), Ind);
-    if (Found) then
-    with GlobalVariables[Ind] do
-    if (_Kind = gkLuaData) then
-    begin
-      lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-      if (lua_type(Handle, -1) <> LUA_TFUNCTION) then
-      begin
-        Found := false;
-        stack_pop();
-      end;
-    end else
-    begin
-      Found := (_Kind = gkProc);
-      if (Found) then lua_pushcclosure(Handle, GlobalNative.Procs[Index].lua_CFunction, 0);
-    end;
-
-    // если функция не найдена
-    if (not Found) then
-    ELua.Assert('Lua function "%s" not found', [ProcName], ReturnAddr);
-
-    // загрузить параметры
-    for i := 0 to Length(_Args)-1 do
-    if (not push_luaarg(_Args[i])) then
-    begin
-      lua_settop(Handle, 0);
-      ELua.Assert('Unknown argument type "%s" (arg №%d)', [FBufferArg.str_data, i+1], ReturnAddr)
-    end;
-
-    // вызов
-    ret := lua_pcall(Handle, Length(_Args), LUA_MULTRET, 0);
-    if (ret = 0) then ret := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-    if (ret <> 0) then Check(ret, ReturnAddr);
-
-    // результат
-    Result.FLuaType := ltEmpty;
-    RetCount := lua_gettop(Handle);
-    if (RetCount <> 0) then
-    begin
-      stack_luaarg(Result, 1, false);
-      lua_settop(Handle, 0);
-    end;
-  end;
-end;   *)
-         (*
-function TLua.Call(const ProcName: string; const Args: TLuaArgs): TLuaArg;
-asm
-  pop ebp
-  push [esp]
-  jmp __TLuaCall_luaargs
-end;    *)
-
-          (*
-procedure __TLuaCall__arguments(const Self: TLua; const ProcName: string; const _Args: array of const;
-                                var Result: TLuaArg; const ReturnAddr: pointer);
-var
-  Found: boolean;
-  i, Ind, ret, RetCount: integer;
-begin
-  with Self do
-  begin
-    if (not FInitialized) then INITIALIZE_NAME_SPACE();
-
-    // запушить соответствующую cfunction если найден
-    Found := GlobalVariablePos(pchar(ProcName), Length(ProcName), Ind);
-    if (Found) then
-    with GlobalVariables[Ind] do
-    if (_Kind = gkLuaData) then
-    begin
-      lua_rawgeti(Handle, LUA_REGISTRYINDEX, Ref); //global_push_value(Ref);
-      if (lua_type(Handle, -1) <> LUA_TFUNCTION) then
-      begin
-        Found := false;
-        stack_pop();
-      end;
-    end else
-    begin
-      Found := (_Kind = gkProc);
-      if (Found) then lua_pushcclosure(Handle, GlobalNative.Procs[Index].lua_CFunction, 0);
-    end;
-
-    // если функция не найдена
-    if (not Found) then
-    ELua.Assert('Lua function "%s" not found', [ProcName], ReturnAddr);
-
-    // загрузить параметры
-    for i := 0 to Length(_Args)-1 do
-    if (not push_argument(_Args[i])) then
-    begin
-      lua_settop(Handle, 0);
-      ELua.Assert('Unknown argument type "%s" (arg №%d)', [FBufferArg.str_data, i+1], ReturnAddr)
-    end;
-
-    // вызов
-    ret := lua_pcall(Handle, Length(_Args), LUA_MULTRET, 0);
-    if (ret = 0) then ret := lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
-    if (ret <> 0) then Check(ret, ReturnAddr);
-
-    // результат
-    Result.FLuaType := ltEmpty;
-    RetCount := lua_gettop(Handle);
-    if (RetCount <> 0) then
-    begin
-      stack_luaarg(Result, 1, false);
-      lua_settop(Handle, 0);
-    end;
-  end;
-end;      *)
-
-            (*
-function TLua.Call(const ProcName: string; const Args: array of const): TLuaArg;
-asm
-  pop ebp
-  push [esp]
-  jmp __TLuaCall__arguments
-end;
-        *)
-                                           (*
+                                          (*
 // проверить количество аргуметов в стеке на
 // соответствие ожидаемому количеству аргументов
 function __TLuaCheckArgsCount__1(const Self: TLua; const ArgsCount: TIntegerDynArray;
@@ -17412,7 +17775,7 @@ asm
   {$ifdef CPUX86}
   push [esp]
   {$else .CPUX64}
-  mov r8, [rsp]
+  mov r9, [rsp]
   {$endif}
   jmp TLua.InternalAddClass
 end;

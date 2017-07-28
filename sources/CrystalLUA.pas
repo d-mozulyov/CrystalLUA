@@ -969,6 +969,7 @@ type
     FMetaTypes: __TLuaDictionary {Pointer, PMetaType};
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
     FGlobalMetaTable: Integer;
+    FFormatWrapper: Integer;
 
     // глобальные процедуры, переменные, калбеки глобальных переменных из Lua
    (* GlobalNative: TLuaClassInfo; // нативные: методы и перменные
@@ -1060,7 +1061,9 @@ type
     function __array_dynamic_resize(): integer;
     function __array_include(const mode: integer{constructor, include, concat}): integer;
     function __set_method(const is_construct: boolean; const method: integer{0..2}): integer;   *)
-    function  ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
+    function __print: Integer;
+    function __printf: Integer;
+    function ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
   private
     // scripts and units routine
     FPointPreprocess: Boolean;
@@ -1436,6 +1439,7 @@ var
   lua_tolstring: function(L: Plua_State; idx: Integer; len: Psize_t): __luadata; cdecl;
   lua_tocfunction: function(L: Plua_State; idx: Integer): lua_CFunction; cdecl;
   lua_touserdata: function(L: Plua_State; idx: Integer): Pointer; cdecl;
+  lua_topointer: function(L: Plua_State; idx: Integer): Pointer; cdecl;
   lua_objlen: function(L: Plua_State; idx: Integer): size_t; cdecl;
 
   lua_rawgeti: procedure(L: Plua_State; idx, n: Integer); cdecl;
@@ -1607,6 +1611,7 @@ begin
     if FailLoad(@lua_tolstring, 'lua_tolstring') then Exit;
     if FailLoad(@lua_tocfunction, 'lua_tocfunction') then Exit;
     if FailLoad(@lua_touserdata, 'lua_touserdata') then Exit;
+    if FailLoad(@lua_topointer, 'lua_topointer') then Exit;
     if (LUA_VERSION_52) then
     begin
       if FailLoad(@lua_objlen, 'lua_rawlen') then Exit;
@@ -3318,7 +3323,7 @@ type
     {$WARNINGS ON}
     Blocks: PLuaCFunctionBlock;
 
-    function Alloc(const Lua: TLua; const P1, P2: __luapointer; const Callback: Pointer): Pointer;
+    function Alloc(const Lua: TLua; const Callback: Pointer; const P1, P2: __luapointer): Pointer;
     procedure Free(const LuaCFunction: Pointer);
     procedure Clear;
   end;
@@ -3467,7 +3472,7 @@ begin
   end;
 end;
 
-function TLuaCFunctionHeap.Alloc(const Lua: TLua; const P1, P2: __luapointer; const Callback: Pointer): Pointer;
+function TLuaCFunctionHeap.Alloc(const Lua: TLua; const Callback: Pointer; const P1, P2: __luapointer): Pointer;
 var
   Index: NativeInt;
   Block: PLuaCFunctionBlock;
@@ -7967,8 +7972,30 @@ end;
                 *)
 
 constructor TLua.Create();
+const
+  // function _FORMATWRAPPER_(...) return string.format(...)  end
+  FORMATWRAPPER_CODE: array[0..59] of Byte = (Ord('f'), Ord('u'), Ord('n'), Ord('c'), Ord('t'), Ord('i'), Ord('o'), Ord('n'),
+    Ord(' '), Ord('_'), Ord('F'), Ord('O'), Ord('R'), Ord('M'), Ord('A'), Ord('T'), Ord('W'), Ord('R'), Ord('A'), Ord('P'),
+    Ord('P'), Ord('E'), Ord('R'), Ord('_'), Ord('('), Ord('.'), Ord('.'), Ord('.'), Ord(')'), Ord(' '), Ord('r'), Ord('e'),
+    Ord('t'), Ord('u'), Ord('r'), Ord('n'), Ord(' '), Ord('s'), Ord('t'), Ord('r'), Ord('i'), Ord('n'), Ord('g'), Ord('.'),
+    Ord('f'), Ord('o'), Ord('r'), Ord('m'), Ord('a'), Ord('t'), Ord('('), Ord('.'), Ord('.'), Ord('.'), Ord(')'), Ord(' '),
+    Ord(' '), Ord('e'), Ord('n'), Ord('d'));
 var
   i: Integer;
+
+  procedure AddSystemClosure(const Name: LuaString; const Callback: Pointer; const P1, P2: __luapointer);
+  begin
+    lua_pushnil(Handle);
+    push_lua_string(Name);
+    lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, Callback, P1, P2), 0);
+    __global_newindex(0, 0);
+    lua_settop(Handle, 0);
+    with PLuaGlobalEntity(GetGlobalEntity(Name, False))^ do
+    begin
+      Kind := gkConst;
+      ConstMode := True;
+    end;
+  end;
 begin
   // unicode
   for i := 0 to 127 do
@@ -7993,6 +8020,17 @@ begin
   InternalRegisterCallback(Pointer(@ID_INDEX), @TLua.__global_index, 0, 0);
   InternalRegisterCallback(Pointer(@ID_NEWINDEX), @TLua.__global_newindex, 0, 0);
   lua_settop(Handle, 0);
+
+  // internal string.format() wrapper
+  luaL_loadbuffer(Handle, Pointer(@FORMATWRAPPER_CODE), SizeOf(FORMATWRAPPER_CODE), nil);
+  lua_pcall(Handle, 0, 0, 0);
+  lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
+  with TLuaDictionary(FGlobalEntities) do
+    FFormatWrapper := PLuaGlobalEntity(TLuaMemoryHeap(FMemoryHeap).Unpack(FItems[Count - 1].Value)).Ref;
+
+  // print(f) wrappers
+  AddSystemClosure('_PNT_', @TLua.__print, 0, 0);
+  AddSystemClosure('printf', @TLua.__printf, 0, 0);
 
   //InternalAddClass(TObject, False, nil)
 
@@ -11871,6 +11909,7 @@ begin
           ErrCode := i;
         fail_argument:
           lua_settop(Self.Handle, 0);
+          Result := nil;
           raise ELua.CreateFmt('Unknown argument type "%s" (arg N%d)', [Self.FStringBuffer.Default, ErrCode]) at Options.ReturnAddress;
         end;
         Inc(Arg);
@@ -13190,7 +13229,7 @@ end;          *)
 procedure TLua.InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1, P2: __luapointer);
 begin
   lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
-  lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, P1, P2, Callback), 0);
+  lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, Callback, P1, P2), 0);
   lua_rawset(Handle, -3);
 end;
 
@@ -17600,6 +17639,146 @@ begin
     lua_pushboolean(Handle, boolean(Ret));
   end;
 end;      *)
+
+function TLua.__print: Integer;
+type
+  UTF16String = {$ifdef UNICODE}UnicodeString{$else}WideString{$endif};
+const
+  HEX_CHARS: array[0..15] of WideChar = '0123456789ABCDEF';
+  TYPE_TEMPLATES: array[LUA_TTABLE..LUA_TUSERDATA] of UTF16String = (
+    'table: 01234567' {$ifdef LARGEINT}+ '89ABCDEF'{$endif},
+    'function: 01234567' {$ifdef LARGEINT}+ '89ABCDEF'{$endif},
+    'userdata: 01234567' {$ifdef LARGEINT}+ '89ABCDEF'{$endif}
+  );
+var
+  Count, i, j, LuaType: Integer;
+  Buffer: ^UTF16String;
+  X: NativeUInt;
+  S: PWideChar;
+{$ifNdef UNICODE}
+  Output: THandle;
+  Written: Cardinal;
+const
+  CRLF_CHAR: WideChar = #10;
+{$endif}
+begin
+  Count := lua_gettop(Handle);
+  {$ifdef UNICODE}
+    Buffer := @FStringBuffer.Unicode;
+  {$else}
+    Buffer := @FStringBuffer.Wide;
+  {$endif}
+
+  if (Count = 0) then
+  begin
+    Writeln;
+  end else
+  for i := 1 to Count do
+  begin
+    LuaType := lua_type(Handle, i);
+    case LuaType of
+      LUA_TNIL:
+      begin
+        Buffer^ := 'nil';
+      end;
+      LUA_TBOOLEAN:
+      begin
+        if (lua_toboolean(Handle, i)) then
+        begin
+          Buffer^ := 'true';
+        end else
+        begin
+          Buffer^ := 'false';
+        end;
+      end;
+      LUA_TNUMBER, LUA_TSTRING:
+      begin
+        {$ifdef UNICODE}
+          stack_unicode_string(Buffer^, i);
+        {$else}
+          stack_wide_string(Buffer^, i);
+        {$endif}
+      end;
+      LUA_TLIGHTUSERDATA, LUA_TTABLE, LUA_TFUNCTION, LUA_TUSERDATA:
+      begin
+        if (LuaType = LUA_TLIGHTUSERDATA) then LuaType := LUA_TUSERDATA;
+        Buffer^ := TYPE_TEMPLATES[LuaType];
+        UniqueString(Buffer^);
+        S := @Buffer^[Length(Buffer^)];
+        X := NativeUInt(lua_topointer(Handle, i));
+        for j := 1 to SizeOf(Pointer) * 2 do
+        begin
+          S^ := HEX_CHARS[X and 15];
+          X := X shr 4;
+          Dec(S);
+        end;
+      end;
+    else
+      Buffer^ := 'no value';
+    end;
+
+    if (i <> 1) then Write(#9);
+
+    {$ifdef UNICODE}
+      if (i = Count) then
+      begin
+        Writeln(Buffer^);
+      end else
+      begin
+        Write(Buffer^);
+      end;
+    {$else .MSWINDOWS}
+      Output := GetStdHandle(STD_OUTPUT_HANDLE);
+      WriteConsoleW(Output, Pointer(Buffer^), Length(Buffer^), Written, nil);
+      if (i = Count) then WriteConsoleW(Output, @CRLF_CHAR, 1, Written, nil);
+    {$endif}
+  end;
+
+  Result := 0;
+end;
+
+function TLua.__printf: Integer;
+const
+  SLN_CONST: Cardinal = Ord('S') + (Ord('l') shl 8) + (Ord('n') shl 16);
+var
+  Count, ErrCode, P: Integer;
+  Err: ^string;
+begin
+  Count := lua_gettop(Handle);
+
+  global_push_value(FFormatWrapper);
+  lua_insert(Handle, 1);
+  ErrCode := lua_pcall(Self.Handle, Count, LUA_MULTRET, 0);
+  if (ErrCode = 0) then ErrCode := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
+  if (ErrCode <> 0) then
+  begin
+    Err := @FStringBuffer.Default;
+    {$ifdef UNICODE}
+      stack_unicode_string(Err^, -1);
+    {$else}
+      stack_ansi_string(Err^, -1, 0);
+    {$endif}
+    stack_pop;
+    P := Pos(']', Err^);
+    Delete(Err^, 1, P);
+
+    repeat
+      P := Pos('format', Err^);
+      if (P = 0) then Break;
+
+      Err^[P + 0] := 'p';
+      Err^[P + 1] := 'r';
+      Err^[P + 2] := 'i';
+      Err^[P + 3] := 'n';
+      Err^[P + 4] := 't';
+      Err^[P + 5] := 'f';
+    until (False);
+
+    Self.Error(Err^);
+  end;
+
+  Result := __print;
+end;
 
 function TLua.ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
 begin

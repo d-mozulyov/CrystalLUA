@@ -12565,7 +12565,7 @@ begin
       X := CHAR_TABLE[S^];
     until (X <> CHAR_SPACE);
     if (X <> 0) then goto next_find;
-                (*
+
     // detect "print" function
     if (S^ <> Ord('t')) then goto next_find;
     if (S = Start) then goto next_find;
@@ -12580,7 +12580,7 @@ begin
     if (S = Start) then goto next_find;
     Dec(S);
     if (S^ <> Ord('p')) then goto next_find;
-    StoredPrint := S;  *) goto next_find; {$message '<-- здесь'}
+    StoredPrint := S;
 
     // detect not "."/":" before "print"
     repeat

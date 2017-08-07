@@ -113,6 +113,10 @@ unit CrystalLUA;
    {$endif}
 {$ifend}
 
+{$ifdef MSWINDOWS}
+  {$define LUA_NATIVEFUNC}
+{$endif}
+
 interface
   uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo, System.RTLConsts{$else}Types, TypInfo, RTLConsts{$endif},
        {$ifdef UNICODE}{$ifdef UNITSCOPENAMES}System.Character{$else}Character{$endif},{$endif}
@@ -199,14 +203,15 @@ type
   __luabuffer = type AnsiString;
   // internal memory offset (optional pointer in 32-bit platforms)
   __luapointer = type Integer;
-  
+  // internal parametrized function
+  __luafunction = type {$ifdef LUA_NATIVEFUNC}Pointer{$else}Integer{$endif};
+
   // internal containers
   __TLuaMemoryHeap = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaStack = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaBuffer = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaStringDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
-  __TLuaCFunctionHeap = array[1..8{$ifdef LARGEINT}* 2{$endif}] of Byte;
 
 type
   TLua = class;
@@ -1017,8 +1022,10 @@ type
  //   function  GlobalVariablePos(const Name: pchar; const NameLength: integer; var Index: integer; const auto_create: boolean=false): boolean;
   private
     // registrations
- //   FTypesList: __TLuaList {TLuaMetaType};
-    FCFunctionHeap: __TLuaCFunctionHeap;
+    {$ifdef LUA_NATIVEFUNC}
+    FCFunctionHeap: array[1..8{$ifdef LARGEINT}* 2{$endif}] of Byte{TLuaCFunctionHeap};
+    {$endif}
+
   //  FProcList: __TLuaList {TLuaProcInfo};
   //  FPropertiesList: __TLuaList {TLuaPropertyInfo};
 
@@ -1039,7 +1046,13 @@ type
     EnumerationList: TIntegerDynArray; // список enumeration typeinfo, чтобы по несколько раз не регистрировать Enum-ы
   *)     (*
     procedure INITIALIZE_NAME_SPACE();    *)
+
+    function push_newfunction(const Callback: Pointer; const P1, P2: __luapointer; const StoreMode: Boolean): __luafunction;
+    procedure push_function(const Func: __luafunction);
+    function function_topointer(const StackIndex: Integer): Pointer;
+
     procedure InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1: __luapointer = -1; const P2: __luapointer = -1);
+    procedure InternalUnregisterCallback(const Name: __luaname);
     function  InternalRegisterMetaTable(const MetaType: PLuaMetaType = nil): Integer;
     function  InternalTableToMetaType(const StackIndex: Integer): PLuaMetaType;
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
@@ -1415,7 +1428,8 @@ type
 
 var
   LUA_VERSION_52: Boolean = False;
-  LUA_REGISTRYINDEX: integer = -10000;
+  LUA_REGISTRYINDEX: Integer = -10000;
+  LUA_UPVALUEINDEX: Integer = -10003;
 
 const
   LUA_MULTRET = -1;
@@ -1445,6 +1459,7 @@ var
   lua_next: function(L: Plua_State; idx: Integer): Integer; cdecl;
   lua_getstack: function(L: Plua_State; level: Integer; ar: Plua_Debug): Integer; cdecl;
   lua_getinfo: function(L: Plua_State; const what: __luaname; ar: Plua_Debug): Integer; cdecl;
+  lua_getupvalue: function(L: Plua_State; funcindex, n: Integer): __luaname; cdecl;
 
   lua_type: function(L: Plua_State; idx: Integer): Integer; cdecl;
   lua_gettop: function(L: Plua_State): Integer; cdecl;
@@ -1592,7 +1607,11 @@ begin
     if (LoadLuaLibrary = 0) then Exit;
 
     LUA_VERSION_52 := not FailLoad(Buffer, 'lua_tounsignedx');
-    if (LUA_VERSION_52) then LUA_REGISTRYINDEX := (-1000000 - 1000);
+    if (LUA_VERSION_52) then
+    begin
+      LUA_REGISTRYINDEX := (-1000000 - 1000);
+      LUA_UPVALUEINDEX := LUA_REGISTRYINDEX - 1;
+    end;
 
     if FailLoad(@lua_open, 'luaL_newstate') then Exit;
     if FailLoad(@luaL_openlibs, 'luaL_openlibs') then Exit;
@@ -1618,6 +1637,7 @@ begin
     if FailLoad(@lua_next, 'lua_next') then Exit;
     if FailLoad(@lua_getstack, 'lua_getstack') then Exit;
     if FailLoad(@lua_getinfo, 'lua_getinfo') then Exit;
+    if FailLoad(@lua_getupvalue, 'lua_getupvalue') then Exit;
 
     if FailLoad(@lua_type, 'lua_type') then Exit;
     if FailLoad(@lua_gettop, 'lua_gettop') then Exit;
@@ -3276,6 +3296,7 @@ end;
 
 { LuaCFunction routine }
 
+{$ifdef LUA_NATIVEFUNC}
 const
   MEMORY_PAGE_SIZE = 4 * 1024;
   MEMORY_PAGE_CLEAR = -MEMORY_PAGE_SIZE;
@@ -3289,14 +3310,11 @@ const
 type
   PLuaCFunctionData = ^TLuaCFunctionData;
   TLuaCFunctionData = object
-    {$if Defined(CPUX86)}
+    {$ifdef CPUX86}
       Bytes: array[0..19] of Byte;
-    {$elseif Defined(CPUX64)}
+    {$else .CPUX64}
       Bytes: array[0..33] of Byte;
-    {$else}
-      Bytes: array[0..0] of Byte;
-    {$ifend}
-
+    {$endif}
     procedure Init(const Lua: TLua; const P1, P2: __luapointer; const Callback: Pointer);
   end;
 
@@ -3471,12 +3489,7 @@ begin
   while (Block <> nil) do
   begin
     Next := Block.Next;
-
-    {$if Defined(MSWINDOWS)}
-      VirtualFree(Block, 0, MEM_RELEASE);
-    {$else}
-    {$ifend}
-
+    VirtualFree(Block, 0, MEM_RELEASE);
     Block := Next;
   end;
 end;
@@ -3490,11 +3503,7 @@ var
   function CommitPage(const ABlock: PLuaCFunctionBlock; const AIndex: NativeInt): PLuaCFunctionPage; far;
   begin
     Result := Pointer(NativeInt(ABlock) + AIndex * MEMORY_PAGE_SIZE);
-
-    {$if Defined(MSWINDOWS)}
-      VirtualAlloc(Result, MEMORY_PAGE_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    {$else}
-    {$ifend}
+    VirtualAlloc(Result, MEMORY_PAGE_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 
     ABlock.Empties := ABlock.Empties or (1 shl AIndex);
     ABlock.Reserved := ABlock.Reserved or (1 shl AIndex);
@@ -3531,10 +3540,7 @@ begin
 
   if (Result = nil) then
   begin
-    {$if Defined(MSWINDOWS)}
-      Block := VirtualAlloc(nil, MEMORY_BLOCK_SIZE, MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    {$else}
-    {$ifend}
+    Block := VirtualAlloc(nil, MEMORY_BLOCK_SIZE, MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
     if (Block <> nil) then
     begin
@@ -3569,10 +3575,7 @@ begin
   begin
     Block.Empties := Block.Empties and (not (1 shl Index));
     Block.Reserved := Block.Reserved and (not (1 shl Index));
-    {$if Defined(MSWINDOWS)}
-      VirtualFree(Page, MEMORY_PAGE_SIZE, MEM_DECOMMIT);
-    {$else}
-    {$ifend}
+    VirtualFree(Page, MEMORY_PAGE_SIZE, MEM_DECOMMIT);
   end;
 
   // check empty block
@@ -3588,16 +3591,14 @@ begin
     if (Item = Block) then
     begin
       Parent^ := Item.Next;
-      {$if Defined(MSWINDOWS)}
-        VirtualFree(Item, 0, MEM_RELEASE);
-      {$else}
-      {$ifend}
+      VirtualFree(Item, 0, MEM_RELEASE);
       Break;
     end;
 
     Parent := @Item.Next;
   until (False);
 end;
+{$endif}
 
 
 { Containers }
@@ -6601,7 +6602,7 @@ type
     Kind: TLuaProcKind;
     ArgsCount: Integer;
     Address: Pointer;
-    CFunction: Pointer;
+    Value: __luafunction;
   end;
   PLuaProc = ^TLuaProc;
 
@@ -6735,58 +6736,6 @@ type
   end;
   PLuaUserData = ^TLuaUserData;
 
-
-function CFunctionPtr(const CFunction: Pointer): Pointer;
-var
-  Data: PLuaCFunctionData;
-  Offset: NativeInt;
-  Address: Pointer;
-  {$ifdef LARGEINT}
-  Heap: ^TLuaMemoryHeap;
-  {$endif}
-  MetaType: ^TLuaMetaType;
-  Proc: ^TLuaProc;
-begin
-  Result := Pointer(CFunction);
-
-  if (not Assigned(Result)) then Exit;
-  with PLuaCFunctionPage(NativeInt(Result) and MEMORY_PAGE_CLEAR)^ do
-    if (MarkerLow <> MEMORY_PAGE_MARKER_LOW) or (MarkerHigh <> MEMORY_PAGE_MARKER_HIGH) then Exit;
-
-  // callback address
-  Data := Result;
-  {$ifdef CPUX86}
-    Offset := PInteger(@Data.Bytes[16])^;
-    Address := Pointer(Offset + (NativeInt(@Data.Bytes[15]) + 5));
-  {$endif}
-  {$ifdef CPUX64}
-    if (Data.Bytes[21] = $E9) then
-    begin
-      Offset := PInteger(@Data.Bytes[21])^;
-      Address := Pointer(Offset + (NativeInt(@Data.Bytes[21]) + 5));
-    end else
-    begin
-      Address := PPointer(@Data.Bytes[23])^;
-    end;
-  {$endif}
-  if (Address <> @TLua.ProcCallback) then Exit;
-
-  // parameters
-  {$ifdef CPUX86}
-    MetaType := PPointer(@Data.Bytes[6])^;
-    Proc := PPointer(@Data.Bytes[11])^;
-  {$endif}
-  {$ifdef CPUX64}
-    Heap := Pointer(@TLua(PPointer(@Data.Bytes[2])^).FMemoryHeap);
-    MetaType := Heap.Unpack(PInteger(@Data.Bytes[11])^);
-    Proc := Heap.Unpack(PInteger(@Data.Bytes[17])^);
-  {$endif}
-
-  // result (optional virtual)
-  Result := Proc.Address;
-  if (NativeUInt(Result) >= PROPSLOT_VIRTUAL) then
-    Result := PPointer(NativeInt(MetaType.F.AClass) + NativeInt(Result) and PROPSLOT_CLEAR)^;
-end;
 
 procedure TLuaUserData.GetDescription(var Result: string; const Lua: TLua);
 begin
@@ -7976,28 +7925,28 @@ const
   // TLuaReference
   STD_VALUE = 21;
 
-  ID_TYPE: array[0..4] of Byte = (4, Ord('T'), Ord('y'), Ord('p'), Ord('e'));
-  ID_TYPENAME: array[0..8] of Byte = (8, Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('N'), Ord('a'), Ord('m'), Ord('e'));
-  ID_TYPEPARENT: array[0..10] of Byte = (10, Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('P'), Ord('a'), Ord('r'), Ord('e'), Ord('n'), Ord('t'));
-  ID_INHERITSFROM: array[0..12] of Byte = (12, Ord('I'), Ord('n'), Ord('h'), Ord('e'), Ord('r'), Ord('i'), Ord('t'), Ord('s'), Ord('F'), Ord('r'), Ord('o'), Ord('m'));
-  ID_ASSIGN: array[0..6] of Byte = (6, Ord('A'), Ord('s'), Ord('s'), Ord('i'), Ord('g'), Ord('n'));
-  ID_ISREF: array[0..5] of Byte = (5, Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('f'));
-  ID_ISCONST: array[0..7] of Byte = (7, Ord('I'), Ord('s'), Ord('C'), Ord('o'), Ord('n'), Ord('s'), Ord('t'));
-  ID_ISCLASS: array[0..7] of Byte = (7, Ord('I'), Ord('s'), Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'));
-  ID_ISRECORD: array[0..8] of Byte = (8, Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'));
-  ID_ISARRAY: array[0..7] of Byte = (7, Ord('I'), Ord('s'), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'));
-  ID_ISSET: array[0..5] of Byte = (5, Ord('I'), Ord('s'), Ord('S'), Ord('e'), Ord('t'));
-  ID_ISEMPTY: array[0..7] of Byte = (7, Ord('I'), Ord('s'), Ord('E'), Ord('m'), Ord('p'), Ord('t'), Ord('y'));
-  ID_CREATE: array[0..6] of Byte = (6, Ord('C'), Ord('r'), Ord('e'), Ord('a'), Ord('t'), Ord('e'));
-  ID_FREE: array[0..4] of Byte = (4, Ord('F'), Ord('r'), Ord('e'), Ord('e'));
-  ID_LOW: array[0..3] of Byte = (3, Ord('L'), Ord('o'), Ord('w'));
-  ID_HIGH: array[0..4] of Byte = (4, Ord('H'), Ord('i'), Ord('g'), Ord('h'));
-  ID_LENGTH: array[0..6] of Byte = (6, Ord('L'), Ord('e'), Ord('n'), Ord('g'), Ord('t'), Ord('h'));
-  ID_RESIZE: array[0..6] of Byte = (6, Ord('R'), Ord('e'), Ord('s'), Ord('i'), Ord('z'), Ord('e'));
-  ID_INCLUDE: array[0..7] of Byte = (7, Ord('I'), Ord('n'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'));
-  ID_EXCLUDE: array[0..7] of Byte = (7, Ord('E'), Ord('x'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'));
-  ID_CONTAINS: array[0..8] of Byte = (8, Ord('C'), Ord('o'), Ord('n'), Ord('t'), Ord('a'), Ord('i'), Ord('n'), Ord('s'));
-  ID_VALUE: array[0..5] of Byte = (5, Ord('V'), Ord('a'), Ord('l'), Ord('u'), Ord('e'));
+  ID_TYPE: array[0..4] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), 0);
+  ID_TYPENAME: array[0..8] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('N'), Ord('a'), Ord('m'), Ord('e'), 0);
+  ID_TYPEPARENT: array[0..10] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('P'), Ord('a'), Ord('r'), Ord('e'), Ord('n'), Ord('t'), 0);
+  ID_INHERITSFROM: array[0..12] of Byte = (Ord('I'), Ord('n'), Ord('h'), Ord('e'), Ord('r'), Ord('i'), Ord('t'), Ord('s'), Ord('F'), Ord('r'), Ord('o'), Ord('m'), 0);
+  ID_ASSIGN: array[0..6] of Byte = (Ord('A'), Ord('s'), Ord('s'), Ord('i'), Ord('g'), Ord('n'), 0);
+  ID_ISREF: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('f'), 0);
+  ID_ISCONST: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('o'), Ord('n'), Ord('s'), Ord('t'), 0);
+  ID_ISCLASS: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'), 0);
+  ID_ISRECORD: array[0..8] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'), 0);
+  ID_ISARRAY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), 0);
+  ID_ISSET: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('S'), Ord('e'), Ord('t'), 0);
+  ID_ISEMPTY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('E'), Ord('m'), Ord('p'), Ord('t'), Ord('y'), 0);
+  ID_CREATE: array[0..6] of Byte = (Ord('C'), Ord('r'), Ord('e'), Ord('a'), Ord('t'), Ord('e'), 0);
+  ID_FREE: array[0..4] of Byte = (Ord('F'), Ord('r'), Ord('e'), Ord('e'), 0);
+  ID_LOW: array[0..3] of Byte = (Ord('L'), Ord('o'), Ord('w'), 0);
+  ID_HIGH: array[0..4] of Byte = (Ord('H'), Ord('i'), Ord('g'), Ord('h'), 0);
+  ID_LENGTH: array[0..6] of Byte = (Ord('L'), Ord('e'), Ord('n'), Ord('g'), Ord('t'), Ord('h'), 0);
+  ID_RESIZE: array[0..6] of Byte = (Ord('R'), Ord('e'), Ord('s'), Ord('i'), Ord('z'), Ord('e'), 0);
+  ID_INCLUDE: array[0..7] of Byte = (Ord('I'), Ord('n'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
+  ID_EXCLUDE: array[0..7] of Byte = (Ord('E'), Ord('x'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
+  ID_CONTAINS: array[0..8] of Byte = (Ord('C'), Ord('o'), Ord('n'), Ord('t'), Ord('a'), Ord('i'), Ord('n'), Ord('s'), 0);
+  ID_VALUE: array[0..5] of Byte = (Ord('V'), Ord('a'), Ord('l'), Ord('u'), Ord('e'), 0);
 
   ID_INDEX: array[0..7] of Byte = (Ord('_'), Ord('_'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
   ID_NEWINDEX: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('n'), Ord('e'), Ord('w'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
@@ -8076,6 +8025,7 @@ begin
 end;  
                 *)
 
+
 constructor TLua.Create();
 const
   STANDARD_NAMES: array[STD_TYPE..STD_VALUE] of Pointer = (
@@ -8092,14 +8042,13 @@ const
     Ord('f'), Ord('o'), Ord('r'), Ord('m'), Ord('a'), Ord('t'), Ord('('), Ord('.'), Ord('.'), Ord('.'), Ord(')'), Ord(' '),
     Ord(' '), Ord('e'), Ord('n'), Ord('d'));
 var
-  i, Len: Integer;
-  S: PByte;
+  i: Integer;
 
   procedure AddSystemClosure(const Name: LuaString; const Callback: Pointer; const P1, P2: __luapointer);
   begin
     lua_pushnil(Handle);
     push_lua_string(Name);
-    lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, Callback, P1, P2), 0);
+    push_newfunction(Callback, P1, P2, False);
     __global_newindex(0, 0);
     lua_settop(Handle, 0);
     with PLuaGlobalEntity(GetGlobalEntity(Name, False))^ do
@@ -8129,10 +8078,7 @@ begin
   // standard names
   for i := Low(STANDARD_NAMES) to High(STANDARD_NAMES) do
   begin
-    S := STANDARD_NAMES[i];
-    Len := S^;
-    Inc(S);
-    lua_pushlstring(Handle, __luaname(S), Len);
+    lua_pushlstring(Handle, STANDARD_NAMES[i], LStrLen(STANDARD_NAMES[i]));
     TLuaDictionary(FStandardNames).Add(lua_tolstring(Handle, -1, nil), i);
     global_fill_value(global_alloc_ref);
   end;
@@ -8154,7 +8100,6 @@ begin
   // print(f) wrappers
   AddSystemClosure('_PNT_', @TLua.__print, 0, 0);
   AddSystemClosure('printf', @TLua.__printf, 0, 0);
-
 
 
   (*
@@ -8242,7 +8187,9 @@ begin
   TLuaStringDictionary(FNames).Clear;
   TLuaDictionary(FMetaTypes).Clear;
   TLuaDictionary(FGlobalEntities).Clear;
+  {$ifdef LUA_NATIVEFUNC}
   TLuaCFunctionHeap(FCFunctionHeap).Clear;
+  {$endif}
 
   inherited;
 end;
@@ -10339,7 +10286,7 @@ begin
     LUA_TFUNCTION:
     begin
       Ret.F.LuaType := ltPointer;
-      Ret.F.VPointer := CFunctionPtr(Pointer(lua_tocfunction(Handle, StackIndex)));
+      Ret.F.VPointer := function_topointer(StackIndex);
     end;
     LUA_TUSERDATA:
     begin
@@ -12023,7 +11970,7 @@ begin
           gkProc:
           begin
             Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(Self.FMemoryHeap).Unpack{$endif}(Entity.Ptr);
-            lua_pushcclosure(Self.Handle, Proc.CFunction, 0);
+            Self.push_function(Proc.Value);
           end;
           gkScriptVariable:
           begin
@@ -13227,10 +13174,171 @@ const
   GLOBAL_INDEX_KINDS: set of TLuaGlobalKind = [gkConst, gkScriptVariable];
   CONST_GLOBAL_KINDS: set of TLuaGlobalKind = [gkMetaType, gkProc, gkConst];
 
+{$ifNdef LUA_NATIVEFUNC}
+type
+  TLuaFunctionParams = packed record
+    Lua: TLua;
+    Callback: function(const Lua: TLua; const P1, P2: __luapointer): Integer;
+    P1: __luapointer;
+    P2: __luapointer;
+  end;
+  PLuaFunctionParams = ^TLuaFunctionParams;
+
+function LuaFuntionWrapper(L: Plua_State): Integer; cdecl;
+var
+  Params: PLuaFunctionParams;
+begin
+  Params := lua_touserdata(L, LUA_UPVALUEINDEX);
+  Result := Params.Callback(Params.Lua, Params.P1, Params.P2);
+end;
+{$endif}
+
+function TLua.push_newfunction(const Callback: Pointer; const P1, P2: __luapointer;
+  const StoreMode: Boolean): __luafunction;
+{$ifdef LUA_NATIVEFUNC}
+begin
+  Result := TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, Callback, P1, P2);
+  lua_pushcclosure(Handle, Result, 0);
+end;
+{$else}
+var
+  Params: PLuaFunctionParams;
+begin
+  Params := lua_newuserdata(Handle, SizeOf(TLuaFunctionParams));
+  Params.Lua := Self;
+  Params.Callback := Callback;
+  Params.P1 := P1;
+  Params.P2 := P2;
+  lua_pushcclosure(Handle, LuaFuntionWrapper, 1);
+
+  if (StoreMode) then
+  begin
+    Result := global_alloc_ref;
+    lua_pushvalue(Handle, -1);
+    global_fill_value(Result);
+  end else
+  begin
+    Result := 0;
+  end;
+end;
+{$endif}
+
+procedure TLua.push_function(const Func: __luafunction);
+begin
+  {$ifdef LUA_NATIVEFUNC}
+    lua_pushcclosure(Handle, Func, 0);
+  {$else}
+    global_push_value(Func);
+  {$endif}
+end;
+
+function TLua.function_topointer(const StackIndex: Integer): Pointer;
+{$ifdef LUA_NATIVEFUNC}
+var
+  Data: PLuaCFunctionData;
+  Offset: NativeInt;
+  {$ifdef LARGEINT}
+  Heap: ^TLuaMemoryHeap;
+  {$endif}
+  MetaType: ^TLuaMetaType;
+  Proc: ^TLuaProc;
+begin
+  Result := Pointer(lua_tocfunction(Handle, StackIndex));
+
+  if (not Assigned(Result)) then Exit;
+  with PLuaCFunctionPage(NativeInt(Result) and MEMORY_PAGE_CLEAR)^ do
+    if (MarkerLow <> MEMORY_PAGE_MARKER_LOW) or (MarkerHigh <> MEMORY_PAGE_MARKER_HIGH) then Exit;
+
+  // callback address
+  Data := Result;
+  {$ifdef CPUX86}
+    Offset := PInteger(@Data.Bytes[16])^;
+    Result := Pointer(Offset + (NativeInt(@Data.Bytes[15]) + 5));
+  {$endif}
+  {$ifdef CPUX64}
+    if (Data.Bytes[21] = $E9) then
+    begin
+      Offset := PInteger(@Data.Bytes[21])^;
+      Result := Pointer(Offset + (NativeInt(@Data.Bytes[21]) + 5));
+    end else
+    begin
+      Result := PPointer(@Data.Bytes[23])^;
+    end;
+  {$endif}
+  if (Result <> @TLua.ProcCallback) then Exit;
+
+  // parameters
+  {$ifdef CPUX86}
+    MetaType := PPointer(@Data.Bytes[6])^;
+    Proc := PPointer(@Data.Bytes[11])^;
+  {$endif}
+  {$ifdef CPUX64}
+    Heap := Pointer(@TLua(PPointer(@Data.Bytes[2])^).FMemoryHeap);
+    MetaType := Heap.Unpack(PInteger(@Data.Bytes[11])^);
+    Proc := Heap.Unpack(PInteger(@Data.Bytes[17])^);
+  {$endif}
+
+  // result (optional virtual)
+  Result := Proc.Address;
+  if (NativeUInt(Result) >= PROPSLOT_VIRTUAL) then
+    Result := PPointer(NativeInt(MetaType.F.AClass) + NativeInt(Result) and PROPSLOT_CLEAR)^;
+end;
+{$else}
+var
+  Params: PLuaFunctionParams;
+  {$ifdef LARGEINT}
+  Heap: ^TLuaMemoryHeap;
+  {$endif}
+  MetaType: ^TLuaMetaType;
+  Proc: ^TLuaProc;
+begin
+  Result := Pointer(lua_tocfunction(Handle, StackIndex));
+  if (not Assigned(Result)) or (Result <> @LuaFuntionWrapper) then Exit;
+
+  // callback address
+  lua_getupvalue(Handle, StackIndex, 1);
+  Params := lua_touserdata(Handle, -1);
+  stack_pop;
+  Result := @Params.Callback;
+  if (Result <> @TLua.ProcCallback) then Exit;
+
+  // parameters
+  {$ifdef CPUX86}
+    MetaType := Pointer(Params.P1);
+    Proc := Pointer(Params.P2);
+  {$endif}
+  {$ifdef CPUX64}
+    Heap := Pointer(@Params.Lua.FMemoryHeap);
+    MetaType := Heap.Unpack(Params.P1);
+    Proc := Heap.Unpack(Params.P2);
+  {$endif}
+
+  // result (optional virtual)
+  Result := Proc.Address;
+  if (NativeUInt(Result) >= PROPSLOT_VIRTUAL) then
+    Result := PPointer(NativeInt(MetaType.F.AClass) + NativeInt(Result) and PROPSLOT_CLEAR)^;
+end;
+{$endif}
+
 procedure TLua.InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1, P2: __luapointer);
 begin
   lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
-  lua_pushcclosure(Handle, TLuaCFunctionHeap(FCFunctionHeap).Alloc(Self, Callback, P1, P2), 0);
+  push_newfunction(Callback, P1, P2, False);
+  lua_rawset(Handle, -3);
+end;
+
+procedure TLua.InternalUnregisterCallback(const Name: __luaname);
+begin
+  lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
+
+  {$ifdef LUA_NATIVEFUNC}
+  lua_pushvalue(Handle, -1);
+  lua_rawget(Handle, -3);
+  TLuaCFunctionHeap(FCFunctionHeap).Free(Pointer(lua_tocfunction(Handle, -1)));
+  stack_pop;
+  {$endif}
+
+  lua_pushnil(Handle);
   lua_rawset(Handle, -3);
 end;
 
@@ -16509,7 +16617,7 @@ begin
       begin
         Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
         Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
-        lua_pushcclosure(Handle, Proc.CFunction, 0);
+        push_function(Proc.Value);
         goto done;
       end;
     end;
@@ -17341,8 +17449,7 @@ property_set:
             end;
             LUA_TFUNCTION:
             begin
-              Value := NativeInt(lua_tocfunction(Handle, -1));
-              if (Value <> 0) then Value := NativeInt(CFunctionPtr(Pointer(Value)));
+              Value := NativeInt(function_topointer(-1));
             end;
             LUA_TTABLE:
             begin
@@ -17518,7 +17625,7 @@ begin
     gkProc:
     begin
       Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Entity.Ptr);
-      lua_pushcclosure(Handle, Proc.CFunction, 0);
+      push_function(Proc.Value);
     end;
   else
     // gkConst, gkScriptVariable

@@ -211,7 +211,6 @@ type
   __TLuaStack = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaBuffer = array[1..12{$ifdef LARGEINT}* 2{$endif}] of Byte;
   __TLuaDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
-  __TLuaStringDictionary = array[1..20{$ifdef LARGEINT}* 2{$endif}] of Byte;
 
 type
   TLua = class;
@@ -468,9 +467,8 @@ type
       1: (AClass: TClass);
     end;
     FLua: TLua;
-    FNameOffset: Cardinal;
+    FName: LuaString;
 
-    function GetName: LuaString;
     {$ifdef SMALLINT}
     function GetPtr: __luapointer; {$ifdef INLINESUPPORT}inline;{$endif}
     {$endif}
@@ -484,7 +482,7 @@ type
     procedure Assign(const Instance, Value: Pointer{/TObject});
   public
     property Lua: TLua read FLua;
-    property Name: LuaString read GetName;
+    property Name: LuaString read FName;
     property Size: Integer read F.Size;
   end;
   PLuaMetaType = ^TLuaMetaType;
@@ -982,7 +980,7 @@ type
     FRefStack: __TLuaStack;
     FMemoryHeap: __TLuaMemoryHeap;
     FStandardNames: __TLuaDictionary {__luaname, Value};
-    FNames: __TLuaStringDictionary {<LuaString,__luaname>};
+    FNames: array[1..24{$ifdef LARGEINT}* 2{$endif}] of Byte{TLuaNames};
     FMetaTypes: __TLuaDictionary {Pointer, PMetaType};
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
     FGlobalMetaTable: Integer;
@@ -999,10 +997,6 @@ type
     procedure global_free_ref(var Ref: Integer);
     procedure global_fill_value(const Ref: Integer);
     procedure global_push_value(const Ref: Integer);
-
-    // dictionaty: find or add (+ internal reference)
-    function GetLuaNameScoped(const Value: LuaString): Pointer{LuaString}; {$ifNdef UNITSCOPENAMES}{$ifdef INLINESUPPORTSIMPLE}inline;{$endif}{$endif}
-    function GetLuaNameItem(const Value: LuaString; const ModeCreate: Boolean): Pointer{PLuaStringDictionaryItem};
 
     // public globals
     function GetGlobalEntity(const Name: LuaString; const ModeCreate: Boolean): Pointer{PLuaGlobalEntity};
@@ -1056,7 +1050,7 @@ type
     function  InternalRegisterMetaTable(const MetaType: PLuaMetaType = nil): Integer;
     function  InternalTableToMetaType(const StackIndex: Integer): PLuaMetaType;
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname; const ReturnAddress: Pointer): Pointer{PLuaGlobalEntity};
-    function  InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem}; const TypeInfo: Pointer;
+    function  InternalAddMetaType(const Kind: TLuaMetaKind; const Name: LuaString; const TypeInfo: Pointer;
       const InstanceSize: Integer; const ReturnAddress: Pointer; const AdditionalSize: NativeInt = 0): PLuaMetaType;
     function  InternalNearestClass(const AClass: TClass): PLuaMetaType;
     function  InternalAddClass(const AClass: TClass; const UsePublished: Boolean; const ReturnAddress: Pointer): PLuaClassInfo;
@@ -3689,32 +3683,36 @@ type
     property Count: NativeInt read FCount;
   end;
 
-  PLuaStringDictionaryItem = ^TLuaStringDictionaryItem;
-  TLuaStringDictionaryItem = packed record
-    Key: LuaString;
+  PLuaNameItem = ^TLuaNameItem;
+  TLuaNameItem = packed record
+    HashCode: Integer;
     Value: __luaname;
     Next: Integer;
   end;
 
-  TLuaStringDictionary = object{<LuaString,__luaname>}
+  TLuaNames = object{TDictionary<__luaname,__luaname>}
   private
-    FItems: array of TLuaStringDictionaryItem;
+    FLua: TLua;
+    FItems: array of TLuaNameItem;
     FHashes: array of Integer;
     FHashesMask: NativeInt;
     FCapacity: NativeInt;
     FCount: NativeInt;
 
-    function GetHashCode(const Key: LuaString): Integer;
     procedure Grow;
-    function NewItem(const Key: LuaString): PLuaStringDictionaryItem;
-    function InternalFind(const Key: LuaString; const ModeCreate: Boolean): PLuaStringDictionaryItem;
+    function NewItem(const HashCode: Integer): PLuaNameItem;
+    function InternalFind(const ModeCreate: Boolean): PLuaNameItem;
+    procedure InitBuffer(const Key: LuaString); overload;
+    procedure InitBuffer(const RttiName: ShortString); overload;
   public
     procedure Clear;
     procedure TrimExcess;
-    function Find(const Key: LuaString): PLuaStringDictionaryItem; {$ifdef INLINESUPPORT}inline;{$endif}
-    procedure Add(const Key: LuaString; const Value: __luaname);
-    function FindValue(const Key: LuaString): __luaname;
+    function Add(const Key: LuaString): __luaname; overload;
+    function Add(const RttiName: ShortString): __luaname; overload;
+    function FindValue(const Key: LuaString): __luaname; overload;
+    function FindValue(const RttiName: ShortString): __luaname; overload;
 
+    property Lua: TLua read FLua write FLua;
     property Capacity: NativeInt read FCapacity;
     property Count: NativeInt read FCount;
   end;
@@ -4126,8 +4124,7 @@ begin
     Result := Item.Value;
 end;
 
-
-procedure TLuaStringDictionary.Clear;
+procedure TLuaNames.Clear;
 begin
   FItems := nil;
   FHashes := nil;
@@ -4136,38 +4133,21 @@ begin
   FCount := 0;
 end;
 
-function TLuaStringDictionary.GetHashCode(const Key: LuaString): Integer;
+procedure TLuaNames.TrimExcess;
 var
-  X, i : Integer;
-  S: PLuaChar;
-begin
-  Result := Length(Key);
-  S := Pointer(Key);
-  X := 63689;
-  for i := 1 to Result do
-  begin
-    Result := Result * X + Integer(S^);
-    Inc(S);
-    X := X * 378551;
-  end;
-end;
-
-procedure TLuaStringDictionary.TrimExcess;
-var
-  NewItems: array of TLuaStringDictionaryItem;
+  NewItems: array of TLuaNameItem;
 begin
   SetLength(NewItems, FCount);
-  System.Move(Pointer(FItems)^, Pointer(NewItems)^, FCount * SizeOf(TLuaStringDictionaryItem));
-  System.FillChar(Pointer(FItems)^, FCount * SizeOf(TLuaStringDictionaryItem), #0);
+  System.Move(Pointer(FItems)^, Pointer(NewItems)^, FCount * SizeOf(TLuaNameItem));
+  System.FillChar(Pointer(FItems)^, FCount * SizeOf(TLuaNameItem), #0);
   SwapPtr(Pointer(FItems), Pointer(NewItems));
   FCapacity := FCount;
 end;
 
-procedure TLuaStringDictionary.Grow;
+procedure TLuaNames.Grow;
 var
   i: NativeInt;
-  Item: PLuaStringDictionaryItem;
-  HashCode: Integer;
+  Item: PLuaNameItem;
   Parent: PInteger;
   Pow2, NewHashesMask, NewCapacity: NativeInt;
   NewHashes: array of Integer;
@@ -4187,8 +4167,7 @@ begin
       Item := Pointer(FItems);
       for i := 0 to Count - 1 do
       begin
-        HashCode := GetHashCode(Item.Key);
-        Parent := @NewHashes[NativeInt(HashCode) and NewHashesMask];
+        Parent := @NewHashes[NativeInt(Item.HashCode) and NewHashesMask];
         Item.Next := Parent^;
         Parent^ := i;
 
@@ -4211,13 +4190,13 @@ begin
   end;
 end;
 
-function TLuaStringDictionary.NewItem(const Key: LuaString): PLuaStringDictionaryItem;
+function TLuaNames.NewItem(const HashCode: Integer): PLuaNameItem;
 label
   start;
 var
   Index: NativeInt;
-  HashCode: Integer;
   Parent: PInteger;
+  Buffer: ^TLuaBuffer;
 begin
 start:
   Index := FCount;
@@ -4227,13 +4206,17 @@ start:
     FCount := Index;
     Dec(Index);
 
-    HashCode := GetHashCode(Key);
     Parent := @FHashes[NativeInt(HashCode) and FHashesMask];
     Result := @FItems[Index];
-    Result.Key := Key;
+    Result.HashCode := HashCode;
     Result.Value := nil;
     Result.Next := Parent^;
     Parent^ := Index;
+
+    Buffer := @TLuaBuffer(FLua.FInternalBuffer);
+    lua_pushlstring(FLua.Handle, Pointer(Buffer.FBytes), Buffer.Size);
+    Result.Value := lua_tolstring(FLua.Handle, -1, nil);
+    FLua.global_fill_value(FLua.global_alloc_ref);
   end else
   begin
     Grow;
@@ -4241,13 +4224,48 @@ start:
   end;
 end;
 
-function TLuaStringDictionary.InternalFind(const Key: LuaString; const ModeCreate: Boolean): PLuaStringDictionaryItem;
+function TLuaNames.InternalFind(const ModeCreate: Boolean): PLuaNameItem;
 var
-  HashCode: Integer;
+  Key: PByte;
+  HashCode, Length, X, i: Integer;
   HashesMask: NativeInt;
   Index: NativeInt;
 begin
-  HashCode := GetHashCode(Key);
+  // specific characters fix
+  with TLuaBuffer(FLua.FInternalBuffer) do
+  begin
+    Key := Pointer(FBytes);
+    HashCode := Size;
+  end;
+  {$if CompilerVersion >= 20}
+    for i := 1 to HashCode{Length} do
+    begin
+      case Key^ of
+        Ord('<'), Ord('>') {$ifdef UNITSCOPENAMES}, Ord('.'){$endif}:
+        begin
+          Key^ := Ord('_');
+        end;
+      end;
+      Inc(Key);
+    end;
+    Key := Pointer(TLuaBuffer(FLua.FInternalBuffer).FBytes);
+  {$ifend}
+
+  // hash code
+  X := 63689;
+  Length := HashCode{Length};
+  for i := 1 to Length do
+  begin
+    HashCode := HashCode * X + Integer(Key^);
+    Inc(Key);
+    X := X * 378551;
+  end;
+  Length := TLuaBuffer(FLua.FInternalBuffer).Size;
+  if (Length > 255) then Length := 255;
+  HashCode := (HashCode and $00ffffff) + (Length shl 24);
+  Key := Pointer(TLuaBuffer(FLua.FInternalBuffer).FBytes);
+
+  // find
   HashesMask := FHashesMask;
   if (HashesMask <> 0) then
   begin
@@ -4255,45 +4273,130 @@ begin
     if (Index >= 0) then
     repeat
       Result := @FItems[Index];
-      if (Result.Key = Key) then Exit;
+      if (Result.HashCode = HashCode) and (CompareMem(Result.Value, Key, HashCode shr 24)) then Exit;
       Index := Result.Next;
     until (Index < 0);
   end;
 
+  // not found
   if (ModeCreate) then
   begin
-    Result := NewItem(Key);
+    Result := NewItem(HashCode);
   end else
   begin
     Result := nil;
   end;
 end;
 
-function TLuaStringDictionary.Find(const Key: LuaString): PLuaStringDictionaryItem;
-{$ifdef INLINESUPPORT}
-begin
-  Result := InternalFind(Key, False);
-end;
-{$else}
-asm
-  xor ecx, ecx
-  jmp TLuaStringDictionary.InternalFind
-end;
-{$endif}
+function Utf8FromUnicode(ADest: PAnsiChar; ASource: PWideChar; ALength: Integer): Integer; forward;
 
-procedure TLuaStringDictionary.Add(const Key: LuaString; const Value: __luaname);
-begin
-  InternalFind(Key, True).Value := Value;
-end;
-
-function TLuaStringDictionary.FindValue(const Key: LuaString): __luaname;
+procedure TLuaNames.InitBuffer(const Key: LuaString);
 var
-  Item: PLuaStringDictionaryItem;
+  Length, Size: Integer;
+  Buffer: ^TLuaBuffer;
+  {$if (not Defined(LUA_UNICODE)) and (not Defined(NEXTGEN)) and Defined(INTERNALCODEPAGE)}
+  CodePage: Word;
+  {$ifend}
 begin
-  Item := InternalFind(Key, False);
-  Result := nil;
-  if (Assigned(Item)) then
-    Result := Item.Value;
+  Length := System.Length(Key);
+  Buffer := Pointer(@FLua.FInternalBuffer);
+  Buffer.Size := 0;
+
+  if (Pointer(Key) <> nil) then
+  begin
+    {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+      // Ansi/Utf8 <-- Utf16
+      Size := Length * 3 + 1;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      {$ifdef LUA_ANSI}
+        Buffer.Size := FLua.AnsiFromUnicode(Pointer(Buffer.FBytes), 0, Pointer(Key), Length);
+      {$else .LUA_UNICODE}
+        Buffer.Size := Utf8FromUnicode(Pointer(Buffer.FBytes), Pointer(Key), Length);
+      {$endif}
+    {$else .ANSISTRING}
+      // Ansi/Utf8 <-- Ansi/Utf8
+      Size := Length * 6 + 1;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      {$ifdef INTERNALCODEPAGE}
+      CodePage := PWord(NativeInt(Key) - ASTR_OFFSET_CODEPAGE)^;
+      if (CodePage = CODEPAGE_UTF8) then
+      begin
+        {$ifdef LUA_ANSI}
+          Buffer.Size := FLua.AnsiFromUtf8(Pointer(Buffer.FBytes), 0, Pointer(Key), Length);
+        {$else .LUA_UNICODE}
+          System.Move(Pointer(Key)^, Pointer(Buffer.FBytes)^, Length);
+          Buffer.Size := Length;
+        {$endif}
+      end else
+      {$endif}
+      begin
+        {$ifdef LUA_ANSI}
+          Buffer.Size := FLua.AnsiFromAnsi(, 0, Pointer(Key),
+            {$ifdef INTERNALCODEPAGE}CodePage{$else}0{$endif}, Length);
+        {$else .LUA_UNICODE}
+          Buffer.Size := FLua.Utf8FromAnsi(Pointer(Buffer.FBytes), Pointer(Key),
+            {$ifdef INTERNALCODEPAGE}CodePage{$else}0{$endif}, Length);
+        {$endif}
+      end;
+    {$ifend}
+  end;
+end;
+
+procedure TLuaNames.InitBuffer(const RttiName: ShortString);
+var
+  Length, Size: Integer;
+  Buffer: ^TLuaBuffer;
+begin
+  Length := PByte(@RttiName)^;
+  Buffer := Pointer(@FLua.FInternalBuffer);
+  Buffer.Size := 0;
+
+  if (Length <> 0) then
+  begin
+    {$ifdef UNICODE}
+      Size := Length + 1;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      {$ifdef LUA_UNICODE}
+        Buffer.Size := FLua.AnsiFromUtf8(Pointer(Buffer.FBytes), 0, Pointer(@RttiName[1]), Length);
+      {$else .LUA_ANSI}
+        Buffer.Size := Length;
+        System.Move(RttiName[1], Pointer(Buffer.FBytes)^, Length);
+      {$endif}
+    {$else .ANSI.ASCII}
+      Size := Length;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      Buffer.Size := Length;
+      System.Move(RttiName[1], Pointer(Buffer.FBytes)^, Length);
+    {$endif}
+  end;
+end;
+
+function TLuaNames.Add(const Key: LuaString): __luaname;
+begin
+  InitBuffer(Key);
+  Result := InternalFind(True).Value;
+end;
+
+function TLuaNames.Add(const RttiName: ShortString): __luaname;
+begin
+  InitBuffer(RttiName);
+  Result := InternalFind(True).Value;
+end;
+
+function TLuaNames.FindValue(const Key: LuaString): __luaname;
+begin
+  InitBuffer(Key);
+  Result := Pointer(InternalFind(False));
+  if (Assigned(Result)) then
+    Result := PLuaNameItem(Result).Value;
+end;
+
+function TLuaNames.FindValue(const RttiName: ShortString): __luaname;
+begin
+  InitBuffer(RttiName);
+  Result := Pointer(InternalFind(False));
+  if (Assigned(Result)) then
+    Result := PLuaNameItem(Result).Value;
 end;
 
 
@@ -6276,15 +6379,6 @@ end;
 
 { TLuaMetaType }
 
-function TLuaMetaType.GetName: LuaString;
-var
-  Item: PLuaStringDictionaryItem;
-begin
-  Item := Pointer(TLuaStringDictionary(FLua.FNames).FItems);
-  Inc(NativeUInt(Item), FNameOffset);
-  Result := Item.Key;
-end;
-
 {$ifdef SMALLINT}
 function TLuaMetaType.GetPtr: __luapointer;
 begin
@@ -8167,10 +8261,11 @@ begin
   for i := Low(FScriptStack) to High(FScriptStack) do
     FScriptStack[i].Finalize;
 
-  // finalize dynamic arrays
+  // finalize names anddynamic arrays
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
   begin
     MetaType := TLuaMemoryHeap(FMemoryHeap).Unpack(TLuaDictionary(FMetaTypes).FItems[i].Value);
+    MetaType.FName := '';
     case MetaType.Kind of
       mtRecord, mtClass:
       begin
@@ -8184,7 +8279,7 @@ begin
   TLuaMemoryHeap(FMemoryHeap).Clear;
   TLuaBuffer(FInternalBuffer).Clear;
   TLuaDictionary(FStandardNames).Clear;
-  TLuaStringDictionary(FNames).Clear;
+  TLuaNames(FNames).Clear;
   TLuaDictionary(FMetaTypes).Clear;
   TLuaDictionary(FGlobalEntities).Clear;
   {$ifdef LUA_NATIVEFUNC}
@@ -9466,7 +9561,7 @@ begin
       lua_pushlstring(Handle, Pointer(S), Count);
     end else
     begin
-      Size := Count * 7 + 1;
+      Size := Count + 1;
       if (Buffer.Capacity < Size) then
       begin
         Buffer.Size := 0;
@@ -9675,7 +9770,7 @@ begin
   if (CodePage <> CODEPAGE_UTF8) then
   {$endif}
   begin
-    Size := Count * 7 + 1;
+    Size := Count + 1;
     if (Buffer.Capacity < Size) then
     begin
       Buffer.Size := 0;
@@ -11391,99 +11486,31 @@ begin
   end;
 end;
 
-function TLua.GetLuaNameScoped(const Value: LuaString): Pointer{LuaString};
-{$ifdef UNITSCOPENAMES}
-var
-  i, j: Integer;
-  S: PLuaChar;
-{$endif}
-begin
-  {$ifdef UNITSCOPENAMES}
-    S := Pointer(Value);
-    for i := 1 to Length(Value) do
-    begin
-      if (S^ = '.') then
-      begin
-        FStringBuffer.Lua := Value;
-        UniqueString(FStringBuffer.Lua);
-
-        S := Pointer(FStringBuffer.Lua);
-        for j := 1 to Length(FStringBuffer.Lua) do
-        begin
-          if (S^ = '.') then S^ := '_';
-          Inc(S);
-        end;
-
-        Result := Pointer(FStringBuffer.Lua);
-        Exit;
-      end;
-
-      Inc(S);
-    end;
-  {$endif}
-
-  Result := Pointer(Value);
-end;
-
-function TLua.GetLuaNameItem(const Value: LuaString; const ModeCreate: Boolean): Pointer{PLuaStringDictionaryItem};
-var
-  Item: ^TLuaStringDictionaryItem;
-  Ref: Integer;
-begin
-  Item := TLuaStringDictionary(FNames).InternalFind(LuaString(GetLuaNameScoped(Value)), ModeCreate);
-  if (Assigned(Item)) and (Item.Value = nil) then
-  begin
-    Ref := global_alloc_ref;
-    push_lua_string(Value);
-    Item.Value := lua_tolstring(Handle, -1, nil);
-    global_fill_value(Ref);
-  end;
-
-  Result := Item;
-end;
-
 function TLua.GetGlobalEntity(const Name: LuaString; const ModeCreate: Boolean): Pointer;
 label
   not_found;
 var
-  ScopedName: Pointer;
-  Item: ^TLuaStringDictionaryItem;
   EntityItem: ^TLuaDictionaryItem;
-  Ref: Integer;
   LuaName: __luaname;
   Ptr: __luapointer;
 begin
-  ScopedName := GetLuaNameScoped(Name);
-  Item := TLuaStringDictionary(FNames).InternalFind(LuaString(ScopedName), ModeCreate);
-
-  if (Assigned(Item)) and (Item.Value <> nil) then
+  if (ModeCreate) then
   begin
-    // known unicode/ansi name: find global entity
-    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(Item.Value, ModeCreate);
+    LuaName := TLuaNames(FNames).Add(Name);
+  end else
+  begin
+    LuaName := TLuaNames(FNames).FindValue(Name);
+  end;
+
+  if (Assigned(LuaName)) then
+  begin
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(LuaName, ModeCreate);
     if (not Assigned(EntityItem)) then goto not_found;
   end else
   begin
-    // unknown unicode/ansi name
-    // get __luaname value
-    Ref := global_alloc_ref;
-    push_lua_string(Name);
-    LuaName := lua_tolstring(Handle, -1, nil);
-    global_fill_value(Ref);
-
-    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(LuaName, ModeCreate);
-    if (Assigned(EntityItem)) then
-    begin
-      // found or added: add known unicode/ansi name
-      if (not Assigned(Item)) then Item := TLuaStringDictionary(FNames).InternalFind(LuaString(ScopedName), True);
-      Item.Value := LuaName;
-    end else
-    begin
-      // find mode, name not exists: release __luaname, return empty
-      global_free_ref(Ref);
-    not_found:
-      Result := nil;
-      Exit;
-    end;
+  not_found:
+    Result := nil;
+    Exit;
   end;
 
   // retreave or add empty global entity
@@ -13462,25 +13489,21 @@ begin
   Result := Entity;
 end;
 
-function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const NameItem: Pointer{PLuaStringDictionaryItem};
+function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const Name: LuaString;
   const TypeInfo: Pointer; const InstanceSize: Integer; const ReturnAddress: Pointer;
   const AdditionalSize: NativeInt): PLuaMetaType;
 const
   SIZES: array[TLuaMetaKind] of Integer = (SizeOf(TLuaClassInfo),
     SizeOf(TLuaRecordInfo), SizeOf(TLuaArrayInfo), SizeOf(TLuaSetInfo));
 var
-  Name: __luaname;
-  NameOffset: Cardinal;
+  LuaName: __luaname;
   Size: NativeInt;
   Ptr: __luapointer;
   Entity: PLuaGlobalEntity;
 begin
-  // name dictionary item
-  Name := PLuaStringDictionaryItem(NameItem).Value;
-  NameOffset := NativeUInt(NameItem) - NativeUInt(TLuaStringDictionary(FNames).FItems);
-
   // global entity
-  Entity := InternalAddGlobal(Ord(gkMetaType), Name, ReturnAddress);
+  LuaName := TLuaNames(FNames).Add(Name);
+  Entity := InternalAddGlobal(Ord(gkMetaType), LuaName, ReturnAddress);
 
   // allocation
   Size := SIZES[Kind] + AdditionalSize;
@@ -13496,13 +13519,13 @@ begin
   {$endif}
   Result.F.TypeInfo := TypeInfo;
   Result.FLua := Self;
-  Result.FNameOffset := NameOffset;
+  Result.FName := Name;
 
   // metatable (Ref)
   {Result.F.Ref := } InternalRegisterMetaTable(Result);
 
   // metatypes dictionary
-  TLuaDictionary(FMetaTypes).Add(Name, Ptr);
+  TLuaDictionary(FMetaTypes).Add(LuaName, Ptr);
   if (Assigned(TypeInfo)) then
     TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
 
@@ -13567,7 +13590,7 @@ function TLua.InternalAddClass(const AClass: TClass; const UsePublished: Boolean
 var
   i: Integer;
   ClassName: LuaString;
-  ClassNameItem: PLuaStringDictionaryItem;
+  LuaClassName: __luaname;
   ClassRegistrator, ClassValue, ClassChild: TClass;
   ClassPtr: __luapointer;
   ClassInfo, Parent: PLuaClassInfo;
@@ -13789,12 +13812,12 @@ begin
   end else
   begin
     // check existing name (type)
-    ClassNameItem := GetLuaNameItem(ClassName, True);
-    if (TLuaDictionary(FMetaTypes).Find(ClassNameItem.Value) <> nil) then
-      raise ETypeRegistered(ClassNameItem.Key) at ReturnAddress;
+    LuaClassName := TLuaNames(FNames).Add(ClassName);
+    if (TLuaDictionary(FMetaTypes).Find(LuaClassName) <> nil) then
+      raise ETypeRegistered(ClassName) at ReturnAddress;
 
     // globals, metatypes dictionary, metatable
-    ClassInfo := Pointer(InternalAddMetaType(mtClass, ClassNameItem, Pointer(ClassValue),
+    ClassInfo := Pointer(InternalAddMetaType(mtClass, ClassName, Pointer(ClassValue),
       SizeOf(Pointer), ReturnAddress));
 
     // register parents
@@ -13852,7 +13875,7 @@ var
   RecordSize: Integer;
   TypeData: PTypeData;
   RecordPtr: __luapointer;
-  NameItem: PLuaStringDictionaryItem;
+  LuaName: __luaname;
 begin
   if (not IsValidIdent(Name)) then
     raise ELua.CreateFmt('Non-supported record type name ("%s")', [Name]) at ReturnAddress;
@@ -13911,8 +13934,8 @@ begin
   begin
     RecordPtr := LUA_POINTER_INVALID;
   end;
-  NameItem := GetLuaNameItem(Name, True);
-  if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
+  LuaName := TLuaNames(FNames).Add(Name);
+  if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
 
   if (RecordPtr <> LUA_POINTER_INVALID) then
   begin
@@ -13938,7 +13961,7 @@ begin
     end;
   end else
   begin
-    Result := Pointer(InternalAddMetaType(mtRecord, NameItem, RecordTypeInfo, RecordSize, ReturnAddress));
+    Result := Pointer(InternalAddMetaType(mtRecord, Name, RecordTypeInfo, RecordSize, ReturnAddress));
   end;
 
   if (UseRttiContext) then
@@ -13955,7 +13978,7 @@ var
   ArrayTypeInfo, BufTypeInfo: PTypeInfo;
   TypeData: PTypeData;
   ArrayPtr: __luapointer;
-  NameItem: PLuaStringDictionaryItem;
+  LuaName: __luaname;
   IsDynamic: Boolean;
   ItemSize, Dimention, i, Count: Integer;
   elType: PPTypeInfo;
@@ -14063,13 +14086,13 @@ begin
   if (Assigned(ArrayTypeInfo)) then ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(ArrayTypeInfo);
   if (ArrayPtr = LUA_POINTER_INVALID) then
   begin
-    NameItem := GetLuaNameItem(FStringBuffer.Lua, True);
-    ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
+    LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
+    ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
     if (ArrayPtr = LUA_POINTER_INVALID) then
     begin
       AdvancedSize := Length(ABounds) * SizeOf(Integer);
       Inc(AdvancedSize, (Dimention - 1) * SizeOf(NativeInt));
-      Result := Pointer(InternalAddMetaType(mtArray, NameItem, ArrayTypeInfo, 0{fill later}, ReturnAddress, AdvancedSize));
+      Result := Pointer(InternalAddMetaType(mtArray, FStringBuffer.Lua, ArrayTypeInfo, 0{fill later}, ReturnAddress, AdvancedSize));
 
       Result.FIsDynamic := IsDynamic;
       Result.FDimention := Dimention;
@@ -14108,7 +14131,7 @@ begin
     begin
       Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
       if (Result.Kind <> mtArray) {ToDo or (Result.Low <> Low) or (Result.High <> High)} then
-        raise ETypeRegistered(NameItem.Key) at ReturnAddress;
+        raise ETypeRegistered(FStringBuffer.Lua) at ReturnAddress;
 
       if (Assigned(ArrayTypeInfo)) then
         TLuaDictionary(FMetaTypes).Add(ArrayTypeInfo, ArrayPtr);
@@ -14127,7 +14150,7 @@ var
   ItemTypeInfo: PTypeInfo;
   TypeData: PTypeData;
   Low, High: Integer;
-  NameItem: PLuaStringDictionaryItem;
+  LuaName: __luaname;
 begin
   if (NativeUInt(TypeInfo) <= $FFFF) then
     raise ELua.Create('TypeInfo of set not defined') at ReturnAddress;
@@ -14148,11 +14171,11 @@ begin
     High := TypeData.MaxValue;
 
     unpack_lua_string(FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
-    NameItem := GetLuaNameItem(FStringBuffer.Lua, True);
-    Ptr := TLuaDictionary(FMetaTypes).FindValue(NameItem.Value);
+    LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
+    Ptr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
     if (Ptr = LUA_POINTER_INVALID) then
     begin
-      Result := Pointer(InternalAddMetaType(mtSet, NameItem, TypeInfo, 0{fill later}, ReturnAddress));
+      Result := Pointer(InternalAddMetaType(mtSet, FStringBuffer.Lua, TypeInfo, 0{fill later}, ReturnAddress));
 
       Result.FItemTypeInfo := ItemTypeInfo;
       Result.FLow := Low;
@@ -14182,7 +14205,7 @@ begin
     begin
       Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
       if (Result.Kind <> mtSet) or (Result.Low <> Low) or (Result.High <> High) then
-        raise ETypeRegistered(NameItem.Key) at ReturnAddress;
+        raise ETypeRegistered(FStringBuffer.Lua) at ReturnAddress;
 
       TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
     end;
@@ -14432,7 +14455,7 @@ begin
       (Getter and (1 shl (PROP_SLOTSETTER_SHIFT * 2) - 1) = Ord(pmField) + Ord(pmField) shl PROP_SLOTSETTER_SHIFT));
   if (not IsValidIdent(Name)) then
     raise ELua.CreateFmt('Non-supported %s name ("%s")', [PROPERTY_MODES[PropMode], Name]) at ReturnAddress;
-  PropName := PLuaStringDictionaryItem(GetLuaNameItem(Name, True)).Value;
+  PropName := TLuaNames(FNames).Add(Name);
 
   // type name
   if (MetaType = nil) then
@@ -14440,7 +14463,7 @@ begin
     TypeName := @GLOBAL_NAME_SPACE;
   end else
   begin
-    TypeName := @PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key;
+    TypeName := @MetaType.FName;
   end;
 
   // type info
@@ -16579,9 +16602,7 @@ begin
                     if (not Assigned(UserData)) then goto invalid_instance;
                     if (not Assigned(UserData.Instance)) then
                     begin
-                      __TLuaErrorFmt(Self, '%s instance is already destroyed', [
-                        PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key
-                      ], FTempBuffer.ReturnAddress);
+                      __TLuaErrorFmt(Self, '%s instance is already destroyed', [MetaType.FName], FTempBuffer.ReturnAddress);
                     end;
                   end;
     else
@@ -16643,8 +16664,7 @@ begin
 
   // not found
   stack_force_unicode_string(FStringBuffer.Unicode, 2);
-  __TLuaErrorFmt(Self, '"%s" not found in %s %s', [FStringBuffer.Unicode,
-    PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
+  __TLuaErrorFmt(Self, '"%s" not found in %s %s', [FStringBuffer.Unicode, MetaType.FName,
     INSTANCE_MODES[Byte(UserData = nil) + (Byte(UserData = nil) and Byte(MetaType.F.Kind = mtClass))]],
     FTempBuffer.ReturnAddress);
   goto done;
@@ -16823,15 +16843,13 @@ property_push:
     begin
       stack_lua_string(FStringBuffer.Lua, 2);
       __TLuaErrorFmt(Self, '%s.%s property is a writeonly property',
-        [PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
-        FStringBuffer.Lua], FTempBuffer.ReturnAddress);
+        [MetaType.FName, FStringBuffer.Lua], FTempBuffer.ReturnAddress);
     end;
   end else
   begin
     stack_lua_string(FStringBuffer.Lua, 2);
     __TLuaErrorFmt(Self, '%s.%s property is not a class property',
-      [PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
-      FStringBuffer.Lua], FTempBuffer.ReturnAddress);
+      [MetaType.FName, FStringBuffer.Lua], FTempBuffer.ReturnAddress);
   end;
 
 done:
@@ -17182,9 +17200,7 @@ begin
                     if (not Assigned(UserData)) then goto invalid_instance;
                     if (not Assigned(UserData.Instance)) then
                     begin
-                      __TLuaErrorFmt(Self, '%s instance is already destroyed', [
-                        PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key
-                      ], FTempBuffer.ReturnAddress);
+                      __TLuaErrorFmt(Self, '%s instance is already destroyed', [MetaType.FName], FTempBuffer.ReturnAddress);
                     end;
                   end;
     else
@@ -17220,8 +17236,7 @@ begin
       begin
         stack_lua_string(FStringBuffer.Lua, 2);
         __TLuaErrorFmt(Self, 'Method %s.%s can not be changed',
-          [PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
-          FStringBuffer.Lua], FTempBuffer.ReturnAddress);
+          [MetaType.FName, FStringBuffer.Lua], FTempBuffer.ReturnAddress);
         goto done;
       end;
     end;
@@ -17247,8 +17262,7 @@ begin
 
   // not found
   stack_force_unicode_string(FStringBuffer.Unicode, 2);
-  __TLuaErrorFmt(Self, '"%s" not found in %s %s', [FStringBuffer.Unicode,
-    PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
+  __TLuaErrorFmt(Self, '"%s" not found in %s %s', [FStringBuffer.Unicode, MetaType.FName,
     INSTANCE_MODES[Byte(UserData = nil) + (Byte(UserData = nil) and Byte(MetaType.F.Kind = mtClass))]],
     FTempBuffer.ReturnAddress);
   goto done;
@@ -17529,16 +17543,14 @@ property_set:
       stack_lua_string(FStringBuffer.Lua, 2);
       MetaType := UnpackMetaType(Self, AMetaType);
       __TLuaErrorFmt(Self, '%s.%s property is a readonly property',
-        [PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
-        FStringBuffer.Lua], FTempBuffer.ReturnAddress);
+        [MetaType.FName, FStringBuffer.Lua], FTempBuffer.ReturnAddress);
     end;
   end else
   begin
     stack_lua_string(FStringBuffer.Lua, 2);
     MetaType := UnpackMetaType(Self, AMetaType);
     __TLuaErrorFmt(Self, '%s.%s property is not a class property',
-      [PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
-      FStringBuffer.Lua], FTempBuffer.ReturnAddress);
+      [MetaType.FName, FStringBuffer.Lua], FTempBuffer.ReturnAddress);
     goto done;
   failure_set:
     stack_force_unicode_string(FStringBuffer.Unicode, -1);
@@ -17551,8 +17563,7 @@ property_set:
         [FStringBuffer.Lua, FStringBuffer.Default, FStringBuffer.Unicode], FTempBuffer.ReturnAddress);
     end else
     begin
-      Error('Can not change %s.%s %s to %s ("%s")', [
-        PLuaStringDictionaryItem(NativeUInt(TLuaStringDictionary(FNames).FItems) + MetaType.FNameOffset).Key,
+      Error('Can not change %s.%s %s to %s ("%s")', [MetaType.FName,
         FStringBuffer.Lua, PROPERTY_MODES[Ord(MetaType.F.Kind = mtRecord)],
         FStringBuffer.Default, FStringBuffer.Unicode]);
     end;
@@ -19434,7 +19445,7 @@ begin
   if (not IsValidIdent(Name)) then
     raise ELua.CreateFmt('Invalid constant name "%s"', [Name]) at ReturnAddress;
 
-  LuaName := PLuaStringDictionaryItem(Self.GetLuaNameItem(Name, True)).Value;
+  LuaName := TLuaNames(Self.FNames).Add(Name);
   Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName, ReturnAddress)).Ref;
   if (not Self.push_variant(Value)) then
   begin
@@ -19471,7 +19482,7 @@ begin
   if (not IsValidIdent(Name)) then
     raise ELua.CreateFmt('Invalid constant name "%s"', [Name]) at ReturnAddress;
 
-  LuaName := PLuaStringDictionaryItem(Self.GetLuaNameItem(Name, True)).Value;
+  LuaName := TLuaNames(Self.FNames).Add(Name);
   Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName, ReturnAddress)).Ref;
   if (not Self.push_luaarg(Value)) then
   begin
@@ -19501,7 +19512,8 @@ end;
 
 procedure __TLuaRegEnum(const Self: TLua; const TypeInfo: PTypeInfo; const ReturnAddress: Pointer);
 var
-  i, Ref: Integer;
+  i, VMin, VMax, Ref: Integer;
+  S: ^ShortString;
   LuaName: __luaname;
 begin
   if (NativeUInt(TypeInfo) <= $FFFF) then
@@ -19521,15 +19533,20 @@ begin
 
   // each enumeration value
   with GetTypeData(TypeInfo)^ do
-  for i := MinValue to MaxValue do
   begin
-    Self.FStringBuffer.Default := GetEnumName(TypeInfo, i);
-    Self.FStringBuffer.Lua := LuaString(Self.FStringBuffer.Default);
+    VMin := MinValue;
+    VMax := MaxValue;
+    S := Pointer(@GetTypeData(BaseType^)^.NameList);
 
-    LuaName := PLuaStringDictionaryItem(Self.GetLuaNameItem(Self.FStringBuffer.Lua, True)).Value;
-    Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName, ReturnAddress)).Ref;
-    lua_pushinteger(Self.Handle, i);
-    Self.global_fill_value(Ref);
+    for i := VMin to VMax do
+    begin
+      LuaName := TLuaNames(Self.FNames).Add(S^);
+      Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName, ReturnAddress)).Ref;
+      lua_pushinteger(Self.Handle, i);
+      Self.global_fill_value(Ref);
+
+      Inc(NativeInt(S), PByte(S)^ + 1);
+    end;
   end;
 
   // fake (enumeration) storage

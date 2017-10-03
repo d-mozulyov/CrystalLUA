@@ -121,6 +121,7 @@ unit CrystalLUA;
 interface
   uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo, System.RTLConsts{$else}Types, TypInfo, RTLConsts{$endif},
        {$ifdef UNICODE}{$ifdef UNITSCOPENAMES}System.Character{$else}Character{$endif},{$endif}
+       {$ifdef EXTENDEDRTTI}{$ifdef UNITSCOPENAMES}System.Rtti{$else}Rtti{$endif},{$endif}
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif},{$endif}
        {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread,{$endif}
        {$ifdef KOL}
@@ -217,7 +218,6 @@ type
   TLua = class;
   PLuaArg = ^TLuaArg;
   PLuaTable = ^TLuaTable;
-//  PLuaModule = ^TLuaModule;
 
   // incorrect script use exception
   ELuaScript = class(ELua);
@@ -652,14 +652,22 @@ type
 
   TLuaResultBuffer = object(TLuaResult)
   public
-    function  AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
-    function  AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
-    function  AllocSet(const SetInfo: PLuaSetInfo): Pointer;
+    function AllocRecord(const RecordInfo: PLuaRecordInfo): Pointer;
+    function AllocArray(const ArrayInfo: PLuaArrayInfo): Pointer;
+    function AllocSet(const SetInfo: PLuaSetInfo): Pointer;
   end;
   PLuaResultBuffer = ^TLuaResultBuffer;
 
   TLuaPropPtr = (ppAuto, ppField, ppProc, ppClassField, ppClassProc);
   PLuaPropPtr = ^TLuaPropPtr;
+
+  TLuaNativeParam = packed record
+    Flags: TParamFlags;
+    Name: LuaString;
+    TypeInfo: Pointer;
+    RefCount: Integer;
+  end;
+  PLuaNativeParam = ^TLuaNativeParam;
 
 { TLua class
   Script and registered types/functions manager }
@@ -2288,6 +2296,7 @@ end;
 const
   NULL_CHAR: {Byte/}Word = 0;
   RECORD_TYPES: set of TTypeKind = [tkRecord{$ifdef FPC}, tkObject{$endif}];
+  varDeepData = $BFE8;
 
   {$if Defined(MSWINDOWS) or Defined(FPC) or (CompilerVersion < 22)}
     {$define WIDE_STR_SHIFT}
@@ -5172,8 +5181,6 @@ begin
 end;
 
 function TLuaArg.ForceVariant: Variant;
-const
-  varDeepData = $BFE8;
 var
   VType: Integer;
   VarData: TVarData absolute Result;
@@ -6450,10 +6457,9 @@ begin
 end;
 
 
-{ Internal types management, like Rtti.TValue routine }
+{ MetaType script instances (user data) }
 
 type
-  // TObject, record, array, set, difficult property structure
   TLuaUserDataKind = (ukInstance, ukArray, ukSet, ukProperty);
   TLuaUserData = object
   public
@@ -6475,7 +6481,38 @@ type
   end;
   PLuaUserData = ^TLuaUserData;
 
-  // extended type information
+
+procedure TLuaUserData.GetDescription(var Result: string; const Lua: TLua);
+begin
+  if (@Self = nil) then
+  begin
+    Result := 'nil userdata';
+  end else
+  if (Byte(Kind) > Byte(ukSet)) then
+  begin
+    Result := 'unknown userdata';
+  end else
+  if (Instance = nil) then
+  begin
+    Result := 'already destroyed';
+  end else
+  begin
+    Result := 'ToDo';
+
+    (*
+    case Kind of
+      ukInstance: Result := Lua.ClassesInfo[userdata.ClassIndex]._ClassName;
+         ukArray: Result := userdata.ArrayInfo.Name;
+           ukSet: Result := userdata.SetInfo.Name;
+      ukProperty: Result := Format('difficult property ''%s''', [userdata.PropertyInfo.PropertyName]);
+    end; *)
+  end;
+end;
+
+
+{ Internal types management, like Rtti.TValue routine }
+
+type
   TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
                    pkObject, pkString, pkVariant, pkInterface,
                    pkPointer, pkClass, pkRecord, pkArray, pkSet, pkUniversal);
@@ -6507,11 +6544,13 @@ type
       const IsAutoRegister: Boolean): Boolean;
     procedure SetTypeInfo(const Value: PTypeInfo);
     procedure SetMetaType(const Value: PLuaMetaType);
+    function GetSize: Integer;
   public
     property TypeInfo: PTypeInfo read F.TypeInfo write SetTypeInfo;
     property MetaType: PLuaMetaType read F.MetaType write SetMetaType;
     property Flags: Byte read F.Flags write F.Flags;
     property FlagsEx: Cardinal read F.FlagsEx write F.FlagsEx;
+    property Size: Integer read GetSize;
 
     property Kind: TLuaParamKind read F.Kind write F.Kind;
     property OrdType: TOrdType read F.OrdType write F.OrdType;
@@ -6524,33 +6563,7 @@ type
     procedure GetValue(const Src; const Lua: TLua; const AFlags: Cardinal{IsRef:1, IsConst:1});
     function SetValue(var Dest; const Lua: TLua; const StackIndex: Integer): Boolean;
   end;
-
-procedure TLuaUserData.GetDescription(var Result: string; const Lua: TLua);
-begin
-  if (@Self = nil) then
-  begin
-    Result := 'nil userdata';
-  end else
-  if (Byte(Kind) > Byte(ukSet)) then
-  begin
-    Result := 'unknown userdata';
-  end else
-  if (Instance = nil) then
-  begin
-    Result := 'already destroyed';
-  end else
-  begin
-    Result := 'ToDo';
-
-    (*
-    case Kind of
-      ukInstance: Result := Lua.ClassesInfo[userdata.ClassIndex]._ClassName;
-         ukArray: Result := userdata.ArrayInfo.Name;
-           ukSet: Result := userdata.SetInfo.Name;
-      ukProperty: Result := Format('difficult property ''%s''', [userdata.PropertyInfo.PropertyName]);
-    end; *)
-  end;
-end;
+  PLuaCustomParam = ^TLuaCustomParam;
 
 function TLuaCustomParam.InternalSetTypeInfo(const Value: PTypeInfo; const Lua: TLua;
   const IsAutoRegister: Boolean): Boolean;
@@ -6739,6 +6752,73 @@ procedure TLuaCustomParam.SetMetaType(const Value: PLuaMetaType);
 begin
   F.MetaType := Value;
   F.FlagsEx := (Ord(Value.F.Kind) + Ord(pkClass)) shl 8;
+end;
+
+function TLuaCustomParam.GetSize: Integer;
+begin
+  Result := 0;
+
+  case F.Kind of
+    pkBoolean:
+    begin
+      case F.BoolType of
+        btBoolean,
+        btByteBool: Result := SizeOf(ByteBool);
+        btWordBool: Result := SizeOf(WordBool);
+        btLongBool: Result := SizeOf(LongBool);
+      end;
+    end;
+    pkInteger:
+    begin
+      case (F.OrdType) of
+        otSByte,
+        otUByte: Result := SizeOf(Byte);
+        otSWord,
+        otUWord: Result := SizeOf(Word);
+        otSLong,
+        otULong: Result := SizeOf(Cardinal);
+      end;
+    end;
+    pkInt64:
+    begin
+      Result := SizeOf(Int64);
+    end;
+    pkFloat:
+    begin
+      case (F.FloatType) of
+        ftSingle: Result := SizeOf(Single);
+        ftDouble: Result := SizeOf(Double);
+      ftExtended: Result := SizeOf(Extended);
+          ftComp: Result := SizeOf(Comp);
+          ftCurr: Result := SizeOf(Currency);
+      end;
+    end;
+    pkObject, pkPointer, pkClass, pkInterface:
+    begin
+      Result := SizeOf(Pointer);
+    end;
+    pkVariant:
+    begin
+      Result := SizeOf(Variant);
+    end;
+    pkString:
+    begin
+      case (F.StringType) of
+       stShortString: Result := SizeOf(Byte) + F.MaxShortLength;
+        stAnsiString,
+        stWideString,
+     stUnicodeString,
+         stPAnsiChar,
+         stPWideChar: Result := SizeOf(Pointer);
+          stAnsiChar: Result := SizeOf(Byte);
+          stWideChar: Result := SizeOf(WideChar);
+      end;
+    end;
+    pkRecord, pkArray, pkSet:
+    begin
+      Result := F.MetaType.Size;
+    end;
+  end;
 end;
 
 procedure TLuaCustomParam.GetValue(const Src; const Lua: TLua; const AFlags: Cardinal{IsRef:1, IsConst:1});
@@ -7304,6 +7384,815 @@ done:
   Result := True;
 end;
 
+const
+  PARAM_REFCOUNT_MASK = (1 shl 3 - 1);
+  PARAM_MAX_REFCOUNT = PARAM_REFCOUNT_MASK - 1;
+  PARAM_REFERENCE_MODE = 1 shl 5;
+  PARAM_ARRAY_MODE = 1 shl 6;
+  PARAM_ADDRESS_MODE = 1 shl 7;
+
+type
+  TLuaProcParam = object(TLuaCustomParam)
+  private
+    {
+      Flags:
+      RefCount: Byte:3;
+      Reserved: Byte:2;
+      IsReference: Boolean:1;
+      IsArray: Boolean:1;
+      IsAddress: Boolean:1;
+    }
+    function GetIsReference: Boolean;
+    procedure SetIsReference(const AValue: Boolean);
+    function GetIsArray: Boolean;
+    procedure SetIsArray(const AValue: Boolean);
+    function GetIsAddress: Boolean;
+    procedure SetIsAddress(const AValue: Boolean);
+    function GetRefCount: Byte;
+    procedure SetRefCount(const AValue: Byte);
+    function GetIsInitial: Boolean;
+    function GetIsManaged: Boolean;
+  public
+    Name: PShortString;
+    Value: Integer;
+    ManagedValue: Integer;
+
+    property IsReference: Boolean read GetIsReference write SetIsReference;
+    property IsArray: Boolean read GetIsArray write SetIsArray;
+    property IsAddress: Boolean read GetIsAddress write SetIsAddress;
+    property RefCount: Byte read GetRefCount write SetRefCount;
+
+    property IsInitial: Boolean read GetIsInitial;
+    property IsManaged: Boolean read GetIsManaged;
+  end;
+  PLuaProcParam = ^TLuaProcParam;
+  TLuaProcParams = array[0..0] of TLuaProcParam;
+  PLuaProcParams = ^TLuaProcParams;
+
+function TLuaProcParam.GetIsReference: Boolean;
+begin
+  Result := (F.FlagsEx and PARAM_REFERENCE_MODE <> 0);
+end;
+
+procedure TLuaProcParam.SetIsReference(const AValue: Boolean);
+begin
+  if (AValue) then
+  begin
+    F.FlagsEx := F.FlagsEx or PARAM_REFERENCE_MODE;
+  end else
+  begin
+    F.FlagsEx := F.FlagsEx and (not PARAM_REFERENCE_MODE);
+  end;
+end;
+
+function TLuaProcParam.GetIsArray: Boolean;
+begin
+  Result := (F.FlagsEx and PARAM_ARRAY_MODE <> 0);
+end;
+
+procedure TLuaProcParam.SetIsArray(const AValue: Boolean);
+begin
+  if (AValue) then
+  begin
+    F.FlagsEx := F.FlagsEx or PARAM_ARRAY_MODE;
+  end else
+  begin
+    F.FlagsEx := F.FlagsEx and (not PARAM_ARRAY_MODE);
+  end;
+end;
+
+function TLuaProcParam.GetIsAddress: Boolean;
+begin
+  Result := (F.FlagsEx and PARAM_ADDRESS_MODE <> 0);
+end;
+
+procedure TLuaProcParam.SetIsAddress(const AValue: Boolean);
+begin
+  if (AValue) then
+  begin
+    F.FlagsEx := F.FlagsEx or PARAM_ADDRESS_MODE;
+  end else
+  begin
+    F.FlagsEx := F.FlagsEx and (not PARAM_ADDRESS_MODE);
+  end;
+end;
+
+function TLuaProcParam.GetRefCount: Byte;
+begin
+  Result := F.FlagsEx and PARAM_REFCOUNT_MASK;
+end;
+
+procedure TLuaProcParam.SetRefCount(const AValue: Byte);
+begin
+  if (AValue >= PARAM_MAX_REFCOUNT) then
+  begin
+    F.FlagsEx := (F.FlagsEx and (not PARAM_REFCOUNT_MASK)) + PARAM_MAX_REFCOUNT;
+  end else
+  begin
+    F.FlagsEx := (F.FlagsEx and (not PARAM_REFCOUNT_MASK)) + AValue;
+  end;
+end;
+
+function TLuaProcParam.GetIsInitial: Boolean;
+begin
+  Result := (RefCount <> 0) or (IsManaged);
+end;
+
+function TLuaProcParam.GetIsManaged: Boolean;
+begin
+  case F.Kind of
+    pkString:
+    begin
+      Result := (F.StringType in [stShortString, stAnsiString, stWideString,
+        stUnicodeString, stPAnsiChar, stPWideChar]);
+    end;
+    pkVariant, pkInterface:
+    begin
+      Result := True;
+    end;
+    pkArray:
+    begin
+      Result := PLuaArrayInfo(MetaType).IsDynamic;
+    end;
+  else
+    Result := False;
+  end;
+end;
+
+
+type
+  {$if Defined(CPUX86)}
+  TParamBlock = record
+    RegEAX: Integer;
+    RegEDX: Integer;
+    RegECX: Integer;
+  case Integer of
+    0: (OutEAX, OutEDX: Integer);
+    1: (OutInt64: Int64);
+    2: (OutFloat: Double);
+  end;
+  {$elseif Defined(CPUX64)}
+  TParamBlock = record
+    RegRCX: Int64;
+    RegRDX: Int64;
+    RegR8: Int64;
+    RegR9: Int64;
+  case Integer of
+    0: (OutEAX: Integer);
+    1: (OutRAX: Int64);
+    2: (OutXMM0: Double);
+  end;
+  {$elseif Defined(CPUARM32)}
+  TParamBlock = record
+    RegCR: array[0..3] of Integer;
+    StackData: PByte;
+    StackDataSize: Integer;
+    case Integer of
+      0: (RegD: array[0..7] of Double);
+      1: (RegS: array[0..15] of Single);
+  end;
+  {$elseif Defined(CPUARM64)}
+  m128 = record
+  case Integer of
+    1: (Lo, Hi: UInt64);
+    2: (LL, LH, HL, HH: UInt32);
+  end align 16;
+  TParamBlock = record
+    RegX: array[0..7] of Int64;
+    RegQ: array[0..7] of m128;
+    RegX8: Int64;
+    StackData: PByte;
+    StackDataSize: Integer;
+  end;
+  {$else}
+    {$MESSAGE ERROR 'Unkwnown compiler'}
+  {$ifend}
+  PParamBlock = ^TParamBlock;
+
+  PLuaInvokable = ^TLuaInvokable;
+  TLuaInvokable = object
+  public
+    MethodKind: TMethodKind;
+    CallConv: TCallConv;
+    FPURet: Boolean;
+    Reserved: Byte;
+    StackDataSize: Integer;
+    TotalDataSize: Integer;
+
+    InitialCount: Integer;
+    Initials: PInteger;
+    ManagedCount: Integer;
+    Manageds: PInteger;
+    Result: TLuaProcParam;
+    ParamCount: Integer;
+    Params: TLuaProcParams;
+
+    procedure Initialize(const ParamBlock: PParamBlock);
+    procedure Finalize(const ParamBlock: PParamBlock);
+    procedure Invoke(const CodeAddress: Pointer; const ParamBlock: PParamBlock);
+  end;
+
+{$ifdef CPUARM}
+procedure RawInvoke(CodeAddress: Pointer; ParamBlock: PParamBlock);
+  external 'librtlhelper.a' name 'rtti_raw_invoke';
+{$endif}
+
+procedure TLuaInvokable.Initialize(const ParamBlock: PParamBlock);
+var
+  i, RefCount: Integer;
+  Items: PLuaProcParams;
+  InitialPtr: PInteger;
+  Param: PLuaProcParam;
+  Ptr: Pointer;
+begin
+  Items := @Params;
+  InitialPtr := Initials;
+
+  for i := 1 to InitialCount do
+  begin
+    Param := @Items[InitialPtr^];
+    Ptr := Pointer(NativeInt(ParamBlock) + Param.ManagedValue);
+
+    PNativeInt(Ptr)^ := 0;
+
+    // references
+    RefCount := Param.F.FlagsEx and PARAM_REFCOUNT_MASK;
+    if (RefCount <> 0) then
+    begin
+      if (RefCount <> 1) then
+      repeat
+        Dec(NativeInt(Ptr), SizeOf(Pointer));
+        PNativeInt(Ptr)^ := NativeInt(Ptr) + SizeOf(Pointer);
+        Dec(RefCount);
+      until (RefCount = 1);
+
+      PPointer(NativeInt(ParamBlock) + Param.Value)^ := Ptr;
+    end;
+
+    Inc(InitialPtr);
+  end;
+end;
+
+procedure TLuaInvokable.Finalize(const ParamBlock: PParamBlock);
+label
+  failure;
+var
+  i, VType: Integer;
+  Items: PLuaProcParams;
+  ManagedPtr: PInteger;
+  Param: PLuaProcParam;
+  Ptr: Pointer;
+begin
+  Items := @Params;
+  ManagedPtr := Manageds;
+
+  for i := 1 to ManagedCount do
+  begin
+    Param := @Items[ManagedPtr^];
+    Ptr := Pointer(NativeInt(ParamBlock) + Param.ManagedValue);
+
+    case Param.F.Kind of
+      pkString:
+      begin
+        case Param.F.StringType of
+          {$ifNdef NEXTGEN}
+          stAnsiString, stPAnsiChar:
+          begin
+            if (PNativeInt(Ptr)^ <> 0) then
+              AnsiString(Ptr^) := '';
+          end;
+          stWideString:
+          begin
+            if (PNativeInt(Ptr)^ <> 0) then
+              WideString(Ptr^) := '';
+          end;
+          {$endif}
+          stUnicodeString,
+          stPWideChar:
+          begin
+            if (PNativeInt(Ptr)^ <> 0) then
+              UnicodeString(Ptr^) := '';
+          end;
+        else
+          goto failure;
+        end;
+      end;
+      pkInterface:
+      begin
+        if (PNativeInt(Ptr)^ <> 0) then
+          IInterface(Ptr^) := nil;
+      end;
+      pkVariant:
+      begin
+        VType := PVarData(Ptr).VType;
+        if (VType and varDeepData <> 0) then
+        case VType of
+          varBoolean, varUnknown+1..$15{varUInt64}: ;
+        else
+          System.VarClear(PVariant(Ptr)^);
+        end;
+      end;
+    else
+    failure:
+      raise ELua.CreateFmt('Error finalize argument %d', [ManagedPtr^]);
+    end;
+
+    Inc(ManagedPtr);
+  end;
+end;
+
+procedure TLuaInvokable.Invoke(const CodeAddress: Pointer; const ParamBlock: PParamBlock);
+{$if Defined(CPUX86)}
+const
+  PARAMBLOCK_SIZE = SizeOf(TParamBlock);
+asm
+      PUSH  EBP
+      MOV   EBP, ESP
+
+      PUSH  edx // EBP - 4 = CodeAddress
+      PUSH  EBX
+      MOV   EBX, ecx // EBX = ParamBlock
+      push esi
+      mov esi, eax // ESI = LuaInvokable
+
+      // Copy block to stack (Native Aligned!)
+      MOV   ECX, [esi].TLuaInvokable.StackDataSize
+      TEST  ECX, ECX
+      JZ    @@skip_push
+      cmp ecx, 16
+      ja @@do_push
+
+      // small block
+      sub esp, ecx
+      shr ecx, 2
+      jmp [offset @move_cases + ecx * 4 - 4]
+      @move_cases: DD @move_4, @move_8, @move_12, @move_16
+
+@@do_push:
+      test ecx, ecx
+{$IFDEF ALIGN_STACK}
+      MOV   EAX, ECX
+      AND   EAX, $F
+      JZ    @@no_align
+      SUB   EAX, 16
+      ADD   ESP, EAX
+@@no_align:
+{$ENDIF ALIGN_STACK}
+      // touch stack pages in case it needs to grow
+      // while (count > 0) { touch(stack); stack -= 4096; count -= 4096; }
+      MOV   EAX, ECX
+      JMP   @@touch_loop_begin
+
+@@touch_loop:
+      MOV   [ESP],0
+@@touch_loop_begin:
+      SUB   ESP, 4096
+      SUB   EAX, 4096
+      JNS   @@touch_loop
+      SUB   ESP, EAX
+
+      lea   EAX, [EBX + PARAMBLOCK_SIZE]
+      MOV   EDX, ESP
+      push offset @@skip_push
+      jmp System.Move // EAX=source, EDX=dest, ECX=count
+
+@move_16:
+      mov edx, [EBX + PARAMBLOCK_SIZE + 12]
+      mov [esp + 12], edx
+@move_12:
+      mov edx, [EBX + PARAMBLOCK_SIZE + 8]
+      mov [esp + 8], edx
+@move_8:
+      mov edx, [EBX + PARAMBLOCK_SIZE + 4]
+      mov [esp + 4], edx
+@move_4:
+      mov edx, [EBX + PARAMBLOCK_SIZE]
+      mov [esp], edx
+
+@@skip_push:
+      MOV   EAX, [EBX].TParamBlock.RegEAX
+      MOV   EDX, [EBX].TParamBlock.RegEDX
+      MOV   ECX, [EBX].TParamBlock.RegECX
+      CALL  [EBP - 4]
+      MOV   [EBX].TParamBlock.OutEAX, eax
+      MOV   [EBX].TParamBlock.OutEDX, edx
+
+      cmp byte ptr [esi].TLuaInvokable.FPURet, 0
+      jz @@done
+      fstp qword ptr [EBX].TParamBlock.OutFloat
+
+@@done:
+      lea esp, [ebp - 16]
+      pop esi
+      POP   EBX
+      POP   EAX
+      POP   EBP
+end;
+{$elseif Defined(CPUX64)}
+const
+  PARAMBLOCK_SIZE = SizeOf(TParamBlock);
+
+  procedure InvokeError(const ReturnAddress: Pointer); far;
+  begin
+    raise EInvocationError.CreateRes(Pointer(@SParameterCountExceeded)) at ReturnAddress;
+  end;
+asm
+      .PARAMS 62 // There's actually room for 64, assembler is saving locals for CodeAddress & ParamBlock
+      MOV     [RBP+$210], CodeAddress
+      MOV     [RBP+$218], ParamBlock
+      xchg rdx, r8 // rdx := ParamBlock
+
+      // Copy block to stack (Native Aligned!)
+      MOV     EAX, [rcx].TLuaInvokable.StackDataSize
+      TEST    EAX, EAX
+      JZ      @@skip_push
+
+      // small/Sytem.Move
+      cmp eax, 32
+      ja @@do_move
+      shr rax, 3
+      lea rcx, [@move_cases - 8]
+      mov rcx, [rcx + rax * 8]
+      jmp rcx
+      @move_cases: DQ @move_8, @move_16, @move_24, @move_32
+
+@@do_move:
+      CMP     EAX, 480 // (64-4) params * 8 bytes.
+      Ja      @@invalid_frame
+      lea     rcx, [RDX + PARAMBLOCK_SIZE]
+      LEA     RDX, [RBP+$20]
+      xchg    r8, rax
+      CALL    System.Move
+      MOV     RDX, [RBP+$218]
+      jmp @@skip_push
+
+@@invalid_frame:
+      lea rsp, [rbp + $000001f0]
+      pop rbp
+      mov rcx, [rsp]
+      jmp InvokeError
+
+@move_32:
+      mov rax, [RDX + PARAMBLOCK_SIZE + 24]
+      mov [rbp + $20 + 24], rax
+@move_24:
+      mov rax, [RDX + PARAMBLOCK_SIZE + 16]
+      mov [rbp + $20 + 16], rax
+@move_16:
+      mov rax, [RDX + PARAMBLOCK_SIZE + 8]
+      mov [rbp + $20 + 8], rax
+@move_8:
+      mov rax, [RDX + PARAMBLOCK_SIZE]
+      mov [rbp + $20], rax
+
+@@skip_push:
+      MOV     RCX, [RDX].TParamBlock.RegRCX
+      MOV     R8,  [RDX].TParamBlock.RegR8
+      MOV     R9,  [RDX].TParamBlock.RegR9
+      MOV     RDX, [RDX].TParamBlock.RegRDX
+      movq xmm0, rcx
+      movq xmm1, rdx
+      movq xmm2, r8
+      movq xmm3, r9
+
+      CALL    [RBP+$210]
+
+      MOV     RDX, [RBP+$218]
+      MOV     [RDX].TParamBlock.OutRAX, RAX
+      MOVSD   [RDX].TParamBlock.OutXMM0, XMM0
+end;
+{$else .CPUARM}
+begin
+  ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
+  ParamBlock.StackDataSize := StackDataSize;
+  RawInvoke(CodeAddress, ParamBlock);
+end;
+{$ifend}
+
+
+type
+  TLuaInvokableBuilder = object
+  private
+    FLua: TLua;
+
+    FBuffer: TLuaBuffer;
+    FAdvanced: TLuaBuffer;
+
+    function NewInvokable(const MethodKind: TMethodKind; const CallConv: TCallConv; const AResult: Pointer): Boolean;
+    function InternalAddName(const Name: LuaString): NativeInt;
+    function InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
+      const RefCount: Integer; const ParamFlags: TParamFlags): PLuaProcParam;
+    function InternalBuildDone: __luapointer;
+    procedure InternalInitParams(var Invokable: TLuaInvokable);
+  public
+    procedure Clear;
+    function BuildMethod(const AMethod: PTypeInfo): __luapointer;
+    {$ifdef EXTENDEDRTTI}
+    function BuildProcedure(const AProcedure: PTypeInfo): __luapointer;
+    {$endif}
+
+    // BuildInterface method
+    // Build reference
+
+    function BuildCustom(const MethodKind: TMethodKind; const Params: array of TLuaNativeParam;
+      const AResult: Pointer; const CallConv: TCallConv): __luapointer;
+  end;
+
+const
+  PARAMNAME_HIGH_ARRAY: array[0..11] of Byte = (11, Ord('H'), Ord('i'), Ord('g'),
+    Ord('h'), Ord('('), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), Ord(')'));
+
+procedure TLuaInvokableBuilder.Clear;
+begin
+  FBuffer.Clear;
+  FAdvanced.Clear;
+end;
+
+function TLuaInvokableBuilder.NewInvokable(const MethodKind: TMethodKind;
+  const CallConv: TCallConv; const AResult: Pointer): Boolean;
+var
+  Invokable: ^TLuaInvokable;
+begin
+  FBuffer.Size := 0;
+  FAdvanced.Size := 0;
+
+  Invokable := FBuffer.Alloc(SizeOf(TLuaInvokable) - SizeOf(TLuaProcParams));
+  FillChar(Invokable^, SizeOf(TLuaInvokable) - SizeOf(TLuaProcParams), #0);
+
+  Invokable.MethodKind := MethodKind;
+  Invokable.CallConv := CallConv;
+  Invokable.Result.Value := -1;
+  Invokable.Result.ManagedValue := -1;
+
+  if (Assigned(AResult)) then
+  begin
+    Invokable.Result.InternalSetTypeInfo(AResult, FLua, True);
+    if (Invokable.Result.Kind = pkUnknown) then
+    begin
+      FLua.FStringBuffer.Default := Format('Invalid result type "%s" (%s)', [
+        FLua.FStringBuffer.Lua, FLua.FStringBuffer.Default]);
+      Result := False;
+      Exit;
+    end;
+  end;
+
+  if ((MethodKind in [mkFunction, mkClassFunction, mkSafeFunction]) <> Assigned(AResult)) then
+  begin
+    FLua.FStringBuffer.Default := Format('Invalid method kind (%s)', [GetEnumName(TypeInfo(TMethodKind), Ord(MethodKind))]);
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+end;
+
+function TLuaInvokableBuilder.InternalAddName(const Name: LuaString): NativeInt;
+var
+  Length, Size: Integer;
+  Buffer: ^TLuaBuffer;
+  {$if (not Defined(LUA_UNICODE)) and (not Defined(NEXTGEN)) and Defined(INTERNALCODEPAGE)}
+  CodePage: Word;
+  {$ifend}
+  S: PByte;
+begin
+  Length := System.Length(Name);
+  Buffer := Pointer(@FLua.FInternalBuffer);
+  Buffer.Size := 0;
+
+  {$if Defined(LUA_UNICODE) or Defined(NEXTGEN)}
+    // Ansi/Utf8 <-- Utf16
+    Size := Length * 3 + 1;
+    if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+    {$ifdef UNICODE}
+      Buffer.Size := Utf8FromUnicode(Pointer(Buffer.FBytes), Pointer(Name), Length);
+    {$else .ANSI}
+      Buffer.Size := FLua.AnsiFromUnicode(Pointer(Buffer.FBytes), 0, Pointer(Name), Length);
+    {$endif}
+  {$else .ANSISTRING}
+    // Ansi/Utf8 <-- Ansi/Utf8
+    Size := Length * 6 + 1;
+    if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+    {$ifdef INTERNALCODEPAGE}
+    CodePage := PWord(NativeInt(Name) - ASTR_OFFSET_CODEPAGE)^;
+    if (CodePage = CODEPAGE_UTF8) then
+    begin
+      {$ifdef UNICODE}
+        System.Move(Pointer(Name)^, Pointer(Buffer.FBytes)^, Length);
+        Buffer.Size := Length;
+      {$else .ANSI}
+        Buffer.Size := FLua.AnsiFromUtf8(Pointer(Buffer.FBytes), 0, Pointer(Name), Length);
+      {$endif}
+    end else
+    {$endif}
+    begin
+      {$ifdef UNICODE}
+        Buffer.Size := FLua.Utf8FromAnsi(Pointer(Buffer.FBytes), Pointer(Name),
+          {$ifdef INTERNALCODEPAGE}CodePage{$else}0{$endif}, Length);
+      {$else .ANSI}
+        Buffer.Size := FLua.AnsiFromAnsi(Pointer(Buffer.FBytes), 0, Pointer(Name),
+          {$ifdef INTERNALCODEPAGE}CodePage{$else}0{$endif}, Length);
+      {$endif}
+    end;
+  {$ifend}
+
+  Size := Buffer.Size;
+  if (Size > High(Byte)) then Size := High(Byte);
+
+  Result := FAdvanced.Size;
+  S := FAdvanced.Alloc(Size + 1);
+  PByte(S)^ := Size;
+  Inc(S);
+  System.Move(Pointer(Buffer.FBytes)^, S^, Size);
+end;
+
+function TLuaInvokableBuilder.InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
+  const RefCount: Integer; const ParamFlags: TParamFlags): PLuaProcParam;
+var
+  CustomParam: TLuaCustomParam;
+  HighArray: PLuaProcParam;
+begin
+  if (not CustomParam.InternalSetTypeInfo(TypeInfo, FLua, True)) then
+  begin
+    Result := nil;
+    Exit;
+  end;
+
+  Result := FBuffer.Alloc(SizeOf(TLuaProcParam));
+  Inc(PLuaInvokable(FBuffer.FBytes).ParamCount);
+
+  PLuaCustomParam(@Self)^ := CustomParam;
+  Result.Name := Name;
+  Result.Value := -1;
+  Result.ManagedValue := -1;
+
+  { TParamFlag = (pfVar, pfConst, pfArray, pfAddress, pfReference, pfOut, pfResult) }
+  Result.IsArray := (pfArray in ParamFlags);
+  Result.IsAddress := (pfAddress in ParamFlags);
+  Result.IsReference := ([pfVar, pfReference, pfOut] * ParamFlags <> []);
+  if (pfConst in ParamFlags) and (RefCount = 0) and
+    (not (Result.IsArray or Result.IsAddress or Result.IsReference)) then
+  begin
+    if (Result.Size > SizeOf(Pointer)) or
+      ((Result.F.Kind = pkString) and (Result.F.StringType = stShortString)) then
+      Result.IsReference := True;
+  end;
+  Result.RefCount := RefCount + Ord(Result.IsReference);
+  if (Result.IsArray) then
+  begin
+    HighArray := FBuffer.Alloc(SizeOf(TLuaProcParam));
+    HighArray.InternalSetTypeInfo(System.TypeInfo(Integer), FLua, True);
+    HighArray.Name := Pointer(@PARAMNAME_HIGH_ARRAY);
+    HighArray.Value := -1;
+    HighArray.ManagedValue := -1;
+  end;
+
+  if (Result.IsInitial) then
+    Inc(PLuaInvokable(FBuffer.FBytes).InitialCount);
+  if (Result.IsManaged) then
+    Inc(PLuaInvokable(FBuffer.FBytes).ManagedCount);
+end;
+
+function TLuaInvokableBuilder.InternalBuildDone: __luapointer;
+var
+  i: Integer;
+  Offset: NativeInt;
+  InternalNames: Boolean;
+  Invokable: PLuaInvokable;
+  Param: ^TLuaProcParam;
+begin
+  // initial params
+  Invokable := Pointer(FBuffer.FBytes);
+  Param := @Invokable.Params[0];
+  Invokable.Initials := Pointer(FBuffer.Size + FAdvanced.Size);
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (Param.IsInitial) then
+      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+    if (Param.IsArray) then
+      Inc(Param);
+
+    Inc(Param);
+  end;
+
+  // managed params
+  Param := @Invokable.Params[0];
+  Invokable.Manageds := Pointer(FBuffer.Size + FAdvanced.Size);
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (Param.IsManaged) then
+      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+    if (Param.IsArray) then
+      Inc(Param);
+
+    Inc(Param);
+  end;
+
+  // concatenate buffers
+  Offset := FBuffer.Size;
+  System.Move(Pointer(FAdvanced.FBytes)^, FBuffer.Alloc(FAdvanced.Size)^, FAdvanced.Size);
+  Invokable := Pointer(FBuffer.FBytes);
+  InternalNames := (Invokable.ParamCount <> 0) and (NativeUInt(Invokable.Params[0].Name) <= $ffff);
+  if (InternalNames) then
+  begin
+    Param := @Invokable.Params[0];
+    Offset := Offset{Last FBuffer.Size} + NativeInt(Invokable);
+
+    for i := 0 to Invokable.ParamCount - 1 do
+    begin
+      Inc(NativeInt(Param.Name), Offset);
+      if (Param.IsArray) then Inc(Param){"High(Array)"};
+
+      Inc(Param);
+    end;
+  end;
+
+  // value, managed value, stack
+  InternalInitParams(Invokable^);
+
+  // hash comparison
+  // ToDo
+
+  // result
+  Result := TLuaMemoryHeap(FLua.FMemoryHeap).Alloc(FBuffer.Size);
+  Invokable := TLuaMemoryHeap(FLua.FMemoryHeap).Unpack(Result);
+  System.Move(Pointer(FBuffer.FBytes)^, Invokable^, FBuffer.Size);
+  Inc(NativeInt(Invokable.Initials), NativeInt(Invokable));
+  Inc(NativeInt(Invokable.Manageds), NativeInt(Invokable));
+
+  // internal names
+  if (InternalNames) then
+  begin
+    Param := @Invokable.Params[0];
+    Offset := NativeInt(Invokable) - NativeInt(Pointer(FBuffer.FBytes));
+
+    for i := 0 to Invokable.ParamCount - 1 do
+    begin
+      Inc(NativeInt(Param.Name), Offset);
+      if (Param.IsArray) then Inc(Param);
+
+      Inc(Param);
+    end;
+  end;
+end;
+
+procedure TLuaInvokableBuilder.InternalInitParams(var Invokable: TLuaInvokable);
+var
+  i: Integer;
+  IsStatic: Boolean;
+  Param: ^TLuaProcParam;
+begin
+  IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction]);
+
+ (* TMethodKind = (mkProcedure, mkFunction, mkConstructor, mkDestructor,
+    mkClassProcedure, mkClassFunction, mkClassConstructor, mkClassDestructor,
+    mkOperatorOverload,
+    { Obsolete }
+    mkSafeProcedure, mkSafeFunction); *)
+
+    {$Message 'here'}
+
+  Param := @Invokable.Params[0];
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (Param.IsArray) then Inc(Param);
+
+    Inc(Param);
+  end;
+
+
+  Inc(Invokable.TotalDataSize, Invokable.StackDataSize);
+end;
+
+function TLuaInvokableBuilder.BuildMethod(const AMethod: PTypeInfo): __luapointer;
+begin
+  Clear;
+
+end;
+
+{$ifdef EXTENDEDRTTI}
+function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo): __luapointer;
+begin
+  Clear;
+
+end;
+{$endif}
+
+function TLuaInvokableBuilder.BuildCustom(const MethodKind: TMethodKind; const Params: array of TLuaNativeParam;
+  const AResult: Pointer; const CallConv: TCallConv): __luapointer;
+var
+  i: Integer;
+begin
+  NewInvokable(MethodKind, CallConv, AResult);
+
+  for i := Low(Params) to High(Params) do
+  begin
+    InternalAddParam(Pointer(InternalAddName(Params[i].Name)), Params[i].TypeInfo,
+      Params[i].RefCount, Params[i].Flags);
+  end;
+
+  Result := InternalBuildDone;
+end;
+
 
 { Name space management structures  }
 
@@ -7354,66 +8243,6 @@ type
     property ParamsPtr: __luapointer read FIndex.ParamsPtr write FIndex.ParamsPtr;
   end;
   PLuaProperty = ^TLuaProperty;
-
- (*
-  // TypeInfo/Info-types
-  // and general information
-  TLuaPropertyInfoBase = object
-  protected
-    F: packed record
-      Information: Pointer;
-      Kind: TLuaPropertyKind;
-      ReservedRTTI: Boolean;
-      case Integer of
-        0: (OrdType: TOrdType);
-        1: (FloatType: TFloatType);
-        2: (StringType: TLuaPropStringType; MaxShortStringLength: Byte);
-        3: (BoolType: TLuaPropBoolType);
-    end;
-  public
-    property Informaton: Pointer read F.Information write F.Information;
-    property Kind: TLuaPropertyKind read F.Kind write F.Kind;
-    property OrdType: TOrdType read F.OrdType write F.OrdType;
-    property FloatType: TFloatType read F.FloatType write F.FloatType;
-    property StringType: TLuaPropStringType read F.StringType write F.StringType;
-    property MaxShortStringLength: Byte read F.MaxShortStringLength write F.MaxShortStringLength;
-    property BoolType: TLuaPropBoolType read F.BoolType write F.BoolType;
-  end;
-
-  // compact property description
-  // setter/getter: function or offset
-  TLuaPropertyInfoCompact = object(TLuaPropertyInfoBase)
-    ReadMode: NativeInt;
-    WriteMode: NativeInt;
-  end;
-
-  // complete property information
-  TLuaPropertyInfo = object(TLuaPropertyInfoCompact)
-  public
-    property IsRTTI: Boolean read F.ReservedRTTI write F.ReservedRTTI;
-  public
-    Name: __luaname;
-    PropInfo: PPropInfo;
-    Parameters: Pointer { INDEXED_PROPERTY, NAMED_PROPERTY or PLuaRecordInfo };
-
-   // procedure Cleanup;
-   // procedure Fill(const APropInfo: PPropInfo; const APropBase: TLuaPropertyInfoBase); overload;
-   // procedure Fill(const class_info; const APropBase: TLuaPropertyInfoBase; const PGet, PSet: pointer; const AParameters: PLuaRecordInfo); overload;
-   // function Description: LuaString;
-  end;
-  PLuaPropertyInfo = ^TLuaPropertyInfo;
-
-  { ПЕРЕИМЕНОВАТЬ  небольшая структура, которая используется для push/pop свойств вне стандартного __index/__newindex }
-  TLuaPropertyStruct = packed record
-    PropertyInfo: PLuaPropertyInfo;
-    Instance: Pointer;
-    Index: Pointer; // ПЕРЕИМЕНОВАТЬ указатель на структуру для вызова сложных свойств
-    ReturnAddress: Pointer; // native exception call address
-
-    case Integer of
-      0: (ConstMode: Boolean); // used during __index_prop_push
-      1: (StackIndex: Integer); // used during __newindex_prop_set
-  end;    *)
 
   // internal method
   TLuaProcKind = (pkMethod, pkClassMethod, pkStatic);
@@ -7874,206 +8703,6 @@ begin
   end;
 end;
 
-
-
-function VMTMethodsCount(const AClass: TClass): integer;
-{$ifdef fpc}
-const
-  vmtSelfPtr = 0; {TODO !!!}
-{$endif}
-asm
-        PUSH    EBX
-        MOV     ECX, 8
-        MOV     EBX, -1
-        MOV     EDX, vmtSelfPtr
-@@cycle:
-        ADD     EDX, 4
-        CMP     [EAX + EDX], EAX
-        JE      @@vmt_not_found
-        JB      @@continue
-        CMP     [EAX + EDX], EBX
-        JAE     @@continue
-        MOV     EBX, [EAX + EDX]
-@@continue:
-        DEC     ECX
-        JNZ     @@cycle
-        SUB     EBX, EAX
-        SHR     EBX, 2
-        MOV     EAX, EBX
-        JMP     @@exit
-@@vmt_not_found:
-        XOR     EAX, EAX
-@@exit:
-        POP     EBX
-end;          *)
-                (*
-// упаковать указатель по законам TypInfo
-procedure PackPointer(const ClassInfo: TLuaClassInfo; var Dest: pointer; const P: pointer);
-var
-  VmtIndex: integer;
-begin
-  if (ClassInfo._Class = GLOBAL_NAME_SPACE) then
-  begin
-    // в global_name_space всегда хранится полный указатель
-    integer(Dest) := integer(P);
-  end else
-  if (ClassInfo._ClassKind <> ckClass) then
-  begin
-    // структура
-    integer(Dest) := integer($FF000000) or integer(P);
-  end else
-  begin
-    // класс
-    if (P = nil) then exit;
-    if (integer(P) < TClass(ClassInfo._Class).InstanceSize) then
-    begin
-      integer(Dest) := integer($FF000000) or integer(P);
-    end else
-    begin
-      VmtIndex := IntPos(integer(P), PInteger(ClassInfo._Class), VMTMethodsCount(ClassInfo._Class));
-
-      if (VmtIndex < 0) then Dest := P
-      else integer(Dest) := integer($FE000000) or VmtIndex*4;
-    end;
-  end;
-end;
-
-// возвращаем "режим" чтения или записи по указателю на функцию
-// в случаях когда не указатель на глобальную переменную
-function PropMode(const P: pointer): integer;
-var
-  Value: dword absolute P;
-begin
-  if (P = PROP_NONE_USE) then Result := MODE_NONE_USE
-  else
-  if (Value and $FF000000 = $FF000000) then Result := Value and $00FFFFFF // смещение
-  else
-  Result := MODE_PROC_USE;
-end;
-         *)
-           (*
-     *)
-
-
-                                     (*
-// подчистить динамические данные - PropInfo и
-procedure TLuaPropertyInfo.Cleanup();
-begin
-  if (not IsRTTI) and (PropInfo <> nil) then
-  begin
-    FreeMem(PropInfo);
-    PropInfo := nil;
-  end;
-
-  PropertyName := '';
-end;
-
-
-// заполнение информации основываясь на PropInfo, созданном RTTI
-procedure TLuaPropertyInfo.Fill(const RTTIPropInfo: PPropInfo; const PropBase: TLuaPropertyInfoBase);
-begin
-  if (Self.IsRTTI) and (Self.PropInfo = RTTIPropInfo) then exit;
-
-  // удаление предыдущего propinfo
-  if (IsRTTI) then PropInfo := nil;
-  if (PropInfo <> nil) then
-  begin
-    FreeMem(PropInfo);
-    PropInfo := nil;
-  end;
-
-  // занести новые параметры
-  Self.IsRTTI := true;
-  Self.Base := PropBase;
-  Self.Parameters := nil;
-  Self.PropInfo := RTTIPropInfo;
-
-  // режимы чтения-записи
-  read_mode := PropMode(PropInfo.GetProc);
-  write_mode := PropMode(PropInfo.SetProc);
-end;
-
-
-// искуственная функция, создающая PropInfo (если нужно)
-// и заполняющая все необходимые поля
-procedure TLuaPropertyInfo.Fill(const class_info; const PropBase: TLuaPropertyInfoBase;
-                                const PGet, PSet: pointer; const AParameters: PLuaRecordInfo);
-var
-  ClassInfo: TLuaClassInfo absolute class_info;
-  Len: integer;
-
-  _GetProc, _SetProc: pointer;
-  _read_mode, _write_mode: integer;
-begin
-  // удаление предыдущего propinfo если параметры не совпадают
-  if (IsRTTI) then PropInfo := nil;
-
-  // инициализация полей, которые могут быть
-  // проверка на полное соответствие уже существующей информации
-  if (ClassInfo._Class = GLOBAL_NAME_SPACE) then
-  begin
-    _read_mode := integer(PGet);
-    _write_mode := _read_mode;
-    _GetProc := PROP_NONE_USE;
-    _SetProc := PROP_NONE_USE;
-
-    if (Self.Base.Information = PropBase.Information) and
-       (Self.Parameters = AParameters) and (_read_mode = Self.read_mode) then exit;
-  end else
-  begin
-    _GetProc := PROP_NONE_USE;
-    _SetProc := PROP_NONE_USE;
-    PackPointer(ClassInfo, _GetProc, PGet);
-    PackPointer(ClassInfo, _SetProc, PSet);
-    _read_mode := PropMode(_GetProc);
-    _write_mode := PropMode(_SetProc);
-    if (_read_mode >= 0) then _GetProc := PROP_NONE_USE;
-    if (_write_mode >= 0) then _SetProc := PROP_NONE_USE;
-
-    if (Self.Base.Information = PropBase.Information) and (Self.Parameters = AParameters) and
-       (_read_mode = Self.read_mode) and (_write_mode = Self.write_mode) then
-    begin
-      // сравнить калбеки
-      if ((_GetProc <> PROP_NONE_USE) or (_SetProc <> PROP_NONE_USE)) = (PropInfo = nil) then
-      begin
-        if (PropInfo = nil) then exit;
-        if (PropInfo.GetProc = _GetProc) and (PropInfo.SetProc = _SetProc) then exit;
-      end;
-    end;
-  end;
-
-  // очистить старый PropInfo(если нужно)
-  if (PropInfo <> nil) then
-  begin
-    FreeMem(PropInfo);
-    PropInfo := nil;
-  end;
-
-  // заполнение базовых полей
-  Self.IsRTTI := false;
-  Self.Base := PropBase;
-  Self.Parameters := AParameters;
-  Self.read_mode := _read_mode;
-  Self.write_mode := _write_mode; 
-
-  // создание нового PPropInfo (если нужно)
-  if (_GetProc <> PROP_NONE_USE) or (_SetProc <> PROP_NONE_USE) then
-  begin
-    Len := sizeof(TPropInfo) - sizeof({TPropInfo.Name}ShortString) + 1 + Length(PropertyName) + 4;
-    GetMem(PropInfo, Len);
-    ZeroMemory(PropInfo, Len);
-
-    PropInfo.Name := PropertyName;
-    PropInfo.PropType := pointer(integer(PropInfo)+Len-4);
-    PropInfo.PropType{$ifndef fpc}^{$endif} := PropBase.Information;
-    PropInfo.GetProc := _GetProc;
-    PropInfo.SetProc := _SetProc;
-    PropInfo.StoredProc := PROP_NONE_USE;
-    PropInfo.Index := integer(PROP_NONE_USE);
-  end;
-end;
-
-
 function TLuaPropertyInfo.Description(): string;
 const
   BOOL_STRS: array[TLuaPropBoolType] of string = ('boolean', 'ByteBool', 'WordBool', 'LongBool');
@@ -8140,250 +8769,6 @@ begin
     else Result := Result + 'W';
   end;
 end;   *)
-
-
-{ TLuaClassInfo }
-                 (*
-// возвращает индекс. отрицательный (для свойств) или положительный (для методов)
-function TLuaClassInfo.InternalAddName(const Name: string; const AsProc: boolean; var Initialized: boolean; const CodeAddr: pointer): integer;
-const
-  PROC_STR: array[boolean] of string = ('Property', 'Procedure');
-var
-  AHash: integer;
-
-  function GetNamePos(): integer;
-  label
-    Done;
-  var
-    Len, Index: integer;
-  begin
-    Index := 0;
-    // Result := InsortedPos8(AHash, Names);
-    // if (Result < 0) then exit;
-    Len := Length(Names);
-    Result := InsortedPlace8(AHash, pointer(Names), Len);
-    
-    while (Result < Len) and (AHash = Names[Result].Hash) do
-    begin
-      Index := Names[Result].Index;
-
-      if (Index >= 0) then
-      begin
-        if (SameStrings(Name, Procs[Index].ProcName)) then goto Done;
-      end else
-      begin
-        if (SameStrings(Name, Properties[{InvertIndex} not (Index)].PropertyName)) then goto Done;
-      end;
-
-      inc(Result);
-    end;
-
-    Result := -1;
-    exit;
-  Done:
-    // нарушение логики. пытаются зарегистрировать процедуру с таким же именем, как свойство
-    // Или наоборот
-    if (AsProc <> (Index >= 0)) then
-    ELua.Assert('%s with name "%s" is already contains in %s. That is why you can''t add a %s with a same name',
-               [PROC_STR[not AsProc], Name, _ClassName, PROC_STR[AsProc]], CodeAddr);
-  end;
-
-begin
-  // найти в списке имён
-  AHash := StringHash(Name);
-  Result := GetNamePos();
-  if (Result >= 0) then
-  begin
-    Result := Names[Result].Index; // индекс инвертировать не надо, он уже корректный
-    exit;
-  end;
-  Initialized := false;
-
-
-  // добавление имени
-  if (AsProc) then
-  begin
-    Result := Length(Procs);
-    SetLength(Procs, Result+1);
-    ZeroMemory(@Procs[Result], sizeof(TLuaProcInfo));
-    Procs[Result].ProcName := Name;
-    Procs[Result].ArgsCount := -1;
-  end else
-  begin
-    Result := Length(Properties);
-    SetLength(Properties, Result+1);
-    ZeroMemory(@Properties[Result], sizeof(TLuaPropertyInfo));
-    Properties[Result].PropertyName := Name;
-    Result := {InvertIndex} not (Result);
-  end;
-
-  // добавить в список Names
-  with TLuaHashIndex(DynArrayInsert(Names, typeinfo(TLuaHashIndexDynArray), InsortedPlace8(AHash, pointer(Names), Length(Names)))^) do
-  begin
-    Hash := AHash;
-    Index := Result;
-  end;
-end;    *)
-                        (*
-// быстрый поиск свойства (в простом "классе")
-// сделано это в основном для простых структур
-procedure FastFindProperty(const Properties: TLuaPropertyInfoDynArray; const Name: pchar; const NameLength: integer; var PropertyInfo: pointer);
-const
-  PROPERTY_SIZE = sizeof(TLuaPropertyInfo);
-asm
-  test eax, eax
-  jz @ret
-  push edi // счётчик Length(Properties)
-  push esi // сравниваемая строка
-  push ebx // буфер для сравнения
-  push ebp // дополнительный буффер для хранения NameLength
-
-  mov edi, [eax-4]
-  {$ifdef fpc} inc edi {$endif}
-  mov ebp, ecx
-@property_loop:
-  mov esi, [eax + TLuaPropertyInfo.PropertyName]
-  cmp ecx, [esi-4]
-  jne @property_next
-
-  { сравнение строки esi и edx. длинна = ecx }
-     jmp @1
-     @loop_byte:
-       dec ecx
-       mov bl, [esi+ecx]
-       cmp bl, [edx+ecx]
-       jne @exit_compare
-     @1:test ecx, 3
-     jnz @loop_byte
-
-     shr ecx, 2
-     jz  @exit // если строка найдена
-
-     @loop_dword:
-       mov ebx, [esi + ecx*4 - 4]
-       cmp ebx, [edx + ecx*4 - 4]
-       jne @exit_compare
-     dec ecx
-     jnz @loop_dword
-     jmp @exit // если строка найдена
-
-     // строки не равны, "выход"
-     @exit_compare: mov ecx, ebp
-  { <-- сравнение строки esi и edx }
-@property_next:
-  add eax, PROPERTY_SIZE
-  dec edi
-  jnz @property_loop
-  xor eax, eax // если не найден
-@exit:
-  pop ebp
-  pop ebx
-  pop esi
-  pop edi
-@ret:
-  mov edx, PropertyInfo
-  mov [edx], eax
-end;
-           *)            (*
-// найти индекс в списке глобальных имён
-function TLuaClassInfo.NameSpacePlace(const Lua: TLua; const Name: pchar; const NameLength: integer; var ProcInfo, PropertyInfo: pointer): integer;
-var
-  Len, Value: integer;
-  NameHash: integer;
-  ClassInfo: ^TLuaClassInfo;
-  HashInfo: ^TLuaHashIndex;
-begin
-  if (_ClassSimple) then
-  begin                           
-    ProcInfo := nil;
-    FastFindProperty(Properties, Name, NameLength, PropertyInfo);
-    Result := 0; { результат нужен только в AddToNameSpace(), но на тот момент флаг _ClassSimple выключен }
-    exit;
-  end;
-
-  NameHash := StringHash(Name, NameLength);
-  Len := Length(NameSpace);
-  Result := InsortedPlace8(NameHash, pointer(NameSpace), Len);
-
-  HashInfo := pointer(integer(NameSpace) + Result*sizeof(TLuaHashIndex));
-  while (Result < Len) and (HashInfo.Hash = NameHash) do
-  begin
-    Value := HashInfo.Index;
-    ClassInfo := @Lua.ClassesInfo[word(Value)];
-
-    if (Value >= 0) then
-    begin
-      ProcInfo := @ClassInfo.Procs[Value shr 16];
-
-      if (SameStrings(PLuaProcInfo(ProcInfo).ProcName, Name, NameLength)) then
-      begin
-        PropertyInfo := nil;
-        exit;
-      end;
-    end else
-    begin
-      PropertyInfo := @ClassInfo.Properties[not smallint(Value shr 16)];
-
-      if (SameStrings(PLuaPropertyInfo(PropertyInfo).PropertyName, Name, NameLength)) then
-      begin
-        ProcInfo := nil;
-        exit;
-      end;
-    end;               
-
-    inc(Result);
-    inc(HashInfo);
-  end;
-
-  ProcInfo := nil;
-  PropertyInfo := nil;
-end;
-
-function  TLuaClassInfo.PropertyIdentifier(const Name: string = ''): string;
-var
-  S: string;
-begin
-  if (_Class = GLOBAL_NAME_SPACE) then Result := 'global variable'
-  else
-  if (_ClassKind <> ckClass) then Result := 'field'
-  else
-  Result := 'property';
-
-  // полный вариант
-  if (Name <> '') then
-  begin
-    if (_Class = GLOBAL_NAME_SPACE) then S := Format(' "%s"', [Name])
-    else S := Format(' %s.%s', [_ClassName, Name]);
-
-    Result := Result + S;
-  end;
-end;
-
-procedure TLuaClassInfo.Cleanup();
-var
-  i: integer;
-begin
-  // очистить информацию по типам
-  if (TClass(_Class) <> GLOBAL_NAME_SPACE) then
-  case _ClassKind of
-    ckRecord: Dispose(PLuaRecordInfo(_Class));
-       ckSet: Dispose(PLuaSetInfo(_Class));
-     ckArray: begin
-                TLuaPropertyInfo(PLuaArrayInfo(_Class).ItemInfo).Cleanup();
-                Dispose(PLuaArrayInfo(_Class));
-              end;
-  end;
-
-  // подчистить исскуственные PPropInfo в свойствах
-  for i := 0 to Length(Properties)-1 do
-  Properties[i].Cleanup();
-
-  Names := nil;
-  NameSpace := nil;
-  Procs := nil;
-  Properties := nil;
-  _ClassName := '';
-end;          *)
 
 
 { TLuaUnit }

@@ -795,7 +795,7 @@ type
     FCFunctionHeap: array[1..8{$ifdef LARGEINT}* 2{$endif}] of Byte{TLuaCFunctionHeap};
     {$endif}
 
-  //  FProcList: __TLuaList {TLuaProcInfo};
+  //  FProcList: __TLuaList {TLuaMethodInfo};
   //  FPropertiesList: __TLuaList {TLuaPropertyInfo};
 
 
@@ -833,7 +833,7 @@ type
     function  InternalAddArray(const Identifier, ItemTypeInfo: Pointer; const ABounds: array of Integer): PLuaArrayInfo;
     function  InternalAddSet(const TypeInfo: Pointer): PLuaSetInfo;
     function  InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString; ArgsCount: Integer;
-      const AProcKind: Byte{TLuaProcKind}; Address: Pointer): __luapointer;
+      const AProcKind: Byte{TLuaMethodKind}; Address: Pointer): __luapointer;
     procedure InternalReplaceChildNameSpace(const ParentMetaItem: Pointer{PLuaDictionaryItem};
       const Name: __luaname; const LastValue, Value: __luapointer; const IsDefaultProp: Boolean);
     function  InternalAddProperty(const MetaType: PLuaMetaType; const Name: LuaString;
@@ -945,7 +945,7 @@ type
     function  RegRecord(const Name: LuaString; const TypeInfo: PTypeInfo; const UseRttiContext: Boolean = True): PLuaRecordInfo;
     function  RegArray(const Identifier: Pointer; const ItemTypeInfo: PTypeInfo; const ABounds: array of Integer): PLuaArrayInfo;
     function  RegSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
-  (*  procedure RegProc(const ProcName: string; const Proc: TLuaProc; const ArgsCount: integer=-1); overload;
+  (*  procedure RegProc(const ProcName: string; const Proc: TLuaMethod; const ArgsCount: integer=-1); overload;
     procedure RegProc(const AClass: TClass; const ProcName: string; const Proc: TLuaClassProc; const ArgsCount: integer=-1; const with_class: boolean=false); overload; *)
     procedure RegProperty(const AClass: TClass; const Name: LuaString; const TypeInfo: PTypeInfo;
       const Getter, Setter: Pointer; const GetterPtr: TLuaPropPtr=ppAuto; const SetterPtr: TLuaPropPtr=ppAuto;
@@ -1018,13 +1018,13 @@ function LuaRecord(const Data: pointer; const Info: PLuaRecordInfo; const IsRef:
 function LuaArray(const Data: pointer; const Info: PLuaArrayInfo; const IsRef: boolean=true; const IsConst: boolean=false): TLuaArray;
 function LuaSet(const Data: pointer; const Info: PLuaSetInfo; const IsRef: boolean=true; const IsConst: boolean=false): TLuaSet;
 
-function LuaProc(const Proc: TLuaProc0): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc1): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc2): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc3): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc4): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc5): TLuaProc; overload;
-function LuaProc(const Proc: TLuaProc6): TLuaProc; overload;
+function LuaMethod(const Proc: TLuaMethod0): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod1): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod2): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod3): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod4): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod5): TLuaMethod; overload;
+function LuaMethod(const Proc: TLuaMethod6): TLuaMethod; overload;
 function LuaClassProc(const Proc: TLuaClassProc0): TLuaClassProc; overload;
 function LuaClassProc(const Proc: TLuaClassProc1): TLuaClassProc; overload;
 function LuaClassProc(const Proc: TLuaClassProc2): TLuaClassProc; overload;
@@ -5300,7 +5300,7 @@ end;
 // а если функция внутри lua, то возвращается она сама
 function CFunctionPtr(CFunction: Lua_CFunction): pointer;
 var
-  ProcInfo: ^TLuaProcInfo;
+  ProcInfo: ^TLuaMethodInfo;
 begin
   Result := @CFunction;
 
@@ -5449,20 +5449,20 @@ const
 
   
 
-function LuaProc(const Proc: TLuaProc0): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc1): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc2): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc3): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc4): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc5): TLuaProc;
-begin Result := TLuaProc(Proc); end;
-function LuaProc(const Proc: TLuaProc6): TLuaProc;
-begin Result := TLuaProc(Proc); end;
+function LuaMethod(const Proc: TLuaMethod0): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod1): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod2): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod3): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod4): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod5): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
+function LuaMethod(const Proc: TLuaMethod6): TLuaMethod;
+begin Result := TLuaMethod(Proc); end;
 function LuaClassProc(const Proc: TLuaClassProc0): TLuaClassProc;
 begin Result := TLuaClassProc(Proc); end;
 function LuaClassProc(const Proc: TLuaClassProc1): TLuaClassProc;
@@ -6515,7 +6515,8 @@ end;
 type
   TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
                    pkObject, pkString, pkVariant, pkInterface,
-                   pkPointer, pkClass, pkRecord, pkArray, pkSet, pkUniversal);
+                   pkPointer, pkClass, pkRecord, pkArray, pkSet,
+                   pkMethod, pkUniversal);
 
   TLuaBoolType = (btBoolean, btByteBool, btWordBool, btLongBool);
 
@@ -7392,7 +7393,7 @@ const
   PARAM_ADDRESS_MODE = 1 shl 7;
 
 type
-  TLuaProcParam = object(TLuaCustomParam)
+  TLuaMethodParam = object(TLuaCustomParam)
   private
     {
       Flags:
@@ -7425,16 +7426,16 @@ type
     property IsInitial: Boolean read GetIsInitial;
     property IsManaged: Boolean read GetIsManaged;
   end;
-  PLuaProcParam = ^TLuaProcParam;
-  TLuaProcParams = array[0..0] of TLuaProcParam;
-  PLuaProcParams = ^TLuaProcParams;
+  PLuaMethodParam = ^TLuaMethodParam;
+  TLuaMethodParams = array[0..0] of TLuaMethodParam;
+  PLuaMethodParams = ^TLuaMethodParams;
 
-function TLuaProcParam.GetIsReference: Boolean;
+function TLuaMethodParam.GetIsReference: Boolean;
 begin
   Result := (F.FlagsEx and PARAM_REFERENCE_MODE <> 0);
 end;
 
-procedure TLuaProcParam.SetIsReference(const AValue: Boolean);
+procedure TLuaMethodParam.SetIsReference(const AValue: Boolean);
 begin
   if (AValue) then
   begin
@@ -7445,12 +7446,12 @@ begin
   end;
 end;
 
-function TLuaProcParam.GetIsArray: Boolean;
+function TLuaMethodParam.GetIsArray: Boolean;
 begin
   Result := (F.FlagsEx and PARAM_ARRAY_MODE <> 0);
 end;
 
-procedure TLuaProcParam.SetIsArray(const AValue: Boolean);
+procedure TLuaMethodParam.SetIsArray(const AValue: Boolean);
 begin
   if (AValue) then
   begin
@@ -7461,12 +7462,12 @@ begin
   end;
 end;
 
-function TLuaProcParam.GetIsAddress: Boolean;
+function TLuaMethodParam.GetIsAddress: Boolean;
 begin
   Result := (F.FlagsEx and PARAM_ADDRESS_MODE <> 0);
 end;
 
-procedure TLuaProcParam.SetIsAddress(const AValue: Boolean);
+procedure TLuaMethodParam.SetIsAddress(const AValue: Boolean);
 begin
   if (AValue) then
   begin
@@ -7477,12 +7478,12 @@ begin
   end;
 end;
 
-function TLuaProcParam.GetRefCount: Byte;
+function TLuaMethodParam.GetRefCount: Byte;
 begin
   Result := F.FlagsEx and PARAM_REFCOUNT_MASK;
 end;
 
-procedure TLuaProcParam.SetRefCount(const AValue: Byte);
+procedure TLuaMethodParam.SetRefCount(const AValue: Byte);
 begin
   if (AValue >= PARAM_MAX_REFCOUNT) then
   begin
@@ -7493,12 +7494,12 @@ begin
   end;
 end;
 
-function TLuaProcParam.GetIsInitial: Boolean;
+function TLuaMethodParam.GetIsInitial: Boolean;
 begin
   Result := (RefCount <> 0) or (IsManaged);
 end;
 
-function TLuaProcParam.GetIsManaged: Boolean;
+function TLuaMethodParam.GetIsManaged: Boolean;
 begin
   case F.Kind of
     pkString:
@@ -7583,9 +7584,9 @@ type
     Initials: PInteger;
     ManagedCount: Integer;
     Manageds: PInteger;
-    Result: TLuaProcParam;
+    Result: TLuaMethodParam;
     ParamCount: Integer;
-    Params: TLuaProcParams;
+    Params: TLuaMethodParams;
 
     procedure Initialize(const ParamBlock: PParamBlock);
     procedure Finalize(const ParamBlock: PParamBlock);
@@ -7600,9 +7601,9 @@ procedure RawInvoke(CodeAddress: Pointer; ParamBlock: PParamBlock);
 procedure TLuaInvokable.Initialize(const ParamBlock: PParamBlock);
 var
   i, RefCount: Integer;
-  Items: PLuaProcParams;
+  Items: PLuaMethodParams;
   InitialPtr: PInteger;
-  Param: PLuaProcParam;
+  Param: PLuaMethodParam;
   Ptr: Pointer;
 begin
   Items := @Params;
@@ -7638,9 +7639,9 @@ label
   failure;
 var
   i, VType: Integer;
-  Items: PLuaProcParams;
+  Items: PLuaMethodParams;
   ManagedPtr: PInteger;
-  Param: PLuaProcParam;
+  Param: PLuaMethodParam;
   Ptr: Pointer;
 begin
   Items := @Params;
@@ -7881,7 +7882,7 @@ type
     function NewInvokable(const MethodKind: TMethodKind; const CallConv: TCallConv; const AResult: Pointer): Boolean;
     function InternalAddName(const Name: LuaString): NativeInt;
     function InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
-      const RefCount: Integer; const ParamFlags: TParamFlags): PLuaProcParam;
+      const RefCount: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
     function InternalBuildDone: __luapointer;
     procedure InternalInitParams(var Invokable: TLuaInvokable);
   public
@@ -7916,8 +7917,8 @@ begin
   FBuffer.Size := 0;
   FAdvanced.Size := 0;
 
-  Invokable := FBuffer.Alloc(SizeOf(TLuaInvokable) - SizeOf(TLuaProcParams));
-  FillChar(Invokable^, SizeOf(TLuaInvokable) - SizeOf(TLuaProcParams), #0);
+  Invokable := FBuffer.Alloc(SizeOf(TLuaInvokable) - SizeOf(TLuaMethodParams));
+  FillChar(Invokable^, SizeOf(TLuaInvokable) - SizeOf(TLuaMethodParams), #0);
 
   Invokable.MethodKind := MethodKind;
   Invokable.CallConv := CallConv;
@@ -8006,10 +8007,10 @@ begin
 end;
 
 function TLuaInvokableBuilder.InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
-  const RefCount: Integer; const ParamFlags: TParamFlags): PLuaProcParam;
+  const RefCount: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
 var
   CustomParam: TLuaCustomParam;
-  HighArray: PLuaProcParam;
+  HighArray: PLuaMethodParam;
 begin
   if (not CustomParam.InternalSetTypeInfo(TypeInfo, FLua, True)) then
   begin
@@ -8017,7 +8018,7 @@ begin
     Exit;
   end;
 
-  Result := FBuffer.Alloc(SizeOf(TLuaProcParam));
+  Result := FBuffer.Alloc(SizeOf(TLuaMethodParam));
   Inc(PLuaInvokable(FBuffer.FBytes).ParamCount);
 
   PLuaCustomParam(@Self)^ := CustomParam;
@@ -8039,7 +8040,7 @@ begin
   Result.RefCount := RefCount + Ord(Result.IsReference);
   if (Result.IsArray) then
   begin
-    HighArray := FBuffer.Alloc(SizeOf(TLuaProcParam));
+    HighArray := FBuffer.Alloc(SizeOf(TLuaMethodParam));
     HighArray.InternalSetTypeInfo(System.TypeInfo(Integer), FLua, True);
     HighArray.Name := Pointer(@PARAMNAME_HIGH_ARRAY);
     HighArray.Value := -1;
@@ -8058,7 +8059,7 @@ var
   Offset: NativeInt;
   InternalNames: Boolean;
   Invokable: PLuaInvokable;
-  Param: ^TLuaProcParam;
+  Param: ^TLuaMethodParam;
 begin
   // initial params
   Invokable := Pointer(FBuffer.FBytes);
@@ -8135,13 +8136,104 @@ begin
   end;
 end;
 
+(*
+  TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
+                   pkObject, pkString, pkVariant, pkInterface,
+                   pkPointer, pkClass, pkRecord, pkArray, pkSet,
+                   pkMethod, pkUniversal);
+
+  TLuaBoolType = (btBoolean, btByteBool, btWordBool, btLongBool);
+
+  TLuaStringType = (stShortString, stAnsiString, stWideString, stUnicodeString,
+    stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
+*)
+
+function UseResultRef(const Param: TLuaMethodParam; const IsConstructor: Boolean;
+  const CallConv: TCallConv): Boolean;
+{$ifdef CPUARM64}
+var
+  ctx: TRTTIContext;
+{$endif}
+begin
+  case Param.Kind of
+    {$ifdef AUTOREFCOUNT}
+    pkObject: Result := (not IsConstructor);
+    {$endif}
+    pkString: Result := (Param.F.StringType in [stShortString, stAnsiString, stWideString, stUnicodeString]);
+   (*
+    tkInterface, tkMethod, tkDynArray, tkUString, tkLString, tkWString,
+    tkString, tkVariant: Result := True;
+    tkRecord:
+    {$if Defined(CPUX64)}
+      case GetTypeData(TypeInfo)^.RecSize of
+        1, 2, 4: Result := False;
+        8: Result := IsManaged(TypeInfo);
+      else
+        Result := True;
+      end;
+    {$elseif Defined(CPUX86)}
+      case GetTypeData(TypeInfo)^.RecSize of
+        1, 2: Result := False;
+        4: Result := IsManaged(TypeInfo);
+      else
+        Result := True;
+      end;
+    {$elseif Defined(CPUARM32)}
+      case GetTypeData(TypeInfo)^.RecSize of
+    {$if Defined(ANDROID32)}
+        1..4: Result := False;
+    {$ELSEIF Defined(IOS32)}
+        1: Result := False;
+    {$ifend}
+      else
+        Result := True;
+      end;
+    {$elseif Defined(CPUARM64)}
+      if ctx.GetType(TypeInfo).IsHFA then
+        Result := False
+      else
+        Result := not (GetTypeData(TypeInfo)^.RecSize in [1..16]);
+    {$ifend}
+    tkArray:
+    {$if Defined(CPUX64)}
+      Result := not (GetTypeData(TypeInfo)^.ArrayData.Size in [1, 2, 4, 8]);
+    {$elseif Defined(CPUX86) or Defined(CPUARM32)}
+      Result := not (GetTypeData(TypeInfo)^.ArrayData.Size in [1, 2, 4]);
+    {$elseif Defined(CPUARM64)}
+      Result := GetTypeData(TypeInfo)^.ArrayData.Size > 16;
+    {$ifend} *)
+  else
+    Result := False;
+  end;
+end;
+
 procedure TLuaInvokableBuilder.InternalInitParams(var Invokable: TLuaInvokable);
 var
   i: Integer;
-  IsStatic: Boolean;
-  Param: ^TLuaProcParam;
+  IsStatic, IsSafeCall, IsBackwardArg, IsConstructor: Boolean;
+  Param: ^TLuaMethodParam;
+
+
 begin
+  // flags
   IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction]);
+  IsSafeCall := (Invokable.CallConv = ccSafeCall);
+  IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}False{$endif};
+  IsConstructor := (Invokable.MethodKind = mkConstructor);
+
+  // registers
+
+  // arguments
+  begin
+    Param := @Invokable.Params[0];
+    for i := 0 to Invokable.ParamCount - 1 do
+    begin
+      if (Param.IsArray) then Inc(Param);
+
+      Inc(Param);
+    end;
+
+  end;
 
  (* TMethodKind = (mkProcedure, mkFunction, mkConstructor, mkDestructor,
     mkClassProcedure, mkClassFunction, mkClassConstructor, mkClassDestructor,
@@ -8149,15 +8241,9 @@ begin
     { Obsolete }
     mkSafeProcedure, mkSafeFunction); *)
 
-    {$Message 'here'}
+//    {$Message 'here'}
 
-  Param := @Invokable.Params[0];
-  for i := 0 to Invokable.ParamCount - 1 do
-  begin
-    if (Param.IsArray) then Inc(Param);
 
-    Inc(Param);
-  end;
 
 
   Inc(Invokable.TotalDataSize, Invokable.StackDataSize);
@@ -8245,14 +8331,15 @@ type
   PLuaProperty = ^TLuaProperty;
 
   // internal method
-  TLuaProcKind = (pkMethod, pkClassMethod, pkStatic);
-  TLuaProc = record
-    Kind: TLuaProcKind;
+  TLuaMethodKind = (mkStatic, mkInstance, mkClass, mkConstruct, mkDestruct,
+    mkMethod, mkReference, {Operator?} mkUniversal);
+  TLuaMethod = record
+    Kind: TLuaMethodKind;
     ArgsCount: Integer;
     Address: Pointer;
     Value: __luafunction;
   end;
-  PLuaProc = ^TLuaProc;
+  PLuaMethod = ^TLuaMethod;
 
   // global entity
   TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst{Script}, gkScriptVariable);
@@ -11629,7 +11716,7 @@ var
     record_info: PLuaRecordInfo;
     description, prop_prefix, operators, propdesc: string;
     class_info: ^TLuaClassInfo;
-    proc_info: ^TLuaProcInfo;
+    proc_info: ^TLuaMethodInfo;
     property_info: ^TLuaPropertyInfo;
   begin
     type_base.Clear(); type_properties.Clear(); type_methods.Clear(); type_events.Clear();
@@ -12966,7 +13053,7 @@ label
 var
   LastReturnAddress: Pointer;
   Entity: PLuaGlobalEntity;
-  Proc: ^TLuaProc;
+  Proc: ^TLuaMethod;
   Arg: PLuaArg;
   V: PVarRec;
   i, Count, ErrCode: Integer;
@@ -14301,7 +14388,7 @@ var
   Heap: ^TLuaMemoryHeap;
   {$endif}
   MetaType: ^TLuaMetaType;
-  Proc: ^TLuaProc;
+  Proc: ^TLuaMethod;
 begin
   Result := Pointer(lua_tocfunction(Handle, StackIndex));
 
@@ -14350,7 +14437,7 @@ var
   Heap: ^TLuaMemoryHeap;
   {$endif}
   MetaType: ^TLuaMetaType;
-  Proc: ^TLuaProc;
+  Proc: ^TLuaMethod;
 begin
   Result := Pointer(lua_tocfunction(Handle, StackIndex));
   if (not Assigned(Result)) or (Result <> @LuaFuntionWrapper) then Exit;
@@ -15248,7 +15335,7 @@ begin
 end;
 
 function  TLua.InternalAddProc(const MetaType: PLuaMetaType; const ProcName: LuaString;
-  ArgsCount: Integer; const AProcKind: Byte{TLuaProcKind}; Address: Pointer): __luapointer;
+  ArgsCount: Integer; const AProcKind: Byte{TLuaMethodKind}; Address: Pointer): __luapointer;
 begin
   Result := LUA_POINTER_INVALID;
 end;
@@ -15259,7 +15346,7 @@ var
   Index: integer;
   IsConstructor: boolean;
   ClassInfo: ^TLuaClassInfo;
-  ProcInfo: ^TLuaProcInfo;
+  ProcInfo: ^TLuaMethodInfo;
 
   // рекурсивное заполнение данных по конструктору потомков
   procedure FillConstructor(const ClassIndex: integer; const Address: pointer; const ArgsCount: integer);
@@ -16228,7 +16315,7 @@ var
   SLength: integer;
   ClassInfo: PLuaClassInfo;
   is_class: boolean;
-  ProcInfo: ^TLuaProcInfo;
+  ProcInfo: ^TLuaMethodInfo;
   PropertyInfo: ^TLuaPropertyInfo;
   prop_struct: TLuaPropertyStruct;
   recursive_userdata: TLuaUserData;
@@ -17468,7 +17555,7 @@ var
   Item: PLuaDictionaryItem;
   Ptr: __luapointer;
   Prop: ^TLuaProperty;
-  Proc: ^TLuaProc;
+  Proc: ^TLuaMethod;
   Flags: Integer;
   Instance, Value: Pointer;
 begin
@@ -17883,7 +17970,7 @@ var
   Name: PLuaString;
   MetaType: ^TLuaMetaType;
   Prop: ^TLuaProperty;
-  Proc: ^TLuaProc;
+  Proc: ^TLuaMethod;
 begin
   NativeUInt(NativeModify) := {$ifdef LARGEINT}(NativeUInt(ModifyHigh) shl 32) +{$endif} ModifyLow;
 
@@ -19219,7 +19306,7 @@ begin
 end;
             (*
 
-function TLua.ProcCallback(const ClassInfo: TLuaClassInfo; const ProcInfo: TLuaProcInfo): integer;
+function TLua.ProcCallback(const ClassInfo: TLuaClassInfo; const ProcInfo: TLuaMethodInfo): integer;
 var
   userdata: PLuaUserData;
   luatype, i, class_index: integer;
@@ -19288,7 +19375,7 @@ begin
   begin
     if (ClassInfo._Class = GLOBAL_NAME_SPACE) then
     begin
-      TLuaProc2(ProcInfo.Address)(FArgs, FBufferArg) // глобальная
+      TLuaMethod2(ProcInfo.Address)(FArgs, FBufferArg) // глобальная
     end else
     begin
       if (userdata = nil) then proc_class := TClass(ClassesInfo[class_index]._Class) else proc_class := TClass(userdata.instance^);

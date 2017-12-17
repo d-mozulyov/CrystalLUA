@@ -193,6 +193,8 @@ type
     AnsiChar = Byte;
     PAnsiChar = PByte;
     AnsiString = TBytes;
+    WideString = UnicodeString;
+    PWideString = PUnicodeString;
     ShortString = array[Byte] of Byte;
     PShortString = ^ShortString;
   {$endif}
@@ -456,6 +458,7 @@ type
     F: record
       Marker: Integer;
       Kind: TLuaMetaKind;
+      {ToDo Managed, HFA: Boolean}
       Align: array[0..2] of Byte;
       Size: Integer;
 
@@ -473,11 +476,19 @@ type
     {$ifdef SMALLINT}
     function GetPtr: __luapointer; {$ifdef INLINESUPPORT}inline;{$endif}
     {$endif}
+    function GetManaged: Boolean;
+    function GetHFA: Boolean;
+    function GetHFAElementType: TFloatType;
+    function GetHFAElementCount: Integer;
     procedure CheckInstance(const AKind: TLuaMetaKind; const ReturnAddress: Pointer);
   protected
     property Kind: TLuaMetaKind read F.Kind;
     property Ptr: __luapointer read {$ifdef SMALLINT}GetPtr{$else .LARGEINT}F.Ptr{$endif};
     property Ref: Integer read F.Ref;
+    property Managed: Boolean read GetManaged{F.Managed};
+    property HFA: Boolean read GetHFA{F.HFA};
+    property HFAElementType: TFloatType read GetHFAElementType;
+    property HFAElementCount: Integer read GetHFAElementCount;
 
     procedure Clear(const Instance: Pointer{/TObject}; const FillZero: Boolean);
     procedure Assign(const Instance, Value: Pointer{/TObject});
@@ -665,7 +676,7 @@ type
     Flags: TParamFlags;
     Name: LuaString;
     TypeInfo: Pointer;
-    RefCount: Integer;
+    PointerDepth: Integer;
   end;
   PLuaNativeParam = ^TLuaNativeParam;
 
@@ -2473,10 +2484,47 @@ begin
 end;
 
 function IsBooleanTypeInfo(const Value: PTypeInfo): Boolean;
+var
+  Base: PTypeInfo;
+  pBase: ^PTypeInfo;
+  TypeData: PTypeData;
+  S: PByte;
 begin
-  Result := (Value <> nil) and
-  ((Value = TypeInfo(Boolean)) or (Value = TypeInfo(ByteBool)) or
-   (Value = TypeInfo(WordBool)) or (Value = TypeInfo(LongBool)));
+  Result := Assigned(Value) and (Value.Kind = tkEnumeration);
+  if (not Result) then
+    Exit;
+
+  Base := Value;
+  repeat
+    pBase := GetTypeData(Base)^.BaseType;
+    if (pBase = nil) or (pBase^ = nil) or (pBase^ = Base) then Break;
+    Base := pBase^;
+  until (False);
+
+  Result := (Base = System.TypeInfo(Boolean)) or
+    (Base = System.TypeInfo(ByteBool)) or
+    (Base = System.TypeInfo(WordBool)) or
+    (Base = System.TypeInfo(LongBool));
+
+  if (not Result) then
+  begin
+    TypeData := GetTypeData(Base);
+    if (TypeData.MinValue = 0) and (TypeData.MaxValue = 1) then // match C++ bool
+    begin
+      S := Pointer(@Base.Name);
+      if (S^ <> 4) then Exit;
+      Inc(S);
+      if (S^ <> Ord('b')) then Exit;
+      Inc(S);
+      if (S^ <> Ord('o')) then Exit;
+      Inc(S);
+      if (S^ <> Ord('o')) then Exit;
+      Inc(S);
+      if (S^ <> Ord('l')) then Exit;
+
+      Result := True;
+    end;
+  end;
 end;
 
 function IsManagedTypeInfo(const Value: PTypeInfo): Boolean;
@@ -2522,7 +2570,7 @@ begin
         {$endif}
         for i := 0 to FieldTable.Count - 1 do
         begin
-         {$ifdef WEAKREF}
+          {$ifdef WEAKREF}
           if FieldTable.Fields[i].TypeInfo = nil then
           begin
             WeakMode := True;
@@ -6167,6 +6215,80 @@ begin
 end;
 {$endif}
 
+function TLuaMetaType.GetManaged: Boolean;
+begin
+  case F.Kind of
+    {$ifdef AUTOREFCOUNT}
+    mtClass: Result := True;
+    {$endif}
+    mtRecord:
+    begin
+      Result := (Assigned(F.TypeInfo)) and (IsManagedTypeInfo(F.TypeInfo));
+    end;
+    mtArray:
+    begin
+      Result := Assigned(PLuaArrayInfo(@Self).FFinalTypeInfo);
+    end;
+  else
+    Result := False;
+  end;
+end;
+
+function TLuaMetaType.GetHFA: Boolean;
+{$ifdef CPUARM64}
+  function GetRecordHFA(const ATypeInfo: PTypeInfo): Boolean; far;
+  var
+    Context: TRTTIContext;
+  begin
+    Result := Context.GetType(ATypeInfo).IsHFA;
+  end;
+begin
+  Result := (F.Kind = mtRecord) and (Assigned(F.TypeInfo)) and GetRecordHFA(F.TypeInfo);
+end;
+{$else}
+begin
+  Result := False;
+end;
+{$endif}
+
+function TLuaMetaType.GetHFAElementType: TFloatType;
+{$ifdef CPUARM64}
+  function GetRecordHFAElementType(const ATypeInfo: PTypeInfo): TFloatType; far;
+  var
+    Context: TRTTIContext;
+    ElementType: TRttiFloatType;
+  begin
+    Result := High(TFloatType);
+    ElementType := Context.GetType(ATypeInfo).HFAElementType;
+    if (Assigned(ElementType)) then
+      Result := ElementType.FloatType;
+  end;
+{$endif}
+begin
+  Result := High(TFloatType);
+  {$ifdef CPUARM64}
+  if (F.Kind = mtRecord) and (Assigned(F.TypeInfo)) then
+    Result := GetRecordHFAElementType(F.TypeInfo);
+  {$endif}
+end;
+
+function TLuaMetaType.GetHFAElementCount: Integer;
+{$ifdef CPUARM64}
+  function GetRecordHFAElementCount(const ATypeInfo: PTypeInfo): Integer; far;
+  var
+    Context: TRTTIContext;
+  begin
+    Result := Context.GetType(ATypeInfo).HFAElementCount;
+  end;
+{$endif}
+begin
+  Result := 0;
+  {$ifdef CPUARM64}
+  if (F.Kind = mtRecord) and (Assigned(F.TypeInfo)) then
+    Result := GetRecordHFAElementCount(F.TypeInfo);
+  {$endif}
+end;
+
 procedure TLuaMetaType.CheckInstance(const AKind: TLuaMetaKind; const ReturnAddress: Pointer);
 const
   KINDS: array[TLuaMetaKind] of string = ('class', 'record', 'array', 'set');
@@ -6177,8 +6299,6 @@ begin
 end;
 
 procedure TLuaMetaType.Clear(const Instance: Pointer{/TObject}; const FillZero: Boolean);
-var
-  TypeInfo: PTypeInfo;
 begin
   case F.Kind of
     mtClass:
@@ -6193,19 +6313,13 @@ begin
     end;
     mtRecord:
     begin
-      TypeInfo := F.TypeInfo;
-      if (Assigned(TypeInfo)) {ToDo managed?} then
-      begin
-        FinalizeArray(Instance, TypeInfo, 1);
-      end;
+      if (Self.Managed) then
+        FinalizeArray(Instance, F.TypeInfo, 1);
     end;
     mtArray:
     begin
-      TypeInfo := PLuaArrayInfo(@Self).FFinalTypeInfo;
-      if (Assigned(TypeInfo)) {ToDo managed?} then
-      begin
-        FinalizeArray(Instance, TypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
-      end;
+      if (Self.Managed) then
+        FinalizeArray(Instance, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
     end;
     mtSet: ;
   end;
@@ -6217,8 +6331,6 @@ begin
 end;
 
 procedure TLuaMetaType.Assign(const Instance, Value: Pointer{/TObject});
-var
-  TypeInfo: PTypeInfo;
 begin
   case F.Kind of
     mtClass:
@@ -6228,19 +6340,17 @@ begin
     end;
     mtRecord:
     begin
-      TypeInfo := F.TypeInfo;
-      if (Assigned(TypeInfo)) {ToDo managed?} then
+      if (Self.Managed) then
       begin
-        CopyArray(Instance, Value, TypeInfo, 1);
-        Exit
+        CopyArray(Instance, Value, F.TypeInfo, 1);
+        Exit;
       end;
     end;
     mtArray:
     begin
-      TypeInfo := PLuaArrayInfo(@Self).FFinalTypeInfo;
-      if (Assigned(TypeInfo)) {ToDo managed?} then
+      if (Self.Managed) then
       begin
-        CopyArray(Instance, Value, TypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
+        CopyArray(Instance, Value, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
         Exit;
       end;
     end;
@@ -6514,7 +6624,7 @@ end;
 
 type
   TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
-                   pkObject, pkString, pkVariant, pkInterface,
+                   pkObject, pkWeakObject, pkString, pkVariant, pkInterface,
                    pkPointer, pkClass, pkRecord, pkArray, pkSet,
                    pkMethod, pkUniversal);
 
@@ -6522,6 +6632,18 @@ type
 
   TLuaStringType = (stShortString, stAnsiString, stWideString, stUnicodeString,
     stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
+
+  TLuaMethodType = (mtStatic, mtClassStatic, mtInstance, mtClassIntance,
+    mtConstructor, mtDestructor, mtMethod, mtReference, {Operator?} mtUniversal);
+
+  TLuaMethod = record
+//    Kind: TLuaMethodKind;
+// ToDo
+    ArgsCount: Integer;
+    Address: Pointer;
+    Value: __luafunction;
+  end;
+  PLuaMethod = ^TLuaMethod;
 
   TLuaCustomParam = object
   private
@@ -6537,18 +6659,21 @@ type
             2: (BoolType: TLuaBoolType);
             3: (StringType: TLuaStringType; MaxShortLength: Byte);
             4: (VarOle: Boolean);
+            5: (MethodType: TLuaMethodType);
          );
       1: (MetaType: PLuaMetaType; FlagsEx: Cardinal);
+      2: (LuaMethod: PLuaMethod);
     end;
 
     function InternalSetTypeInfo(const Value: PTypeInfo; const Lua: TLua;
-      const IsAutoRegister: Boolean): Boolean;
+      const IsAutoRegister: Boolean; const IsWeakObject: Boolean = False): Boolean;
     procedure SetTypeInfo(const Value: PTypeInfo);
     procedure SetMetaType(const Value: PLuaMetaType);
     function GetSize: Integer;
   public
     property TypeInfo: PTypeInfo read F.TypeInfo write SetTypeInfo;
     property MetaType: PLuaMetaType read F.MetaType write SetMetaType;
+    property LuaMethod: PLuaMethod read F.LuaMethod write F.LuaMethod;
     property Flags: Byte read F.Flags write F.Flags;
     property FlagsEx: Cardinal read F.FlagsEx write F.FlagsEx;
     property Size: Integer read GetSize;
@@ -6560,14 +6685,15 @@ type
     property StringType: TLuaStringType read F.StringType write F.StringType;
     property MaxShortLength: Byte read F.MaxShortLength write F.MaxShortLength;
     property VarOle: Boolean read F.VarOle write F.VarOle;
+    property MethodType: TLuaMethodType read F.MethodType write F.MethodType;
 
     procedure GetValue(const Src; const Lua: TLua; const AFlags: Cardinal{IsRef:1, IsConst:1});
-    function SetValue(var Dest; const Lua: TLua; const StackIndex: Integer): Boolean;
+    function SetValue(var Dest; const Lua: TLua; const StackIndex: Integer; LuaType: Integer = -1): Boolean;
   end;
   PLuaCustomParam = ^TLuaCustomParam;
 
 function TLuaCustomParam.InternalSetTypeInfo(const Value: PTypeInfo; const Lua: TLua;
-  const IsAutoRegister: Boolean): Boolean;
+  const IsAutoRegister: Boolean; const IsWeakObject: Boolean): Boolean;
 begin
   F.TypeInfo := Value;
   F.FlagsEx := 0;
@@ -6681,13 +6807,23 @@ begin
       F.VarOle := (Value = System.TypeInfo(OleVariant));
     end;
     tkInterface: F.Kind := pkInterface;
-    tkClass: F.Kind := pkObject;
+    tkClass:
+    begin
+      if (IsWeakObject) then
+      begin
+        F.Kind := pkWeakObject;
+      end else
+      begin
+        F.Kind := pkObject;
+      end;
+    end;
     tkMethod:
     begin
       if (Assigned(Lua)) then
       begin     // IsAutoRegister ?
-        F.Kind := pkRecord;
-        F.MetaType := Lua.FMethodInfo;
+        F.Kind := pkMethod;
+        F.MethodType := mtMethod;
+        F.LuaMethod := nil{ToDo !};
       end;
     end;
     tkRecord{$ifdef FPC}, tkObject{$endif}:
@@ -6794,7 +6930,7 @@ begin
           ftCurr: Result := SizeOf(Currency);
       end;
     end;
-    pkObject, pkPointer, pkClass, pkInterface:
+    pkObject, pkWeakObject, pkPointer, pkClass, pkInterface:
     begin
       Result := SizeOf(Pointer);
     end;
@@ -6813,6 +6949,14 @@ begin
          stPWideChar: Result := SizeOf(Pointer);
           stAnsiChar: Result := SizeOf(Byte);
           stWideChar: Result := SizeOf(WideChar);
+      end;
+    end;
+    pkMethod:
+    begin
+      case F.MethodType of
+        mtMethod: Result := SizeOf(TMethod);
+      else
+        Result := SizeOf(Pointer);
       end;
     end;
     pkRecord, pkArray, pkSet:
@@ -6957,6 +7101,7 @@ begin
     pkInterface,
     pkPointer,
     pkClass,
+    pkWeakObject,
     pkObject:
     begin
       Value := PPointer(Value);
@@ -6967,7 +7112,7 @@ begin
       else
       if (F.Kind = pkClass) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, InternalNearestClass(TClass(Value)).Ref)
       else
-      // pkObject
+      // pkWeakObject/pkObject
       if (TClass(Value^) = TLuaReference) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(Value).Index)
       else
       push_userdata(InternalNearestClass(TClass(Value^)), Value, False);
@@ -6979,7 +7124,8 @@ begin
   end;
 end;
 
-function TLuaCustomParam.SetValue(var Dest; const Lua: TLua; const StackIndex: Integer): Boolean;
+function TLuaCustomParam.SetValue(var Dest; const Lua: TLua; const StackIndex: Integer;
+  LuaType: Integer): Boolean;
 
   function CastAsNumber(const Lua: TLua; const StackIndex: Integer; const ModeInt64: Boolean): Boolean; far;
   var
@@ -7164,11 +7310,11 @@ label
   set_integer, set_int64, set_float, unpack_int_int64, failure, set_native, done;
 var
   Instance: Pointer;
-  LuaType: Integer;
   Value: NativeInt;
 begin
   Instance := @Dest;
-  LuaType := lua_type(Lua.Handle, StackIndex);
+  if (LuaType = -1) then
+    LuaType := lua_type(Lua.Handle, StackIndex);
 
   with Lua do
   case F.Kind of
@@ -7329,6 +7475,7 @@ begin
 
       goto set_native;
     end;
+    pkWeakObject, {ToDo}
     pkObject:
     begin
       case (LuaType) of
@@ -7386,11 +7533,13 @@ done:
 end;
 
 const
-  PARAM_REFCOUNT_MASK = (1 shl 3 - 1);
-  PARAM_MAX_REFCOUNT = PARAM_REFCOUNT_MASK - 1;
-  PARAM_REFERENCE_MODE = 1 shl 5;
-  PARAM_ARRAY_MODE = 1 shl 6;
-  PARAM_ADDRESS_MODE = 1 shl 7;
+  PARAM_POINTERDEPTH_MASK = (1 shl 3 - 1);
+  PARAM_MAX_POINTERDEPTH = PARAM_POINTERDEPTH_MASK - 1;
+  PARAM_REFERENCE_MODE = 1 shl 3;
+  PARAM_ARRAY_MODE = 1 shl 4;
+  PARAM_ADDRESS_MODE = 1 shl 5;
+  PARAM_INSURANCE_MODE = 1 shl 6;
+  PARAM_ARMPARTIAL_MODE = 1 shl 7;
 
 type
   TLuaMethodParam = object(TLuaCustomParam)
@@ -7398,10 +7547,11 @@ type
     {
       Flags:
       RefCount: Byte:3;
-      Reserved: Byte:2;
       IsReference: Boolean:1;
       IsArray: Boolean:1;
       IsAddress: Boolean:1;
+      IsInsurance: Boolean:1;
+      IsARMPartial: Byte:1;
     }
     function GetIsReference: Boolean;
     procedure SetIsReference(const AValue: Boolean);
@@ -7409,22 +7559,24 @@ type
     procedure SetIsArray(const AValue: Boolean);
     function GetIsAddress: Boolean;
     procedure SetIsAddress(const AValue: Boolean);
-    function GetRefCount: Byte;
-    procedure SetRefCount(const AValue: Byte);
-    function GetIsInitial: Boolean;
-    function GetIsManaged: Boolean;
+    function GetIsInsurance: Boolean;
+    procedure SetIsInsurance(const AValue: Boolean);
+    function GetIsARMPartial: Boolean;
+    procedure SetIsARMPartial(const AValue: Boolean);
+    function GetPointerDepth: Byte;
+    procedure SetPointerDepth(const AValue: Byte);
   public
     Name: PShortString;
     Value: Integer;
-    ManagedValue: Integer;
+    DataValue: Integer;
+    InsuranceValue: Integer;
 
     property IsReference: Boolean read GetIsReference write SetIsReference;
     property IsArray: Boolean read GetIsArray write SetIsArray;
     property IsAddress: Boolean read GetIsAddress write SetIsAddress;
-    property RefCount: Byte read GetRefCount write SetRefCount;
-
-    property IsInitial: Boolean read GetIsInitial;
-    property IsManaged: Boolean read GetIsManaged;
+    property IsInsurance: Boolean read GetIsInsurance write SetIsInsurance;
+    property IsARMPartial: Boolean read GetIsARMPartial write SetIsARMPartial;
+    property PointerDepth: Byte read GetPointerDepth write SetPointerDepth;
   end;
   PLuaMethodParam = ^TLuaMethodParam;
   TLuaMethodParams = array[0..0] of TLuaMethodParam;
@@ -7478,79 +7630,137 @@ begin
   end;
 end;
 
-function TLuaMethodParam.GetRefCount: Byte;
+function TLuaMethodParam.GetIsInsurance: Boolean;
 begin
-  Result := F.FlagsEx and PARAM_REFCOUNT_MASK;
+  Result := (F.FlagsEx and PARAM_INSURANCE_MODE <> 0);
 end;
 
-procedure TLuaMethodParam.SetRefCount(const AValue: Byte);
+procedure TLuaMethodParam.SetIsInsurance(const AValue: Boolean);
 begin
-  if (AValue >= PARAM_MAX_REFCOUNT) then
+  if (AValue) then
   begin
-    F.FlagsEx := (F.FlagsEx and (not PARAM_REFCOUNT_MASK)) + PARAM_MAX_REFCOUNT;
+    F.FlagsEx := F.FlagsEx or PARAM_INSURANCE_MODE;
   end else
   begin
-    F.FlagsEx := (F.FlagsEx and (not PARAM_REFCOUNT_MASK)) + AValue;
+    F.FlagsEx := F.FlagsEx and (not PARAM_INSURANCE_MODE);
   end;
 end;
 
-function TLuaMethodParam.GetIsInitial: Boolean;
+function TLuaMethodParam.GetIsARMPartial: Boolean;
 begin
-  Result := (RefCount <> 0) or (IsManaged);
+  Result := (F.FlagsEx and PARAM_ARMPARTIAL_MODE <> 0);
 end;
 
-function TLuaMethodParam.GetIsManaged: Boolean;
+procedure TLuaMethodParam.SetIsARMPartial(const AValue: Boolean);
 begin
-  case F.Kind of
-    pkString:
-    begin
-      Result := (F.StringType in [stShortString, stAnsiString, stWideString,
-        stUnicodeString, stPAnsiChar, stPWideChar]);
-    end;
-    pkVariant, pkInterface:
-    begin
-      Result := True;
-    end;
-    pkArray:
-    begin
-      Result := PLuaArrayInfo(MetaType).IsDynamic;
-    end;
-  else
-    Result := False;
+  if (AValue) then
+  begin
+    F.FlagsEx := F.FlagsEx or PARAM_ARMPARTIAL_MODE;
+  end else
+  begin
+    F.FlagsEx := F.FlagsEx and (not PARAM_ARMPARTIAL_MODE);
+  end;
+end;
+
+function TLuaMethodParam.GetPointerDepth: Byte;
+begin
+  Result := F.FlagsEx and PARAM_POINTERDEPTH_MASK;
+end;
+
+procedure TLuaMethodParam.SetPointerDepth(const AValue: Byte);
+begin
+  if (AValue >= PARAM_MAX_POINTERDEPTH) then
+  begin
+    F.FlagsEx := (F.FlagsEx and (not PARAM_POINTERDEPTH_MASK)) + PARAM_MAX_POINTERDEPTH;
+  end else
+  begin
+    F.FlagsEx := (F.FlagsEx and (not PARAM_POINTERDEPTH_MASK)) + AValue;
   end;
 end;
 
 
 type
+  {$if Defined(IOS) and Defined(CPUARM32) and (CompilerVersion < 28)}
+    {$define ARM_NO_VFP_USE}
+  {$ifend}
+
   {$if Defined(CPUX86)}
+  TParamRegsGen = array[0..2] of Integer;
+  TParamRegsExt = packed record end;
   TParamBlock = record
-    RegEAX: Integer;
-    RegEDX: Integer;
-    RegECX: Integer;
   case Integer of
-    0: (OutEAX, OutEDX: Integer);
-    1: (OutInt64: Int64);
-    2: (OutFloat: Double);
+    0:
+    (
+      RegEAX: Integer;
+      RegEDX: Integer;
+      RegECX: Integer;
+      case Integer of
+        0: (OutEAX, OutEDX: Integer);
+        1: (OutInt64: Int64);
+        2: (OutFloat: Double);
+    );
+    1:
+    (
+      RegsGen: array[0..2] of Integer;
+      RegsExt: packed record end;
+    );
   end;
-  {$elseif Defined(CPUX64)}
+  {$elseif Defined(CPUX64) and Defined(MSWINDOWS)}
+  TParamRegsGen = array[0..3] of Int64;
+  TParamRegsExt = array[0..3] of Double;
   TParamBlock = record
-    RegRCX: Int64;
-    RegRDX: Int64;
-    RegR8: Int64;
-    RegR9: Int64;
   case Integer of
-    0: (OutEAX: Integer);
-    1: (OutRAX: Int64);
-    2: (OutXMM0: Double);
+    0:
+    (
+      RegRCX: Int64;
+      RegRDX: Int64;
+      RegR8: Int64;
+      RegR9: Int64;
+      case Integer of
+        0: (OutEAX: Integer);
+        1: (OutRAX: Int64);
+        2: (OutXMM0: Double);
+    );
+    1: (RegsGen: array[0..3] of Int64);
+    2: (RegsExt: array[0..3] of Double);
+  end;
+  {$elseif Defined(CPUX64) and (not Defined(MSWINDOWS))}
+  TParamRegsGen = array[0..5] of Int64;
+  TParamRegsExt = array[0..7] of Double;
+  TParamBlock = record
+  case Integer of
+    0:
+    (
+      RegXMM: array [0..7] of Double; {XMM0-XMM7}
+      RegR: array [0..5] of Int64;    {RDI, RSI, RDX, RCX, R8, R9}
+      OutRAX: Int64;
+      OutRDX: Int64;
+      OutFPU: Extended;
+      StackData: PByte;
+      StackDataSize: Integer;
+    );
+    1:
+    (
+      RegsExt: array[0..7] of Double;
+      RegsGen: array[0..5] of Int64;
+    );
   end;
   {$elseif Defined(CPUARM32)}
+  TParamRegsGen = array[0..3] of Integer;
+  TParamRegsExt = {$ifdef ARM_NO_VFP_USE}packed record end{$else}array[0..15] of Single{$endif};
   TParamBlock = record
-    RegCR: array[0..3] of Integer;
-    StackData: PByte;
-    StackDataSize: Integer;
-    case Integer of
-      0: (RegD: array[0..7] of Double);
-      1: (RegS: array[0..15] of Single);
+  case Integer of
+    0:
+    (
+      RegCR: array[0..3] of Integer;
+      StackData: PByte;
+      StackDataSize: Integer;
+      case Integer of
+        0: (RegD: array[0..7] of Double);
+        1: (RegS: array[0..15] of Single);
+        2: (RegsExt: array[0..15] of Single);
+    );
+    1: (RegsGen: array[0..3] of Integer);
   end;
   {$elseif Defined(CPUARM64)}
   m128 = record
@@ -7558,18 +7768,44 @@ type
     1: (Lo, Hi: UInt64);
     2: (LL, LH, HL, HH: UInt32);
   end align 16;
+  TParamRegsGen = array[0..7] of Int64;
+  TParamRegsExt = array[0..7] of m128;
   TParamBlock = record
-    RegX: array[0..7] of Int64;
-    RegQ: array[0..7] of m128;
-    RegX8: Int64;
-    StackData: PByte;
-    StackDataSize: Integer;
+  case Integer of
+    0:
+    (
+      RegX: array[0..7] of Int64;
+      RegQ: array[0..7] of m128;
+      RegX8: Int64;
+      StackData: PByte;
+      StackDataSize: Integer;
+    );
+    1:
+    (
+      RegsGen: array[0..7] of Int64;
+      RegsExt: array[0..7] of m128;
+    );
   end;
   {$else}
-    {$MESSAGE ERROR 'Unkwnown compiler'}
+    {$MESSAGE ERROR 'Unknown compiler'}
   {$ifend}
   PParamBlock = ^TParamBlock;
 
+const
+  REGGEN_SIZE = SizeOf(Pointer);
+  {$if Defined(CPUARM32)}
+  REGEXT_SIZE = SizeOf(Single);
+  {$elseif Defined(CPUARM32)}
+  REGEXT_SIZE = SizeOf(m128);
+  {$else}
+  REGEXT_SIZE = SizeOf(Double);
+  {$ifend}
+  REGGEN_COUNT = SizeOf(TParamRegsGen) div REGGEN_SIZE;
+  REGEXT_COUNT = SizeOf(TParamRegsExt) div REGEXT_SIZE;
+
+  VALUE_NOT_DEFINED = -1;
+
+type
   PLuaInvokable = ^TLuaInvokable;
   TLuaInvokable = object
   public
@@ -7582,25 +7818,40 @@ type
 
     InitialCount: Integer;
     Initials: PInteger;
-    ManagedCount: Integer;
-    Manageds: PInteger;
+    FinalCount: Integer;
+    Finals: PInteger;
+    ConstructorFlag: Integer;
+    {$ifdef CPUARM}
+    ARMPartialSize: Integer;
+    {$endif}
     Result: TLuaMethodParam;
     ParamCount: Integer;
     Params: TLuaMethodParams;
 
     procedure Initialize(const ParamBlock: PParamBlock);
     procedure Finalize(const ParamBlock: PParamBlock);
+    {$ifdef CPUARM}
+    procedure FillARMPartialData(const Param: PLuaMethodParam; const Value: Pointer; const ParamBlock: PParamBlock);
+    {$endif}
     procedure Invoke(const CodeAddress: Pointer; const ParamBlock: PParamBlock);
   end;
 
-{$ifdef CPUARM}
+{$if (Defined(CPUX64) and (not Defined(MSWINDOWS))) or Defined(CPUARM)}
+const
+  RTLHelperLibName =
+  {$if Defined(PIC) and Defined(LINUX)}
+    'librtlhelper_PIC.a';
+  {$else}
+    'librtlhelper.a';
+  {$ifend}
+
 procedure RawInvoke(CodeAddress: Pointer; ParamBlock: PParamBlock);
-  external 'librtlhelper.a' name 'rtti_raw_invoke';
-{$endif}
+  external RTLHelperLibName name 'rtti_raw_invoke';
+{$ifend}
 
 procedure TLuaInvokable.Initialize(const ParamBlock: PParamBlock);
 var
-  i, RefCount: Integer;
+  i, PointerDepth, FlagsEx: Integer;
   Items: PLuaMethodParams;
   InitialPtr: PInteger;
   Param: PLuaMethodParam;
@@ -7611,23 +7862,33 @@ begin
 
   for i := 1 to InitialCount do
   begin
-    Param := @Items[InitialPtr^];
-    Ptr := Pointer(NativeInt(ParamBlock) + Param.ManagedValue);
+    Param := Pointer(NativeInt(Items) + InitialPtr^);
+    Ptr := Pointer(NativeInt(ParamBlock) + Param.DataValue);
 
     PNativeInt(Ptr)^ := 0;
-
-    // references
-    RefCount := Param.F.FlagsEx and PARAM_REFCOUNT_MASK;
-    if (RefCount <> 0) then
+    FlagsEx := Param.F.FlagsEx;
+    if (FlagsEx and (PARAM_INSURANCE_MODE or PARAM_POINTERDEPTH_MASK) <> 0) then
     begin
-      if (RefCount <> 1) then
-      repeat
-        Dec(NativeInt(Ptr), SizeOf(Pointer));
-        PNativeInt(Ptr)^ := NativeInt(Ptr) + SizeOf(Pointer);
-        Dec(RefCount);
-      until (RefCount = 1);
+      // insurance
+      if (FlagsEx and PARAM_INSURANCE_MODE <> 0) then
+      begin
+        Dec(NativeUInt(Ptr), SizeOf(Pointer));
+        PNativeInt(Ptr)^ := 0;
+      end;
 
-      PPointer(NativeInt(ParamBlock) + Param.Value)^ := Ptr;
+      // references
+      PointerDepth := FlagsEx and PARAM_POINTERDEPTH_MASK;
+      if (PointerDepth <> 0) then
+      begin
+        if (PointerDepth <> 1) then
+        repeat
+          Dec(NativeInt(Ptr), SizeOf(Pointer));
+          PNativeInt(Ptr)^ := NativeInt(Ptr) + SizeOf(Pointer);
+          Dec(PointerDepth);
+        until (PointerDepth = 1);
+
+        PPointer(NativeInt(ParamBlock) + Param.Value)^ := Ptr;
+      end;
     end;
 
     Inc(InitialPtr);
@@ -7638,69 +7899,246 @@ procedure TLuaInvokable.Finalize(const ParamBlock: PParamBlock);
 label
   failure;
 var
-  i, VType: Integer;
+  i, FlagsEx, VType: Integer;
   Items: PLuaMethodParams;
-  ManagedPtr: PInteger;
+  FinalPtr: PInteger;
   Param: PLuaMethodParam;
   Ptr: Pointer;
-begin
-  Items := @Params;
-  ManagedPtr := Manageds;
 
-  for i := 1 to ManagedCount do
+  procedure _FinalizeArray(Param: PLuaMethodParam; Ptr: Pointer; Count: Integer); far;
+  var
+    i: Integer;
+    MetaType: PLuaMetaType;
   begin
-    Param := @Items[ManagedPtr^];
-    Ptr := Pointer(NativeInt(ParamBlock) + Param.ManagedValue);
-
-    case Param.F.Kind of
+    case (Param.F.Kind) of
+      {$ifdef AUTOREFCOUNT}
+      pkObject:
+      begin
+        FinalizeArray(Ptr, TypeInfo(TObject), Count);
+      end;
+      {$endif}
+      pkVariant:
+      begin
+        FinalizeArray(Ptr, TypeInfo(Variant), Count);
+      end;
+      pkInterface:
+      begin
+        FinalizeArray(Ptr, TypeInfo(IInterface), Count);
+      end;
       pkString:
       begin
         case Param.F.StringType of
-          {$ifNdef NEXTGEN}
-          stAnsiString, stPAnsiChar:
+            stAnsiString: FinalizeArray(Ptr, TypeInfo(AnsiString), Count);
+            stWideString: FinalizeArray(Ptr, TypeInfo(WideString), Count);
+         stUnicodeString: FinalizeArray(Ptr, TypeInfo(UnicodeString), Count);
+        end;
+      end;
+      pkMethod:
+      begin
+        case Param.F.MethodType of
+          mtReference:
           begin
-            if (PNativeInt(Ptr)^ <> 0) then
-              AnsiString(Ptr^) := '';
+            FinalizeArray(Ptr, TypeInfo(IInterface), Count);
           end;
-          stWideString:
+          {$ifdef WEAKINSTREF}
+          mtMethod:
           begin
-            if (PNativeInt(Ptr)^ <> 0) then
-              WideString(Ptr^) := '';
+            FinalizeArray(Ptr, TypeInfo(TLuaOnPreprocessScript{TMethodProc}), Count);
           end;
           {$endif}
-          stUnicodeString,
-          stPWideChar:
+        end;
+      end;
+      pkRecord, pkArray:
+      begin
+        MetaType := Param.F.MetaType;
+
+        for i := 1 to Count do
+        begin
+          MetaType.Clear(Ptr, False);
+          Inc(NativeInt(Ptr), MetaType.Size);
+        end;
+
+        Dec(NativeInt(Ptr), Count * MetaType.Size);
+      end;
+      // TVarArg?
+    end;
+
+    FreeMem(Ptr);
+  end;
+begin
+  Items := @Params;
+  FinalPtr := Finals;
+
+  for i := 1 to FinalCount do
+  begin
+    Param := Pointer(NativeInt(Items) + FinalPtr^);
+    Ptr := Pointer(NativeInt(ParamBlock) + Param.DataValue);
+
+(*
+  function IsParamFinal: Boolean;
+  begin
+    Result := False;
+
+    if (Param.IsInsurance) then
+    begin
+      Result := True;
+      Exit;
+    end;
+
+    case Param.F.Kind of
+      pkVariant:
+      begin
+        Result := True;
+      end;
+      pkString:
+      begin
+        Result := (Param.F.StringType in [stAnsiString, stWideString, stUnicodeString]);
+      end;
+    end;
+  end;
+*)
+
+    FlagsEx := Param.F.FlagsEx;
+    if (FlagsEx and PARAM_INSURANCE_MODE = 0) then
+    begin
+      case ((FlagsEx shr 8) and $7f) of
+        Ord(pkString):
+        begin
+          case Param.F.StringType of
+            {$ifNdef NEXTGEN}
+            stAnsiString:
+            begin
+              if (PNativeInt(Ptr)^ <> 0) then
+                AnsiString(Ptr^) := '';
+            end;
+            stWideString:
+            begin
+              if (PNativeInt(Ptr)^ <> 0) then
+                WideString(Ptr^) := '';
+            end;
+            {$endif}
+            stUnicodeString:
+            begin
+              if (PNativeInt(Ptr)^ <> 0) then
+                UnicodeString(Ptr^) := '';
+            end;
+          else
+            goto failure;
+          end;
+        end;
+        Ord(pkVariant):
+        begin
+          VType := PVarData(Ptr).VType;
+          if (VType and varDeepData <> 0) then
+          case VType of
+            varBoolean, varUnknown+1..$15{varUInt64}: ;
+          else
+            System.VarClear(PVariant(Ptr)^);
+          end;
+        end;
+      else
+      failure:
+        raise ELua.CreateFmt('Error finalize argument %d', [FinalPtr^]);
+      end;
+    end else
+    begin
+      // Insurance: array/PAnsiChar/PWideChar
+      Ptr := Pointer(NativeInt(ParamBlock) + Param.InsuranceValue);
+      if (FlagsEx and PARAM_ARRAY_MODE = 0) then
+      begin
+        case Param.F.Kind of
+          pkString:
           begin
-            if (PNativeInt(Ptr)^ <> 0) then
-              UnicodeString(Ptr^) := '';
+            case Param.F.StringType of
+              stPAnsiChar:
+              begin
+                if (PNativeInt(Ptr)^ <> 0) then
+                  AnsiString(Ptr^) := '';
+              end;
+              stPWideChar:
+              begin
+                if (PNativeInt(Ptr)^ <> 0) then
+                  UnicodeString(Ptr^) := '';
+              end;
+            else
+              goto failure;
+            end;
           end;
         else
           goto failure;
         end;
-      end;
-      pkInterface:
+      end else
       begin
-        if (PNativeInt(Ptr)^ <> 0) then
-          IInterface(Ptr^) := nil;
-      end;
-      pkVariant:
-      begin
-        VType := PVarData(Ptr).VType;
-        if (VType and varDeepData <> 0) then
-        case VType of
-          varBoolean, varUnknown+1..$15{varUInt64}: ;
-        else
-          System.VarClear(PVariant(Ptr)^);
+        // insurance array
+        Ptr := PPointer(Ptr)^;
+        if (Ptr <> nil) then
+        begin
+          Inc(Param);
+          FlagsEx{Count} := PInteger(NativeInt(ParamBlock) + Param.DataValue)^ {$ifNdef FPC} + 1{$endif};
+          Dec(Param);
+          _FinalizeArray(Param, Ptr, FlagsEx{Count});
         end;
       end;
-    else
-    failure:
-      raise ELua.CreateFmt('Error finalize argument %d', [ManagedPtr^]);
     end;
 
-    Inc(ManagedPtr);
+    Inc(FinalPtr);
   end;
 end;
+
+{$ifdef CPUARM}
+procedure TLuaInvokable.FillARMPartialData(const Param: PLuaMethodParam;
+  const Value: Pointer; const ParamBlock: PParamBlock);
+var
+  i: Integer;
+  PartialSize: Integer;
+  Src, Dest: PByte;
+begin
+  Src := Value;
+  Dest := Pointer(NativeInt(ParamBlock) + Param.Value);
+  PartialSize := Self.ARMPartialSize;
+
+  {$ifdef CPUX64}
+  if (Param.MetaType.HFA) then
+  begin
+    if (Param.MetaType.HFAElementType = ftSingle) then
+    begin
+      for i := 1 to PartialSize shr 2 do
+      begin
+        PCardinal(Dest)^ := PCardinal(Src)^;
+        Inc(Src, SizeOf(Cardinal));
+        Inc(Dest, 16);
+      end;
+    end else
+    begin
+      for i := 1 to PartialSize shr 3 do
+      begin
+        PInt64(Dest)^ := PInt64(Src)^;
+        Inc(Src, SizeOf(Int64));
+        Inc(Dest, 16);
+      end;
+    end;
+    Exit;
+  end else
+  begin
+    for i := 1 to PartialSize shr 3 do
+    begin
+      PInt64(Dest)^ := PInt64(Src)^;
+      Inc(Src, SizeOf(Int64));
+      Inc(Dest, 16);
+    end;
+  end;
+  {$else .CPUARM32}
+  begin
+    System.Move(Src^, Dest^, PartialSize);
+    Inc(Src, PartialSize);
+    Inc(Dest, PartialSize);
+  end;
+  {$endif}
+
+  Dest := Pointer(NativeInt(ParamBlock) + Param.DataValue);
+  System.Move(Src^, Dest^, Param.MetaType.Size - PartialSize);
+end;
+{$endif}
 
 procedure TLuaInvokable.Invoke(const CodeAddress: Pointer; const ParamBlock: PParamBlock);
 {$if Defined(CPUX86)}
@@ -7789,7 +8227,7 @@ asm
       POP   EAX
       POP   EBP
 end;
-{$elseif Defined(CPUX64)}
+{$elseif Defined(CPUX64) and Defined(MSWINDOWS)}
 const
   PARAMBLOCK_SIZE = SizeOf(TParamBlock);
 
@@ -7862,7 +8300,7 @@ asm
       MOV     [RDX].TParamBlock.OutRAX, RAX
       MOVSD   [RDX].TParamBlock.OutXMM0, XMM0
 end;
-{$else .CPUARM}
+{$else .CPUARM.X64-!MSWINDOWS}
 begin
   ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
   ParamBlock.StackDataSize := StackDataSize;
@@ -7875,14 +8313,13 @@ type
   TLuaInvokableBuilder = object
   private
     FLua: TLua;
-
     FBuffer: TLuaBuffer;
     FAdvanced: TLuaBuffer;
 
     function NewInvokable(const MethodKind: TMethodKind; const CallConv: TCallConv; const AResult: Pointer): Boolean;
     function InternalAddName(const Name: LuaString): NativeInt;
     function InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
-      const RefCount: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
+      const PointerDepth: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
     function InternalBuildDone: __luapointer;
     procedure InternalInitParams(var Invokable: TLuaInvokable);
   public
@@ -7900,6 +8337,8 @@ type
   end;
 
 const
+  PARAMNAME_RESULT: array[0..6] of Byte = (6, Ord('R'), Ord('e'), Ord('s'),
+    Ord('u'), Ord('l'), Ord('t'));
   PARAMNAME_HIGH_ARRAY: array[0..11] of Byte = (11, Ord('H'), Ord('i'), Ord('g'),
     Ord('h'), Ord('('), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), Ord(')'));
 
@@ -7922,8 +8361,10 @@ begin
 
   Invokable.MethodKind := MethodKind;
   Invokable.CallConv := CallConv;
-  Invokable.Result.Value := -1;
-  Invokable.Result.ManagedValue := -1;
+  Invokable.ConstructorFlag := VALUE_NOT_DEFINED;
+  Invokable.Result.Value := VALUE_NOT_DEFINED;
+  Invokable.Result.DataValue := VALUE_NOT_DEFINED;
+  Invokable.Result.InsuranceValue := VALUE_NOT_DEFINED;
 
   if (Assigned(AResult)) then
   begin
@@ -7934,7 +8375,16 @@ begin
         FLua.FStringBuffer.Lua, FLua.FStringBuffer.Default]);
       Result := False;
       Exit;
-    end;
+    end
+    {$ifdef CPUX86}
+    else
+    if (Invokable.Result.Kind = pkFloat) and (CallConv <> ccSafeCall) and
+      (Invokable.Result.F.FloatType in [ftSingle, ftDouble, ftComp]) then
+    begin
+      Invokable.Result.F.FloatType := ftExtended;
+    end
+    {$endif}
+    ;
   end;
 
   if ((MethodKind in [mkFunction, mkClassFunction, mkSafeFunction]) <> Assigned(AResult)) then
@@ -8000,18 +8450,33 @@ begin
   if (Size > High(Byte)) then Size := High(Byte);
 
   Result := FAdvanced.Size;
-  S := FAdvanced.Alloc(Size + 1);
+  S := FAdvanced.Alloc(SizeOf(Byte) + Size);
   PByte(S)^ := Size;
   Inc(S);
   System.Move(Pointer(Buffer.FBytes)^, S^, Size);
 end;
 
 function TLuaInvokableBuilder.InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
-  const RefCount: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
+  const PointerDepth: Integer; const ParamFlags: TParamFlags): PLuaMethodParam;
 var
   CustomParam: TLuaCustomParam;
   HighArray: PLuaMethodParam;
+
+  {$if (not Defined(CPUX64)) or (not Defined(MSWINDOWS))}
+  function CallConv: TCallConv;
+  begin
+    Result := PLuaInvokable(FBuffer.FBytes).CallConv;
+  end;
+  {$ifend}
+
+  {$if Defined(CPUX86)}
+  function IsConst: Boolean;
+  begin
+    Result := (pfConst in ParamFlags);
+  end;
+  {$ifend}
 begin
+  // TVarArg?
   if (not CustomParam.InternalSetTypeInfo(TypeInfo, FLua, True)) then
   begin
     Result := nil;
@@ -8023,92 +8488,222 @@ begin
 
   PLuaCustomParam(@Self)^ := CustomParam;
   Result.Name := Name;
-  Result.Value := -1;
-  Result.ManagedValue := -1;
+  Result.Value := VALUE_NOT_DEFINED;
+  Result.DataValue := VALUE_NOT_DEFINED;
+  Result.InsuranceValue := VALUE_NOT_DEFINED;
 
-  { TParamFlag = (pfVar, pfConst, pfArray, pfAddress, pfReference, pfOut, pfResult) }
   Result.IsArray := (pfArray in ParamFlags);
-  Result.IsAddress := (pfAddress in ParamFlags);
-  Result.IsReference := ([pfVar, pfReference, pfOut] * ParamFlags <> []);
-  if (pfConst in ParamFlags) and (RefCount = 0) and
-    (not (Result.IsArray or Result.IsAddress or Result.IsReference)) then
+  Result.IsAddress := (pfAddress in ParamFlags); // ?
+  Result.IsReference := ([pfVar, pfReference, pfOut] * ParamFlags <> []) and (not Result.IsAddress);
+  if (PointerDepth <> 0) then
   begin
-    if (Result.Size > SizeOf(Pointer)) or
-      ((Result.F.Kind = pkString) and (Result.F.StringType = stShortString)) then
-      Result.IsReference := True;
+    if (Result.IsAddress) then
+    begin
+      // error ToDo
+      Result := nil;
+      Exit;
+    end;
+  end else
+  if (not (Result.IsArray or Result.IsAddress or Result.IsReference)) then
+  begin
+    case Result.F.Kind of
+      pkVariant:
+      begin
+        Result.IsReference :=
+        {$if Defined(CPUX86)}
+          IsConst or (not (CallConv in [ccCdecl, ccStdCall, ccSafeCall]))
+        {$else}
+          True
+        {$ifend};
+      end;
+      pkMethod:
+      begin
+        Result.IsReference :=
+        {$if Defined(CPUX86)}
+          False
+        {$else}
+          (Result.F.MethodType = mtMethod)
+        {$ifend};
+      end;
+      pkString:
+      begin
+        Result.IsReference := (Result.F.StringType = stShortString);
+      end;
+      pkRecord:
+      begin
+        {$if Defined(CPUX86)}
+        if (CallConv in [ccCdecl, ccStdCall, ccSafeCall]) and (not IsConst) then
+          Result.IsReference := False
+        else
+        {$elseif (not Defined(CPUX64)) or (not Defined(MSWINDOWS))}
+        if (CallConv in [ccReg, ccPascal]) then
+          Result.IsReference := True
+        else
+        {$ifend}
+
+        {$ifdef CPUARM64}
+        if (Result.F.MetaType.HFA) then
+          Result.IsReference := False
+        else
+        {$endif}
+
+        case Result.F.MetaType.F.Size of
+          {$if Defined(CPUX86)}
+          1..SizeOf(Pointer)
+          {$elseif Defined(CPUX64) and Defined(MSWINDOWS)}
+          1, 2, 4, 8
+          {$elseif Defined(CPUARM32)}
+          -1{none}
+          {$else}
+          1..16
+          {$ifend}
+          : ;
+        else
+          Result.IsReference := True;
+        end;
+      end;
+      pkArray:
+      begin
+        if (not PLuaArrayInfo(Result.F.MetaType).IsDynamic) then
+        begin
+          {$if (not Defined(CPUX86)) and ((not Defined(CPUX64)) or (not Defined(MSWINDOWS)))}
+          if (CallConv in [ccReg, ccPascal]) then
+            Result.IsReference := True
+          else
+          {$ifend}
+          {$ifdef CPUARM64}
+          if (Result.F.MetaType.HFA) then
+            Result.IsReference := False
+          else
+          {$endif}
+
+          case Result.F.MetaType.F.Size of
+            {$if Defined(CPUX86) or (Defined(CPUX64) and Defined(MSWINDOWS))}
+            1..SizeOf(Pointer)
+            {$else}
+            1..16
+            {$ifend}
+            : ;
+          else
+            Result.IsReference := True;
+          end;
+        end;
+      end;
+      pkSet:
+      begin
+        Result.IsReference := (Result.F.MetaType.F.Size > SizeOf(Pointer));
+      end;
+    end;
   end;
-  Result.RefCount := RefCount + Ord(Result.IsReference);
+
+  Result.IsInsurance := Result.IsArray or
+   ((Result.F.Kind = pkString) and (Result.F.StringType in [stPAnsiChar, stPWideChar]));
+
+  Result.PointerDepth := PointerDepth + Ord(Result.IsReference);
   if (Result.IsArray) then
   begin
     HighArray := FBuffer.Alloc(SizeOf(TLuaMethodParam));
     HighArray.InternalSetTypeInfo(System.TypeInfo(Integer), FLua, True);
     HighArray.Name := Pointer(@PARAMNAME_HIGH_ARRAY);
-    HighArray.Value := -1;
-    HighArray.ManagedValue := -1;
+    HighArray.Value := VALUE_NOT_DEFINED;
+    HighArray.DataValue := VALUE_NOT_DEFINED;
+    HighArray.InsuranceValue := VALUE_NOT_DEFINED;
   end;
-
-  if (Result.IsInitial) then
-    Inc(PLuaInvokable(FBuffer.FBytes).InitialCount);
-  if (Result.IsManaged) then
-    Inc(PLuaInvokable(FBuffer.FBytes).ManagedCount);
 end;
 
 function TLuaInvokableBuilder.InternalBuildDone: __luapointer;
 var
   i: Integer;
   Offset: NativeInt;
-  InternalNames: Boolean;
   Invokable: PLuaInvokable;
   Param: ^TLuaMethodParam;
-begin
-  // initial params
-  Invokable := Pointer(FBuffer.FBytes);
-  Param := @Invokable.Params[0];
-  Invokable.Initials := Pointer(FBuffer.Size + FAdvanced.Size);
-  for i := 0 to Invokable.ParamCount - 1 do
+
+  function IsParamFinal: Boolean;
   begin
-    if (Param.IsInitial) then
-      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
-    if (Param.IsArray) then
-      Inc(Param);
+    Result := False;
 
-    Inc(Param);
-  end;
-
-  // managed params
-  Param := @Invokable.Params[0];
-  Invokable.Manageds := Pointer(FBuffer.Size + FAdvanced.Size);
-  for i := 0 to Invokable.ParamCount - 1 do
-  begin
-    if (Param.IsManaged) then
-      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
-    if (Param.IsArray) then
-      Inc(Param);
-
-    Inc(Param);
-  end;
-
-  // concatenate buffers
-  Offset := FBuffer.Size;
-  System.Move(Pointer(FAdvanced.FBytes)^, FBuffer.Alloc(FAdvanced.Size)^, FAdvanced.Size);
-  Invokable := Pointer(FBuffer.FBytes);
-  InternalNames := (Invokable.ParamCount <> 0) and (NativeUInt(Invokable.Params[0].Name) <= $ffff);
-  if (InternalNames) then
-  begin
-    Param := @Invokable.Params[0];
-    Offset := Offset{Last FBuffer.Size} + NativeInt(Invokable);
-
-    for i := 0 to Invokable.ParamCount - 1 do
+    if (Param.IsInsurance) then
     begin
-      Inc(NativeInt(Param.Name), Offset);
-      if (Param.IsArray) then Inc(Param){"High(Array)"};
+      Result := True;
+      Exit;
+    end;
 
-      Inc(Param);
+    case Param.F.Kind of
+      pkVariant:
+      begin
+        Result := True;
+      end;
+      pkString:
+      begin
+        Result := (Param.F.StringType in [stAnsiString, stWideString, stUnicodeString]);
+      end;
     end;
   end;
 
-  // value, managed value, stack
+  function IsParamInitial: Boolean;
+  begin
+    Result := (Param.PointerDepth <> 0) or (Param.IsInsurance) or (IsParamFinal);
+  end;
+begin
+  // value, data value, insurance, registers, stack
+  Invokable := Pointer(FBuffer.FBytes);
   InternalInitParams(Invokable^);
+
+  // align advanced buffer
+  if (FAdvanced.Size and (SizeOf(Pointer) - 1) <> 0) then
+  begin
+    FAdvanced.Alloc(SizeOf(Pointer) - (FAdvanced.Size and (SizeOf(Pointer))));
+  end;
+
+  // initial params
+  Invokable := Pointer(FBuffer.FBytes);
+  Invokable.Initials := Pointer(FBuffer.Size + FAdvanced.Size);
+  Param := @Invokable.Params[0];
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (IsParamInitial) then
+    begin
+      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+      Inc(Invokable.InitialCount);
+    end;
+    if (Param.IsArray) then
+      Inc(Param);
+
+    Inc(Param);
+  end;
+
+  // final params
+  Param := @Invokable.Params[0];
+  Invokable.Finals := Pointer(FBuffer.Size + FAdvanced.Size);
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (IsParamFinal) then
+    begin
+      PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+      Inc(Invokable.FinalCount);
+    end;
+    if (Param.IsArray) then
+      Inc(Param);
+
+    Inc(Param);
+  end;
+
+  // concatenate buffers, unpack internal names
+  Offset := FBuffer.Size;
+  System.Move(Pointer(FAdvanced.FBytes)^, FBuffer.Alloc(FAdvanced.Size)^, FAdvanced.Size);
+  Invokable := Pointer(FBuffer.FBytes);
+  Param := @Invokable.Params[0];
+  Offset := Offset{Last FBuffer.Size} + NativeInt(Invokable);
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    if (NativeUInt(Param.Name) <= $ffff) then
+      Inc(NativeInt(Param.Name), Offset);
+
+    if (Param.IsArray) then
+      Inc(Param){"High(Array)"};
+
+    Inc(Param);
+  end;
 
   // hash comparison
   // ToDo
@@ -8118,141 +8713,524 @@ begin
   Invokable := TLuaMemoryHeap(FLua.FMemoryHeap).Unpack(Result);
   System.Move(Pointer(FBuffer.FBytes)^, Invokable^, FBuffer.Size);
   Inc(NativeInt(Invokable.Initials), NativeInt(Invokable));
-  Inc(NativeInt(Invokable.Manageds), NativeInt(Invokable));
+  Inc(NativeInt(Invokable.Finals), NativeInt(Invokable));
 
-  // internal names
-  if (InternalNames) then
+  // result names (internal)
+  Param := @Invokable.Params[0];
+  Offset := NativeInt(Invokable) - NativeInt(Pointer(FBuffer.FBytes));
+  for i := 0 to Invokable.ParamCount - 1 do
   begin
-    Param := @Invokable.Params[0];
-    Offset := NativeInt(Invokable) - NativeInt(Pointer(FBuffer.FBytes));
-
-    for i := 0 to Invokable.ParamCount - 1 do
-    begin
+    if (NativeUInt(Param.Name) >= NativeUInt(FBuffer.FBytes)) and
+      (NativeUInt(Param.Name) < NativeUInt(FBuffer.FBytes) + NativeUInt(FBuffer.Size)) then
       Inc(NativeInt(Param.Name), Offset);
-      if (Param.IsArray) then Inc(Param);
 
-      Inc(Param);
-    end;
+    if (Param.IsArray) then
+      Inc(Param){"High(Array)"};
+
+    Inc(Param);
   end;
 end;
 
-(*
-  TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
-                   pkObject, pkString, pkVariant, pkInterface,
-                   pkPointer, pkClass, pkRecord, pkArray, pkSet,
-                   pkMethod, pkUniversal);
-
-  TLuaBoolType = (btBoolean, btByteBool, btWordBool, btLongBool);
-
-  TLuaStringType = (stShortString, stAnsiString, stWideString, stUnicodeString,
-    stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
-*)
-
-function UseResultRef(const Param: TLuaMethodParam; const IsConstructor: Boolean;
-  const CallConv: TCallConv): Boolean;
-{$ifdef CPUARM64}
-var
-  ctx: TRTTIContext;
-{$endif}
+function UseResultRef(const Param: TLuaMethodParam; const CallConv: TCallConv;
+  const IsConstructor: Boolean): Boolean;
 begin
+  if (CallConv = ccSafeCall) then
+  begin
+    Result := True;
+  end else
   case Param.Kind of
     {$ifdef AUTOREFCOUNT}
     pkObject: Result := (not IsConstructor);
     {$endif}
     pkString: Result := (Param.F.StringType in [stShortString, stAnsiString, stWideString, stUnicodeString]);
-   (*
-    tkInterface, tkMethod, tkDynArray, tkUString, tkLString, tkWString,
-    tkString, tkVariant: Result := True;
-    tkRecord:
-    {$if Defined(CPUX64)}
-      case GetTypeData(TypeInfo)^.RecSize of
+    pkVariant,
+    pkInterface: Result := True;
+    pkMethod: Result := (Param.F.MethodType in [mtMethod, mtReference]);
+    pkRecord:
+    begin
+      {$if Defined(CPUX64)}
+      case Param.F.MetaType.Size of
         1, 2, 4: Result := False;
-        8: Result := IsManaged(TypeInfo);
+        8: Result := Param.F.MetaType.Managed;
       else
         Result := True;
       end;
-    {$elseif Defined(CPUX86)}
-      case GetTypeData(TypeInfo)^.RecSize of
+      {$elseif Defined(CPUX86)}
+      case Param.F.MetaType.Size of
         1, 2: Result := False;
-        4: Result := IsManaged(TypeInfo);
+        4: Result := Param.F.MetaType.Managed;
       else
         Result := True;
       end;
-    {$elseif Defined(CPUARM32)}
-      case GetTypeData(TypeInfo)^.RecSize of
-    {$if Defined(ANDROID32)}
-        1..4: Result := False;
-    {$ELSEIF Defined(IOS32)}
-        1: Result := False;
-    {$ifend}
+      {$elseif Defined(CPUARM32)}
+      case Param.F.MetaType.Size of
+        {$if Defined(ANDROID32)}
+            1..4: Result := False;
+        {$elseif Defined(IOS32)}
+            1: Result := False;
+        {$ifend}
       else
         Result := True;
       end;
-    {$elseif Defined(CPUARM64)}
-      if ctx.GetType(TypeInfo).IsHFA then
+      {$elseif Defined(CPUARM64)}
+      if (Param.F.MetaType.HFA) then
         Result := False
       else
-        Result := not (GetTypeData(TypeInfo)^.RecSize in [1..16]);
-    {$ifend}
-    tkArray:
-    {$if Defined(CPUX64)}
-      Result := not (GetTypeData(TypeInfo)^.ArrayData.Size in [1, 2, 4, 8]);
-    {$elseif Defined(CPUX86) or Defined(CPUARM32)}
-      Result := not (GetTypeData(TypeInfo)^.ArrayData.Size in [1, 2, 4]);
-    {$elseif Defined(CPUARM64)}
-      Result := GetTypeData(TypeInfo)^.ArrayData.Size > 16;
-    {$ifend} *)
+        Result := (Param.F.MetaType.Size < 1) or (Param.F.MetaType.Size > 16);
+      {$ifend}
+    end;
+    pkArray, pkSet:
+    begin
+      Result := ((Param.F.Kind = pkArray) and (PLuaArrayInfo(Param.F.MetaType).IsDynamic)) or
+        (Param.F.MetaType.Size > 255) or (not (Byte(Param.F.MetaType.Size) in [
+        {$if Defined(CPUX64)}
+          1, 2, 4, 8
+        {$elseif Defined(CPUX86) or Defined(CPUARM32)}
+          1, 2, 4
+        {$elseif Defined(CPUARM64)}
+          1..16
+        {$ifend}
+      ]));
+    end;
   else
     Result := False;
   end;
 end;
 
 procedure TLuaInvokableBuilder.InternalInitParams(var Invokable: TLuaInvokable);
+const
+  MASK_BUFFERED = 1 shl 30;
+  NATIVE_SHIFT = {$ifdef LARGEINT}3{$else}2{$endif};
+type
+  TResultMode = (rmNone, rmRegister, rmRefFirst, rmRefLast);
+  TSelfMode = (smNone, smFirst, smSecond, smLast);
 var
   i: Integer;
-  IsStatic, IsSafeCall, IsBackwardArg, IsConstructor: Boolean;
+  IsStatic, IsBackwardArg, IsConstructor: Boolean;
+  ResultMode: TResultMode;
+  SelfMode: TSelfMode;
   Param: ^TLuaMethodParam;
+  RegGen, RegExt: Integer;
+  TempParam: TLuaMethodParam;
 
+  function AllocRegGen(const Count: Integer = 1): Integer;
+  begin
+    if (RegGen >= REGGEN_COUNT) then
+    begin
+      Result := VALUE_NOT_DEFINED;
+    end else
+    begin
+      Result := RegGen * REGGEN_SIZE + NativeInt(@PParamBlock(nil).RegsGen);
+      Inc(RegGen, Count);
+      {$if Defined(CPUX64) and Defined(MSWINDOWS)}
+      RegExt := RegGen;
+      {$ifend}
+    end;
+  end;
 
+  function AllocRegExt(const Count: Integer = 1): Integer;
+  begin
+    if (RegExt >= REGEXT_COUNT) then
+    begin
+      Result := VALUE_NOT_DEFINED;
+    end else
+    begin
+      Result := RegExt * REGEXT_SIZE + NativeInt(@PParamBlock(nil).RegsExt);
+      Inc(RegExt, Count);
+      {$if Defined(CPUX64) and Defined(MSWINDOWS)}
+      RegGen := RegExt;
+      {$ifend}
+    end;
+  end;
+
+  function PutStack(var Value: Integer; ASize: Integer): Integer;
+  begin
+    ASize := (ASize + SizeOf(Pointer) - 1) and (-SizeOf(Pointer));
+
+    if (IsBackwardArg) then
+    begin
+      Value := SizeOf(TParamBlock) + Invokable.StackDataSize;
+      Inc(Invokable.StackDataSize, ASize);
+    end else
+    begin
+      Inc(Invokable.StackDataSize, ASize);
+      Value := -Invokable.StackDataSize;
+    end;
+
+    Result := Value;
+  end;
+
+  function PutBuffer(var Value: Integer; ASize: Integer): Integer;
+  begin
+    ASize := (ASize + SizeOf(Pointer) - 1) and (-SizeOf(Pointer));
+
+    Value := MASK_BUFFERED or Invokable.TotalDataSize;
+    Inc(Invokable.TotalDataSize, ASize);
+
+    Result := Value;
+  end;
+
+  function PutGen(var Value: Integer): Integer;
+  begin
+    Value := AllocRegGen;
+    Result := Value;
+  end;
+
+  function PutExt(var Value: Integer): Integer;
+  begin
+    Value := AllocRegExt;
+    Result := Value;
+  end;
+
+  function PutPtr(var Value: Integer): Integer;
+  begin
+    Result := PutGen(Value);
+    if (Result = VALUE_NOT_DEFINED) then
+      Result := PutStack(Value, SizeOf(Pointer));
+  end;
+
+  procedure PutArg;
+  var
+    Size: Integer;
+    {$ifdef CPUARM32}
+    RegL, RegH: Integer;
+    {$endif}
+  begin
+    Size := Param.Size;
+
+    // array of ...
+    if (Param.IsArray) then
+    begin
+      Param.DataValue := PutPtr(Param.Value);
+      PutBuffer(Param.InsuranceValue, SizeOf(Pointer));
+      Exit;
+    end;
+
+    // references: pointer + buffered data
+    if (Param.PointerDepth <> 0) then
+    begin
+      Param.DataValue := PutPtr(Param.Value);
+
+      if (Param.PointerDepth > 1) then
+      begin
+        PutBuffer(Param.DataValue, (Param.PointerDepth - 1) * SizeOf(Pointer));
+        Inc(Param.DataValue, (Param.PointerDepth - 1) * SizeOf(Pointer));
+      end;
+
+      case Param.F.Kind of
+        pkInterface, pkRecord, pkArray, pkSet, pkMethod:
+        begin
+          if (Param.PointerDepth > 1) then
+            Dec(Param.DataValue, SizeOf(Pointer));
+
+          Param.PointerDepth := Param.PointerDepth - 1;
+        end;
+      else
+        PutBuffer(Param.DataValue, Size);
+      end;
+
+      if (Param.IsInsurance) then
+      begin
+        PutBuffer(Param.InsuranceValue, SizeOf(Pointer));
+      end;
+
+      Exit;
+    end;
+
+    // whole data: registers/stack
+    if (Param.Kind = pkFloat) and (Param.FloatType in [ftSingle, ftDouble, ftExtended]) then
+    begin
+      case Size of
+        4:
+        begin
+          Param.DataValue := PutExt(Param.Value);
+          if (Param.Value <> VALUE_NOT_DEFINED) then
+            Exit;
+        end;
+        8:
+        begin
+          {$ifdef CPUARM32}
+          if (RegExt + 2 <= REGEXT_COUNT) then
+          begin
+            Param.Value := AllocRegExt(2);
+            Param.DataValue := Param.Value;
+            Exit;
+          end;
+          {$else}
+          Param.DataValue := PutExt(Param.Value);
+          if (Param.Value <> VALUE_NOT_DEFINED) then
+            Exit;
+          {$endif}
+        end;
+      else
+        {$ifdef CPUARM64}
+          Param.DataValue := PutExt(Param.Value);
+          if (Param.Value <> VALUE_NOT_DEFINED) then
+            Exit;
+        {$endif}
+      end;
+    end
+    {$ifdef CPUARM64}
+    else
+    if (Param.Kind = pkRecord) and (Param.MetaType.HFA) then
+    begin
+      Size := Param.MetaType.HFAElementCount * SizeOf(Single);
+      if (Param.MetaType.HFAElementType <> ftSingle) then Size := Size * 2;
+
+      if (RegExt + Param.MetaType.HFAElementCount <= REGEXT_COUNT) then
+      begin
+        Invokable.ARMPartialSize := Size;
+        Param.IsARMPartial := True;
+        Param.Value := AllocRegExt(Param.MetaType.HFAElementCount);
+        Param.DataValue := Param.Value;
+        Exit;
+      end else
+      begin
+        RegExt := REGEXT_COUNT;
+      end;
+    end
+    {$endif}
+    {$ifdef CPUARM}
+    else
+    if (Param.Kind in [pkRecord{$ifdef CPUARM32}, pkArray{$endif}]) then
+    begin
+      if (RegGen + ((Size + SizeOf(Pointer) - 1) shr NATIVE_SHIFT) <= REGGEN_COUNT) then
+      begin
+        Param.Value := AllocRegGen((Size + SizeOf(Pointer) - 1) shr NATIVE_SHIFT);
+        Param.DataValue := Param.Value;
+        Exit;
+      end else
+      if (RegGen <> REGGEN_COUNT) then
+      begin
+        Invokable.ARMPartialSize := (REGGEN_COUNT - RegGen) shl NATIVE_SHIFT;
+        Param.IsARMPartial := True;
+        Param.Value := AllocRegExt(REGGEN_COUNT - RegGen);
+        PutStack(Param.DataValue, Size - Invokable.ARMPartialSize);
+        Exit;
+      end;
+    end
+    {$endif};
+
+    case Size of
+      1, 2, 4{$ifdef LARGEINT},8{$ifNdef MSWINDOWS}3,5,6,7{$endif}{$endif}:
+      begin
+        Param.DataValue := PutPtr(Param.Value);
+        Exit;
+      end;
+      {$if Defined(CPUX64) and (not Defined(MSWINDOWS))}
+      9..16:
+      begin
+        if (PutGen(Param.Value)) and (AllocRegGen >= 0) then
+        begin
+          Param.DataValue := Param.Value;
+          Exit;
+        end;
+      end;
+      {$ifend}
+      {$ifdef CPUARM32}
+      8:
+      begin
+        {$ifNdef IOS}
+        Inc(RegGen, RegGen and 1);
+        {$endif}
+        RegL := AllocRegGen;
+        RegH := AllocRegGen;
+
+        if (RegL >= 0) then
+        begin
+          if (RegH >= 0) then
+          begin
+            Param.Value := RegL;
+            Param.DataValue := Param.Value;
+            Exit;
+          end else
+          begin
+            Invokable.ARMPartialSize := 4;
+            Param.IsARMPartial := True;
+            Param.Value := RegL;
+            PutStack(Param.DataValue, 4);
+            Exit;
+          end;
+        end else
+        begin
+          {$ifNdef IOS}
+          Inc(Invokable.StackDataSize, Invokable.StackDataSize and 4);
+          {$endif}
+        end;
+      end;
+      {$endif}
+    end;
+
+    Param.DataValue := PutStack(Param.Value, Size);
+    if (Param.IsInsurance{PAnsiChar, PWideChar}) then
+      PutBuffer(Param.InsuranceValue, SizeOf(Pointer));
+  end;
+
+  procedure PutResult;
+  begin
+    Param := @Invokable.Result;
+    Param.Name := Pointer(@PARAMNAME_RESULT);
+    if (ResultMode = rmRegister) then
+    begin
+      Param.Value := NativeInt(
+        {$ifdef CPUINTEL}
+          @PParamBlock(nil).OutEAX
+        {$else}
+          {$MESSAGE ERROR 'Unknown compiler'}
+        {$endif}
+      );
+    end else
+    begin
+      PutArg;
+    end;
+    Param.DataValue := Param.Value;
+  end;
+
+  procedure PutSelf;
+  begin
+    Param := @Invokable.Params[0];
+    PutArg;
+  end;
+
+  procedure ApplyOffset(var Value: Integer); overload;
+  var
+    FrameSize: Integer;
+  begin
+    FrameSize := SizeOf(TParamBlock) + Invokable.StackDataSize;
+
+    if (Value < 0) then
+    begin
+      if (Value <> VALUE_NOT_DEFINED) then
+        Inc(Value, FrameSize);
+    end else
+    if (Value and MASK_BUFFERED <> 0) then
+    begin
+      Value := (Value - MASK_BUFFERED) + FrameSize;
+    end;
+  end;
+
+  procedure ApplyOffset; overload;
+  begin
+    ApplyOffset(Param.Value);
+    ApplyOffset(Param.DataValue);
+    ApplyOffset(Param.InsuranceValue);
+  end;
 begin
   // flags
   IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction]);
-  IsSafeCall := (Invokable.CallConv = ccSafeCall);
   IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}False{$endif};
   IsConstructor := (Invokable.MethodKind = mkConstructor);
 
-  // registers
-
-  // arguments
+  // result mode
+  ResultMode := rmNone;
+  Param := @Invokable.Result;
+  if (Param.F.Kind <> pkUnknown) then
   begin
-    Param := @Invokable.Params[0];
-    for i := 0 to Invokable.ParamCount - 1 do
+    ResultMode := rmRegister;
+    if (UseResultRef(Param^, Invokable.CallConv, IsConstructor)) then
     begin
-      if (Param.IsArray) then Inc(Param);
+      ResultMode := rmRefLast;
 
-      Inc(Param);
+      {$if not Defined(CPUX86)}
+      if (Invokable.CallConv <> ccSafeCall) then
+      begin
+        ResultMode := rmRefFirst;
+      end;
+      {$ifend}
     end;
-
   end;
 
- (* TMethodKind = (mkProcedure, mkFunction, mkConstructor, mkDestructor,
-    mkClassProcedure, mkClassFunction, mkClassConstructor, mkClassDestructor,
-    mkOperatorOverload,
-    { Obsolete }
-    mkSafeProcedure, mkSafeFunction); *)
+  // self mode
+  SelfMode := smNone;
+  if (not IsStatic) then
+  begin
+    {$ifdef CPUX86}
+    if (Invokable.CallConv = ccPascal) then
+    begin
+      SelfMode := smLast;
+    end else
+    {$endif}
+    begin
+      SelfMode := smFirst;
 
-//    {$Message 'here'}
+      {$if Defined(CPUARM)}
+      if (ResultMode = rmRefFirst) then
+      begin
+        SelfMode := smSecond;
+      end;
+      {$ifend}
+    end;
+  end;
 
+  // registers
+  RegGen := 0;
+  RegExt := 0;
+  {$ifdef CPUARM32}
+  if (Invokable.CallConv <> ccReg) then
+    RegExt := REGEXT_COUNT;
+  {$endif}
 
+  // self, first result
+  if (SelfMode = smFirst) then PutSelf;
+  if (ResultMode = rmRefFirst) then PutResult;  
+  if (SelfMode = smSecond) then PutSelf;
 
+  // constructor flag
+  if (Invokable.MethodKind = mkConstructor) then
+  begin
+    TempParam.InternalSetTypeInfo(TypeInfo(Boolean), nil, False);
+    Param := @TempParam;
+    PutArg;
+    Invokable.ConstructorFlag := TempParam.DataValue;
+  end;
 
-  Inc(Invokable.TotalDataSize, Invokable.StackDataSize);
+  // arguments
+  Param := @Invokable.Params[Ord(SelfMode = smLast)];
+  for i := Ord(SelfMode <> smNone) to Invokable.ParamCount - 1 do
+  begin
+    PutArg;
+
+    if (Param.IsArray) then
+    begin
+      Inc(Param);
+      PutArg;
+    end;
+
+    Inc(Param);
+  end;
+
+  // last result/self
+  if (ResultMode = rmRefLast) then PutResult;
+  if (SelfMode = smLast) then PutSelf;
+
+  // total buffer (stack) size
+  // calculate real offsets
+  Inc(Invokable.TotalDataSize, SizeOf(TLuaInvokable) + Invokable.StackDataSize);
+  Param := @Invokable.Params[0];
+  for i := 0 to Invokable.ParamCount - 1 do
+  begin
+    ApplyOffset;
+
+    if (Param.IsArray) then
+    begin
+      Inc(Param);
+      ApplyOffset;
+    end;
+
+    Inc(Param);
+  end;
+  if (ResultMode in [rmRefFirst, rmRefLast]) then
+  begin
+    Param := @Invokable.Result;
+    ApplyOffset;
+  end;
 end;
 
 function TLuaInvokableBuilder.BuildMethod(const AMethod: PTypeInfo): __luapointer;
 begin
   Clear;
 
+  Result := LUA_POINTER_INVALID;
 end;
 
 {$ifdef EXTENDEDRTTI}
@@ -8260,6 +9238,7 @@ function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo): __lua
 begin
   Clear;
 
+  Result := LUA_POINTER_INVALID;
 end;
 {$endif}
 
@@ -8273,7 +9252,7 @@ begin
   for i := Low(Params) to High(Params) do
   begin
     InternalAddParam(Pointer(InternalAddName(Params[i].Name)), Params[i].TypeInfo,
-      Params[i].RefCount, Params[i].Flags);
+      Params[i].PointerDepth, Params[i].Flags);
   end;
 
   Result := InternalBuildDone;
@@ -8329,17 +9308,6 @@ type
     property ParamsPtr: __luapointer read FIndex.ParamsPtr write FIndex.ParamsPtr;
   end;
   PLuaProperty = ^TLuaProperty;
-
-  // internal method
-  TLuaMethodKind = (mkStatic, mkInstance, mkClass, mkConstruct, mkDestruct,
-    mkMethod, mkReference, {Operator?} mkUniversal);
-  TLuaMethod = record
-    Kind: TLuaMethodKind;
-    ArgsCount: Integer;
-    Address: Pointer;
-    Value: __luafunction;
-  end;
-  PLuaMethod = ^TLuaMethod;
 
   // global entity
   TLuaGlobalKind = (gkMetaType, gkVariable, gkProc, gkConst{Script}, gkScriptVariable);

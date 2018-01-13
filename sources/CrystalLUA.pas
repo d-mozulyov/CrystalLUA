@@ -846,6 +846,9 @@ type
     procedure push_function(const Func: __luafunction);
     function function_topointer(const StackIndex: Integer): Pointer;
 
+    procedure push_closure(const Name: __luaname; const Kind: Byte{TLuaClosureKind}; const InstanceKind: Byte{TLuaInstanceKind};
+      const Instance: Pointer; const Address: Pointer; const InvokableMode: Boolean; const InvokableArgsCount: __luapointer);
+
     procedure InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1: __luapointer = -1; const P2: __luapointer = -1);
     procedure InternalUnregisterCallback(const Name: __luaname);
     function  InternalRegisterMetaTable(const MetaType: PLuaMetaType = nil): Integer;
@@ -860,7 +863,7 @@ type
     function  InternalAddSet(const TypeInfo: Pointer): PLuaSetInfo;
     function  InternalBuildInvokable(const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer; overload;
     function  InternalBuildInvokable(const Params: array of TLuaProcParam; const AResult: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer; overload;
-    function  InternalAddProc(const MetaType: PLuaMetaType; const Name: LuaString;
+    function  InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
       Address: Pointer; const MethodKind: TLuaMethodKind;
       const Invokable: __luapointer; const ArgsCount{Universal}: Integer = -1): __luapointer;
     procedure InternalReplaceChildNameSpace(const ParentMetaItem: Pointer{PLuaDictionaryItem};
@@ -902,6 +905,9 @@ type
  (*   PLuaInvokable
 
     function ClosureCallback(const Instance: Pointer; const AClosure: Pointer): Integer;  *)
+
+    function ClosureCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
+    function InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
   private
     // scripts and units routine
     FOnPreprocessScript: TLuaOnPreprocessScript;
@@ -6344,7 +6350,7 @@ const
 procedure __TLuaRecordInfoRegUniversalMethod(const Self: TLuaRecordInfo; const MethodName: LuaString;
   const Method: TLuaMethodCallback; const ArgsCount: Integer; const IsStatic: Boolean);
 begin
-  Self.FLua.InternalAddProc(@Self, MethodName, @Method, RECORD_METHOD_KINDS[IsStatic],
+  Self.FLua.InternalAddMethod(@Self, MethodName, @Method, RECORD_METHOD_KINDS[IsStatic],
     LUA_POINTER_INVALID, ArgsCount);
 end;
 
@@ -6374,7 +6380,7 @@ end;
 procedure __TLuaRecordInfoRegTypeInfoMethod(const Self: TLuaRecordInfo; const MethodName: LuaString;
   const Address: Pointer; const TypeInfo: PTypeInfo; const IsStatic: Boolean);
 begin
-  Self.FLua.InternalAddProc(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
+  Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
     Self.FLua.InternalBuildInvokable(TypeInfo, RECORD_METHOD_KINDS[IsStatic]));
 end;
 
@@ -6405,7 +6411,7 @@ procedure __TLuaRecordInfoRegCustomMethod(const Self: TLuaRecordInfo; const Meth
   const Address: Pointer; const Params: array of TLuaProcParam; const AResult: PTypeInfo;
   const IsStatic: Boolean; const CallConv: TCallConv);
 begin
-  Self.FLua.InternalAddProc(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
+  Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
     Self.FLua.InternalBuildInvokable(Params, AResult, RECORD_METHOD_KINDS[IsStatic], CallConv));
 end;
 
@@ -6608,23 +6614,48 @@ type
   TLuaStringType = (stShortString, stAnsiString, stWideString, stUnicodeString,
     stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
 
-  TLuaInstanceKind = (ikNone, ikRecord{, ikArray, ikSet,}, ikObject, ikWeakObject,
-    ikClass,  ikInterface);
-
   TLuaClosureKind = (ckStatic, ckClassStatic, ckInstance, ckClassIntance,
-    ckConstructor, ckDestructor, ckMethod, ckReference, {Operator?} ckUniversal);
+    ckConstructor, ckDestructor, ckMethod, ckReference {Operator?});
 
-  TLuaClosure = record
+  TLuaInstanceKind = (ikNone, ikRecord{, ikArray, ikSet,}, ikObject, ikWeakObject,
+    ikClass, ikInterface);
+
+  TLuaClosureHeader = packed record
     Lua: Pointer;
-    Instance: Pointer;
+    Marker: Byte;
     Kind: TLuaClosureKind;
     InstanceKind: TLuaInstanceKind;
+    InvokableMode: Boolean;
+    Name: __luaname;
+  end;
+
+  TLuaClosure = packed record
+    Header: TLuaClosureHeader;
+    Instance: Pointer;
     Address: Pointer;
     case Integer of
-      0: (Invokable: Pointer{PLuaInvokable});
+      0: (Invokable: __luapointer{PLuaInvokable});
       1: (ArgsCount: Integer);
   end;
   PLuaClosure = ^TLuaClosure;
+
+  TLuaObjectClosure = packed record
+    Header: TLuaClosureHeader;
+    Instance: TObject;
+  end;
+  PLuaObjectClosure = ^TLuaObjectClosure;
+
+  TLuaWeakClosure = packed record
+    Header: TLuaClosureHeader;
+    {$ifdef WEAKREF}[Weak]{$endif} Instance: TObject;
+  end;
+  PLuaWeakClosure = ^TLuaWeakClosure;
+
+  TLuaInterfaceClosure = packed record
+    Header: TLuaClosureHeader;
+    Instance: IInterface;
+  end;
+  PLuaInterfaceClosure = ^TLuaInterfaceClosure;
 
   TLuaCustomParam = object
   private
@@ -8202,7 +8233,7 @@ asm
       fstp qword ptr [EBX].TParamBlock.OutFloat
 
 @@done:
-      lea esp, [ebp - 16]
+      lea esp, [ebp - 12]
       pop esi
       POP   EBX
       POP   EAX
@@ -8305,7 +8336,7 @@ type
     procedure InternalInitParams(var Invokable: TLuaInvokable);
     function InternalBuildDone: __luapointer;
     function InternalAddMethodParams(const AMethod: PTypeInfo): Boolean;
-    function InternalAddProcedureParams(const AProcedure: PTypeInfo): Boolean;
+    function InternalAddMethodedureParams(const AProcedure: PTypeInfo): Boolean;
     function InternalAddReferenceParams(const AReference: PTypeInfo): Boolean;
   public
     procedure Clear;
@@ -8472,7 +8503,7 @@ begin
   Result := FBuffer.Alloc(SizeOf(TLuaClosureParam));
   Inc(PLuaInvokable(FBuffer.FBytes).ParamCount);
 
-  PLuaCustomParam(@Self)^ := CustomParam;
+  PLuaCustomParam(Result)^ := CustomParam;
   Result.Name := Name;
   Result.Value := VALUE_NOT_DEFINED;
   Result.DataValue := VALUE_NOT_DEFINED;
@@ -8989,7 +9020,8 @@ var
   end;
 begin
   // flags
-  IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction]);
+  IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction
+    {$ifdef EXTENDEDRTTI}, mkClassConstructor, mkClassDestructor{$endif}]);
   IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}False{$endif};
   IsConstructor := (Invokable.MethodKind = {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.mkConstructor);
 
@@ -9225,7 +9257,7 @@ begin
   // ToDo
 end;
 
-function TLuaInvokableBuilder.InternalAddProcedureParams(const AProcedure: PTypeInfo): Boolean;
+function TLuaInvokableBuilder.InternalAddMethodedureParams(const AProcedure: PTypeInfo): Boolean;
 begin
   Clear;
   Result := False;
@@ -9253,7 +9285,7 @@ end;
 {$ifdef EXTENDEDRTTI}
 function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo): __luapointer;
 begin
-  if (InternalAddProcedureParams(AProcedure)) then
+  if (InternalAddMethodedureParams(AProcedure)) then
   begin
     Result := InternalBuildDone;
   end else
@@ -9342,7 +9374,8 @@ type
   TLuaMethod = packed record
     Address: Pointer;
     MethodKind: TLuaMethodKind;
-    Reserved: array[0..2] of Byte;
+    InvokableMode: Boolean;
+    Reserved: array[0..1] of Byte;
   case Integer of
     0: (Invokable: __luapointer{PLuaInvokable});
     1: (ArgsCount: Integer{Universal});
@@ -13466,7 +13499,7 @@ var
     // вызов ошибки
     if (ArgsCount <> 1) then Required := '(' + Required + ')';
     ScriptAssert('Wrong arguments count (%d)%s. Required %s.', [Self.FArgsCount, S, Required]);
-  end;  
+  end;
 
 begin
   // поиск подходящего числа параметров
@@ -15366,6 +15399,145 @@ begin
 end;
 {$endif}
 
+const
+  LUA_CLOSURE_MARKER = Byte((Ord('L') shr 2) + (Ord('C') shl 2) or (Ord('M') shr 4));
+
+function LuaClosureWrapper(L: Plua_State): Integer; cdecl;
+label
+  invalid_args_count;
+const
+  INSTANCE_KINDS: array[TLuaInstanceKind] of string = (
+     'global', 'record', 'class instance', 'class instance', 'class', 'interface'
+    );
+  CLOSURE_KINDS: array[TLuaClosureKind] of string = (
+    'method', 'method', 'method', 'method',
+    'constructor', 'destructor', 'method', 'reference'
+  );
+var
+  Closure: PLuaClosure;
+  ClosureArgsCount, ArgsCount: Integer;
+  Invokable: PLuaInvokable;
+  Buffer: array[0..2047] of Byte;
+  InvokableData: Pointer;
+  Name: ^LuaString;
+begin
+  Closure := lua_touserdata(L, LUA_UPVALUEINDEX);
+  ClosureArgsCount := lua_gettop(TLua(Closure.Header.Lua).Handle);
+
+  if (Closure.Header.InvokableMode) then
+  begin
+    Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(TLua(Closure.Header.Lua).FMemoryHeap).Unpack{$endif}(Closure.Invokable);
+    ArgsCount := Invokable.ParamCount - Byte(Closure.Header.InstanceKind <> ikNone);
+    if (ClosureArgsCount <> ArgsCount) then
+      goto invalid_args_count;
+
+    if (Invokable.TotalDataSize <= SizeOf(Buffer)) then
+    begin
+      if (Invokable.InitialCount <> 0) then
+        Invokable.Initialize(Pointer(@Buffer));
+
+      if (Invokable.FinalCount = 0) then
+      begin
+        Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, Pointer(@Buffer));
+      end else
+      begin
+        try
+          Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, Pointer(@Buffer));
+        finally
+          Invokable.Finalize(Pointer(@Buffer));
+        end;
+      end;
+    end else
+    begin
+      GetMem(InvokableData, Invokable.TotalDataSize);
+      try
+        if (Invokable.InitialCount <> 0) then
+          Invokable.Initialize(InvokableData);
+
+        if (Invokable.FinalCount = 0) then
+        begin
+          Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, InvokableData);
+        end else
+        begin
+          try
+            Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, InvokableData);
+          finally
+            Invokable.Finalize(InvokableData);
+          end;
+        end;
+      finally
+        FreeMem(InvokableData);
+      end;
+    end;
+  end else
+  begin
+    ArgsCount := Closure.ArgsCount;
+    if (ArgsCount <> -1) and (ClosureArgsCount <> ArgsCount) then
+      goto invalid_args_count;
+
+    Result := TLua(Closure.Header.Lua).ClosureCallback(Closure, ClosureArgsCount);
+  end;
+
+  Exit;
+invalid_args_count:
+  Name := @TLua(Closure.Header.Lua).FStringBuffer.Lua;
+  TLua(Closure.Header.Lua).unpack_lua_string(Name^, Closure.Header.Name);
+  TLua(Closure.Header.Lua).Error('Invalid arguments count of %s %s %s (%d), reqired: %d',
+    [
+      INSTANCE_KINDS[Closure.Header.InstanceKind],
+      CLOSURE_KINDS[Closure.Header.Kind],
+      Name^,
+      ClosureArgsCount,
+      ArgsCount
+    ]);
+
+  Result := 0;
+end;
+
+procedure TLua.push_closure(const Name: __luaname; const Kind: Byte{TLuaClosureKind}; const InstanceKind: Byte{TLuaInstanceKind};
+  const Instance: Pointer; const Address: Pointer; const InvokableMode: Boolean; const InvokableArgsCount: __luapointer);
+var
+  Closure: PLuaClosure;
+begin
+  Closure := lua_newuserdata(Handle, SizeOf(TLuaClosure));
+  Closure.Header.Lua := Pointer(Self);
+  Closure.Header.Marker := LUA_CLOSURE_MARKER;
+  Closure.Header.Kind := TLuaClosureKind(Kind);
+  Closure.Header.InstanceKind := TLuaInstanceKind(InstanceKind);
+  Closure.Header.InvokableMode := InvokableMode;
+  Closure.Header.Name := Name;
+
+  Closure.Address := Address;
+  Closure.Invokable := InvokableArgsCount;
+
+  Closure.Instance := nil;
+  case TLuaInstanceKind(InstanceKind) of
+    {.$ifdef AUTOREFCOUNT}
+    ikObject:
+    begin
+      PLuaObjectClosure(Closure).Instance := TObject(Instance);
+      // ToDo
+    end;
+    {.$endif}
+    {.$ifdef WEAKREF}
+    ikWeakObject:
+    begin
+      PLuaWeakClosure(Closure).Instance := TObject(Instance);
+      // ToDo
+    end;
+    {.$endif}
+    ikInterface:
+    begin
+      PLuaInterfaceClosure(Closure).Instance := IInterface(Instance);
+      // ToDo
+    end;
+  else
+    Closure.Instance := Instance;
+  end;
+
+  lua_pushcclosure(Handle, LuaClosureWrapper, 1);
+end;
+
 procedure TLua.InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1, P2: __luapointer);
 begin
   lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
@@ -15651,7 +15823,7 @@ var
         System.Move(MethodRec.Name[4], Buffer[1], Count);
         unpack_lua_string(FStringBuffer.Lua, Buffer);
 
-        //InternalAddProc(ClassInfo, FStringBuffer.Lua, -1, Ord(pkClosure), MethodRec.Addr);
+        //InternalAddMethod(ClassInfo, FStringBuffer.Lua, -1, Ord(pkClosure), MethodRec.Addr);
       end;
 
       Inc(NativeInt(MethodRec), MethodRec.Size);
@@ -16254,7 +16426,7 @@ begin
   Done := False;
   if (Assigned(TypeInfo)) then
   case TypeInfo.Kind of
-    tkProcedure: Done := Builder.InternalAddProcedureParams(TypeInfo);
+    tkProcedure: Done := Builder.InternalAddMethodedureParams(TypeInfo);
        tkMethod: Done := Builder.InternalAddMethodParams(TypeInfo);
     tkInterface: Done := (IsReferenceTypeInfo(TypeInfo)) and
                    (Builder.InternalAddReferenceParams(TypeInfo));
@@ -16281,7 +16453,6 @@ var
   LMethodKind: TMethodKind;
   Builder: ^TLuaInvokableBuilder;
 begin
-  {$message 'here'}
   Builder := @TLuaInvokableBuilder(FInvokableBuilder);
 
   // system method kind, todo check
@@ -16297,7 +16468,7 @@ begin
   Result := Builder.InternalBuildDone;
 end;
 
-function TLua.InternalAddProc(const MetaType: PLuaMetaType; const Name: LuaString;
+function TLua.InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
   Address: Pointer; const MethodKind: TLuaMethodKind;
   const Invokable: __luapointer; const ArgsCount{Universal}: Integer): __luapointer;
 label
@@ -16362,8 +16533,9 @@ begin
   // parameters
   Value.Address := Address;
   Value.MethodKind := MethodKind;
+  Value.InvokableMode := (Invokable <> LUA_POINTER_INVALID);
   Value.Invokable := Invokable;
-  if (Invokable = LUA_POINTER_INVALID) then
+  if (not Value.InvokableMode) then
     Value.ArgsCount := ArgsCount;
 
   // find existing/add item
@@ -16434,7 +16606,7 @@ done:
 end;
 
          (*
-function TLua.InternalAddProc(const IsClass: boolean; AClass: pointer; const ProcName: string; ArgsCount: integer; const with_class: boolean; Address, CodeAddr: pointer): integer;
+function TLua.InternalAddMethod(const IsClass: boolean; AClass: pointer; const ProcName: string; ArgsCount: integer; const with_class: boolean; Address, CodeAddr: pointer): integer;
 var
   Index: integer;
   IsConstructor: boolean;
@@ -19059,18 +19231,24 @@ var
   NativeModify: ^TLuaGlobalModify;
   Entity: PLuaGlobalEntity;
   LuaType: Integer;
+  LuaName: __luaname;
   EntityItem: ^TLuaDictionaryItem;
   Name: PLuaString;
   MetaType: ^TLuaMetaType;
   Prop: ^TLuaProperty;
-  Proc: ^TLuaClosure;
+  Proc: ^TLuaMethod;
 begin
   NativeUInt(NativeModify) := {$ifdef LARGEINT}(NativeUInt(ModifyHigh) shl 32) +{$endif} ModifyLow;
 
   // entity
   if (Assigned(NativeModify)) then
   begin
+    LuaName := nil;
     Entity := GetGlobalEntity(NativeModify.Name^, False);
+    if (Assigned(Entity)) then
+    begin
+      LuaName := TLuaNames(FNames).FindValue(NativeModify.Name^);
+    end;
   end else
   begin
     LuaType := lua_type(Handle, 2);
@@ -19079,7 +19257,8 @@ begin
       GetLuaTypeName(FStringBuffer.Default, LuaType);
       Error('Global key should be a string. Type %s is not available as a global key', [FStringBuffer.Default]);
     end;
-    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(lua_tolstring(Handle, 2, nil), False);
+    LuaName := lua_tolstring(Handle, 2, nil);
+    EntityItem := TLuaDictionary(FGlobalEntities).InternalFind(LuaName, False);
 
     Entity := nil;
     if (Assigned(EntityItem)) then
@@ -19119,7 +19298,7 @@ begin
     gkProc:
     begin
       Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Entity.Ptr);
-      //push_function(Proc.Value);
+      push_closure(LuaName, Ord(ckStatic), Ord(ikNone), nil, Proc.Address, Proc.InvokableMode, Proc.Invokable);
     end;
   else
     // gkConst, gkScriptVariable
@@ -20397,6 +20576,75 @@ function TLua.ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __lu
 begin
   Result := 0;
 end;
+
+function TLua.ClosureCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
+begin
+  Result := 0;
+end;
+
+function TLua.InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
+label
+  skip_instance_param;
+var
+  i, Count: Integer;
+  Closure: PLuaClosure;
+  Invokable: PLuaInvokable;
+  InvokableData: NativeInt;
+  Param: PLuaClosureParam;
+  LuaType: Integer;
+  Ptr: Pointer;
+begin
+  Closure := PLuaClosure(AClosure);
+  Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Closure.Invokable);
+  InvokableData := NativeInt(AInvokableData);
+
+  Param := @Invokable.Params[0];
+  case Closure.Header.Kind of
+    ckStatic:
+    begin
+      Count := Invokable.ParamCount;
+    end;
+    ckConstructor:
+    begin
+      PBoolean(InvokableData + Param.DataValue)^ := (Closure.Header.InstanceKind <> ikClass);
+      goto skip_instance_param;
+    end;
+  else
+  skip_instance_param:
+    Count := Invokable.ParamCount - 1;
+    Inc(Param);
+  end;
+       {.$message 'здесь'}
+  for i := 1 to Count do
+  begin
+    LuaType := lua_type(Handle, i);
+
+    {if () then
+    begin
+
+    end else }
+    begin
+      Ptr := Pointer(InvokableData + Param.DataValue);
+      Param.SetValue(Ptr^, Self, i, LuaType);
+    end;
+
+    Inc(Param);
+  end;
+
+  // function/procedure invoke
+  if (Invokable.Result.DataValue <> VALUE_NOT_DEFINED) then
+  begin
+
+    Invokable.Invoke(Closure.Address, AInvokableData);
+       {.$message 'здесь'}
+    Result := 1;
+  end else
+  begin
+    Invokable.Invoke(Closure.Address, AInvokableData);
+    Result := 0;
+  end;
+end;
+
             (*
 
 function TLua.ProcCallback(const ClassInfo: TLuaClassInfo; const ProcInfo: TLuaClosureInfo): integer;
@@ -20639,7 +20887,7 @@ end;
 procedure __TLuaRegUniversalProc(const Lua: TLua; const ProcName: LuaString;
   const Proc: TLuaProcCallback; const ArgsCount: Integer);
 begin
-  Lua.InternalAddProc(nil, ProcName, @Proc, mkStatic, LUA_POINTER_INVALID, ArgsCount);
+  Lua.InternalAddMethod(nil, ProcName, @Proc, mkStatic, LUA_POINTER_INVALID, ArgsCount);
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Callback: TLuaProcCallback; const ArgsCount: Integer);
@@ -20665,7 +20913,7 @@ end;
 procedure __TLuaRegRTIIProc(const Lua: TLua; const ProcName: LuaString;
   const Address: Pointer; const TypeInfo: PTypeInfo);
 begin
-  Lua.InternalAddProc(nil, ProcName, Address, mkStatic,
+  Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
     Lua.InternalBuildInvokable(TypeInfo, mkStatic));
 end;
 
@@ -20692,7 +20940,7 @@ end;
 procedure __TLuaRegCustomProc(const Lua: TLua; const ProcName: LuaString; const Address: Pointer;
   const Params: array of TLuaProcParam; const AResult: PTypeInfo; const CallConv: TCallConv);
 begin
-  Lua.InternalAddProc(nil, ProcName, Address, mkStatic,
+  Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
     Lua.InternalBuildInvokable(Params, AResult, mkStatic, CallConv));
 end;
 
@@ -20721,7 +20969,7 @@ procedure __TLuaRegUniversalClassMethod(const Lua: TLua; const AClass: TClass;
   const MethodName: LuaString; const Method: TLuaMethodCallback;
   const ArgsCount: Integer; const MethodKind: TLuaMethodKind);
 begin
-  Lua.InternalAddProc(Lua.InternalAddClass(AClass, False), MethodName, @Method,
+  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, @Method,
     MethodKind, LUA_POINTER_INVALID, ArgsCount);
 end;
 
@@ -20750,7 +20998,7 @@ procedure __TLuaRegRTIIClassMethod(const Lua: TLua; const AClass: TClass;
   const MethodName: LuaString; const Address: Pointer; const TypeInfo: PTypeInfo;
   const MethodKind: TLuaMethodKind);
 begin
-  Lua.InternalAddProc(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
+  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
     Lua.InternalBuildInvokable(TypeInfo, MethodKind));
 end;
 
@@ -20779,7 +21027,7 @@ procedure __TLuaRegCustomClassMethod(const Lua: TLua; const AClass: TClass; cons
   const Address: Pointer; const Params: array of TLuaProcParam; const AResult: PTypeInfo;
   const MethodKind: TLuaMethodKind; const CallConv: TCallConv);
 begin
-  Lua.InternalAddProc(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
+  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
     Lua.InternalBuildInvokable(Params, AResult, mkStatic, CallConv));
 end;
 

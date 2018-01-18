@@ -354,7 +354,7 @@ type
 
   TLuaProcCallback = function(const Args: TLuaArgs): TLuaArg;
   TLuaMethodCallback = function(const Instance: Pointer; const Args: TLuaArgs): TLuaArg;
-  TLuaMethodKind = (mkStatic, mkObject, mkClass, mkConstructor, mkDestructor{, Operator?});
+  TLuaMethodKind = (mkStatic, mkObject, mkClass, mkConstructor, mkDestructor, {ToDo}mkOperator);
 
   TLuaProcParam = packed record
     Name: LuaString;
@@ -720,6 +720,7 @@ type
       {$endif}
       Unicode: UnicodeString;
       Lua: LuaString;
+      LuaReserved: LuaString;
       Default: string;
     end;
     FReturnAddress: Pointer;
@@ -6979,6 +6980,8 @@ begin
 end;
 
 procedure TLuaCustomParam.GetValue(const Src; const Lua: TLua; const AFlags: Cardinal{IsRef:1, IsConst:1});
+label
+  int64_value;
 var
   Value: Pointer;
   UserData: PLuaUserData;
@@ -7034,6 +7037,7 @@ begin
     end;
     pkInt64:
     begin
+    int64_value:
       {$ifdef LARGEINT}
         lua_pushinteger(Handle, PInt64(Value)^);
       {$else .SMALLINT}
@@ -7053,7 +7057,7 @@ begin
         case F.FloatType of
            ftSingle: FTempBuffer.D := PSingle(Value)^;
          ftExtended: FTempBuffer.D := PExtended(Value)^;
-             ftComp: FTempBuffer.D := PComp(Value)^;
+             ftComp: goto int64_value;
         else
           // ftCurr
           FTempBuffer.D := PCurrency(Value)^;
@@ -7407,6 +7411,7 @@ begin
     end;
     pkFloat:
     begin
+      if (F.FloatType = ftComp) then goto unpack_int_int64;
       if (LuaType = LUA_TNUMBER) then
       begin
         FTempBuffer.D := lua_tonumber(Handle, StackIndex);
@@ -7415,7 +7420,6 @@ begin
           ftSingle: PSingle(Instance)^ := FTempBuffer.D;
           ftDouble: PDouble(Instance)^ := FTempBuffer.D;
         ftExtended: PExtended(Instance)^ := FTempBuffer.D;
-            ftComp: PComp(Instance)^ := FTempBuffer.D;
         else
           // ftCurr
           PCurrency(Instance)^ := FTempBuffer.D;
@@ -7709,7 +7713,8 @@ type
       case Integer of
         0: (OutEAX, OutEDX: Integer);
         1: (OutInt64: Int64);
-        2: (OutFloat: Double);
+        2: (OutFPU: Extended; OutFPUAlign: Word);
+        3: (OutSafeCall: HRESULT);
     );
     1:
     (
@@ -7728,10 +7733,11 @@ type
       RegRDX: Int64;
       RegR8: Int64;
       RegR9: Int64;
+      OutXMM0: Double;
       case Integer of
         0: (OutEAX: Integer);
         1: (OutRAX: Int64);
-        2: (OutXMM0: Double);
+        2: (OutSafeCall: HRESULT);
     );
     1: (RegsGen: array[0..3] of Int64);
     2: (RegsExt: array[0..3] of Double);
@@ -7750,11 +7756,13 @@ type
       OutFPU: Extended;
       StackData: PByte;
       StackDataSize: Integer;
+      OutXMM0: Double;
     );
     1:
     (
       RegsExt: array[0..7] of Double;
       RegsGen: array[0..5] of Int64;
+      OutSafeCall: HRESULT;
     );
   end;
   {$elseif Defined(CPUARM32)}
@@ -7770,7 +7778,11 @@ type
       case Integer of
         0: (RegD: array[0..7] of Double);
         1: (RegS: array[0..15] of Single);
-        2: (RegsExt: array[0..15] of Single);
+        2: (RegsExt: array[0..15] of Single;
+            case Integer of
+              0: (OutCR: Integer; OutD: Double);
+              1: (OutSafeCall: HRESULT);
+           );
     );
     1: (RegsGen: array[0..3] of Integer);
   end;
@@ -7780,6 +7792,12 @@ type
     1: (Lo, Hi: UInt64);
     2: (LL, LH, HL, HH: UInt32);
   end align 16;
+  m128x4 = array[0..3] of m128;
+  TParamRegsHFA = packed record
+  case Integer of
+    0: (Singles: array[0..3] of UInt32);
+    1: (Doubles: array[0..3] of UInt64);
+  end;
   TParamRegsGen = array[0..7] of Int64;
   TParamRegsExt = array[0..7] of m128;
   TParamBlock = record
@@ -7791,11 +7809,17 @@ type
       RegX8: Int64;
       StackData: PByte;
       StackDataSize: Integer;
+      OutHFA: TParamRegsHFA;
+      case Integer of
+        0: (OutX: Int64; OutQ: m128);
+        1: (OutSafeCall: HRESULT);
     );
     1:
     (
       RegsGen: array[0..7] of Int64;
-      RegsExt: array[0..7] of m128;
+      case Integer of
+        0: (RegsExt: array[0..7] of m128);
+        1: (Regs128x4: m128x4);
     );
   end;
   {$else}
@@ -7818,13 +7842,16 @@ const
   VALUE_NOT_DEFINED = -1;
 
 type
+  TLuaResultKind = (rkNone, rkRegister, rkHFASingle, rkHFADouble, rkBuffer, rkManagedBuffer, rkUserData);
+  TLuaStackCleaner = (scCaller, scInvokable, scInvokableEx);
+
   PLuaInvokable = ^TLuaInvokable;
   TLuaInvokable = object
   public
-    MethodKind: TMethodKind;
+    MethodKind: TLuaMethodKind;
     CallConv: TCallConv;
-    FPURet: Boolean;
-    Reserved: Byte;
+    ResultKind: TLuaResultKind;
+    StackCleaner: TLuaStackCleaner;
     StackDataSize: Integer;
     TotalDataSize: Integer;
 
@@ -7832,10 +7859,11 @@ type
     Initials: PInteger;
     FinalCount: Integer;
     Finals: PInteger;
-    ConstructorFlag: Integer;
     {$ifdef CPUARM}
     ARMPartialSize: Integer;
     {$endif}
+    Instance: Integer;
+    ConstructorFlag: Integer;
     Result: TLuaClosureParam;
     ParamCount: Integer;
     Params: TLuaClosureParams;
@@ -7859,22 +7887,31 @@ const
 
 procedure RawInvoke(CodeAddress: Pointer; ParamBlock: PParamBlock);
   external RTLHelperLibName name 'rtti_raw_invoke';
+
+function CheckAutoResult(ResultCode: HResult): HResult;
+begin
+  if ResultCode < 0 then
+  begin
+    if Assigned(SafeCallErrorProc) then
+      SafeCallErrorProc(ResultCode, ReturnAddress);
+    System.Error(reSafeCallError);
+  end;
+  Result := ResultCode;
+end;
 {$ifend}
 
 procedure TLuaInvokable.Initialize(const ParamBlock: PParamBlock);
 var
   i, PointerDepth, FlagsEx: Integer;
-  Items: PLuaClosureParams;
   InitialPtr: PInteger;
   Param: PLuaClosureParam;
   Ptr: Pointer;
 begin
-  Items := @Params;
   InitialPtr := Initials;
 
   for i := 1 to InitialCount do
   begin
-    Param := Pointer(NativeInt(Items) + InitialPtr^);
+    Param := Pointer(NativeInt(@Self) + InitialPtr^);
     Ptr := Pointer(NativeInt(ParamBlock) + Param.DataValue);
 
     PNativeInt(Ptr)^ := 0;
@@ -7912,7 +7949,6 @@ label
   failure;
 var
   i, FlagsEx, VType: Integer;
-  Items: PLuaClosureParams;
   FinalPtr: PInteger;
   Param: PLuaClosureParam;
   Ptr: Pointer;
@@ -7978,37 +8014,12 @@ var
     FreeMem(Ptr);
   end;
 begin
-  Items := @Params;
   FinalPtr := Finals;
 
   for i := 1 to FinalCount do
   begin
-    Param := Pointer(NativeInt(Items) + FinalPtr^);
+    Param := Pointer(NativeInt(@Self) + FinalPtr^);
     Ptr := Pointer(NativeInt(ParamBlock) + Param.DataValue);
-
-(*
-  function IsParamFinal: Boolean;
-  begin
-    Result := False;
-
-    if (Param.IsInsurance) then
-    begin
-      Result := True;
-      Exit;
-    end;
-
-    case Param.F.Kind of
-      pkVariant:
-      begin
-        Result := True;
-      end;
-      pkString:
-      begin
-        Result := (Param.F.StringType in [stAnsiString, stWideString, stUnicodeString]);
-      end;
-    end;
-  end;
-*)
 
     FlagsEx := Param.F.FlagsEx;
     if (FlagsEx and PARAM_INSURANCE_MODE = 0) then
@@ -8228,16 +8239,31 @@ asm
       MOV   [EBX].TParamBlock.OutEAX, eax
       MOV   [EBX].TParamBlock.OutEDX, edx
 
-      cmp byte ptr [esi].TLuaInvokable.FPURet, 0
-      jz @@done
-      fstp qword ptr [EBX].TParamBlock.OutFloat
+      cmp byte ptr [esi].TLuaInvokable.Result.F.Kind, pkFloat
+      jne @@done
+      cmp byte ptr [esi].TLuaInvokable.Result.F.FloatType, ftExtended
+      jne @fpu_to_int64
+
+      fstp tbyte ptr [EBX].TParamBlock.OutFPU
+      jmp @@done
+
+@fpu_to_int64:
+      fistp qword ptr [EBX].TParamBlock.OutInt64
 
 @@done:
+      mov ecx, esi
       lea esp, [ebp - 12]
       pop esi
       POP   EBX
-      POP   EAX
+      POP   edx
       POP   EBP
+
+      // safe call check
+      test eax, eax
+      jge @ret
+      cmp [ECX].TLuaInvokable.CallConv, ccSafeCall
+      je System.@CheckAutoResult
+@ret:
 end;
 {$elseif Defined(CPUX64) and Defined(MSWINDOWS)}
 const
@@ -8248,7 +8274,12 @@ const
     raise EInvocationError.CreateRes(Pointer(@SParameterCountExceeded)) at ReturnAddress;
   end;
 asm
-      .PARAMS 62 // There's actually room for 64, assembler is saving locals for CodeAddress & ParamBlock
+      // .PARAMS 62 // There's actually room for 64, assembler is saving locals for Self, CodeAddress & ParamBlock
+      push rbp
+      sub rsp, $1f0
+      mov rbp, rsp
+
+      mov [rbp + $208], rcx
       MOV     [RBP+$210], CodeAddress
       MOV     [RBP+$218], ParamBlock
       xchg rdx, r8 // rdx := ParamBlock
@@ -8311,12 +8342,96 @@ asm
       MOV     RDX, [RBP+$218]
       MOV     [RDX].TParamBlock.OutRAX, RAX
       MOVSD   [RDX].TParamBlock.OutXMM0, XMM0
+
+      mov rdx, [rbp + $208]
+      lea rsp, [rbp + $1f0]
+      pop rbp
+
+      // safe call check
+      test eax, eax
+      jge @ret
+      xchg rax, rcx
+      cmp [RDX].TLuaInvokable.CallConv, ccSafeCall
+      je System.@CheckAutoResult
+@ret:
 end;
-{$else .CPUARM.X64-!MSWINDOWS}
+{$elseif Defined(CPUX64)} {!MSWINDOWS}
+var
+  StoredXMM0: Double;
 begin
-  ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
-  ParamBlock.StackDataSize := StackDataSize;
-  RawInvoke(CodeAddress, ParamBlock);
+  StoredXMM0 := ParamBlock.RegXMM[0];
+  try
+    ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
+    ParamBlock.StackDataSize := Self.StackDataSize;
+    RawInvoke(CodeAddress, ParamBlock);
+
+    ParamBlock.OutXMM0 := ParamBlock.RegXMM[0];
+  finally
+    ParamBlock.RegXMM[0] := StoredXMM0;
+  end;
+
+  if (Self.CallConv = ccSafeCall) and (ParamBlock.OutSafeCall < 0) then
+    CheckAutoResult(ParamBlock.OutSafeCall);
+end;
+{$elseif Defined(CPUARM32)}
+var
+  StoredCR: Integer;
+  StoredD: Double;
+begin
+  StoredCR := ParamBlock.RegCR[0];
+  StoredD := ParamBlock.RegD[0];
+  try
+    ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
+    ParamBlock.StackDataSize := Self.StackDataSize;
+    RawInvoke(CodeAddress, ParamBlock);
+
+    ParamBlock.OutCR := ParamBlock.RegCR[0];
+    ParamBlock.OutD := ParamBlock.RegD[0];
+  finally
+    ParamBlock.RegCR[0] := StoredCR;
+    ParamBlock.RegD[0] := StoredD;
+  end;
+
+  if (Self.CallConv = ccSafeCall) and (ParamBlock.OutSafeCall < 0) then
+    CheckAutoResult(ParamBlock.OutSafeCall);
+end;
+{$else .CPUARM64}
+var
+  StoredX: Int64;
+  Stored128x4: m128x4;
+begin
+  StoredX := ParamBlock.RegX[0];
+  Stored128x4 := ParamBlock.Regs128x4;
+  try
+    ParamBlock.StackData := Pointer(NativeInt(ParamBlock) + SizeOf(TParamBlock));
+    ParamBlock.StackDataSize := Self.StackDataSize;
+    RawInvoke(CodeAddress, ParamBlock);
+
+    ParamBlock.OutX := ParamBlock.RegX[0];
+    ParamBlock.OutQ := ParamBlock.RegQ[0];
+    if (Self.ResultKind in [rkHFASingle, rkHFADouble]) then
+    begin
+      if (Self.ResultKind = rkHFASingle) then
+      begin
+        ParamBlock.OutHFA.Singles[0] := ParamBlock.RegQ[0].LL;
+        ParamBlock.OutHFA.Singles[1] := ParamBlock.RegQ[1].LL;
+        ParamBlock.OutHFA.Singles[2] := ParamBlock.RegQ[2].LL;
+        ParamBlock.OutHFA.Singles[3] := ParamBlock.RegQ[3].LL;
+      end else
+      begin
+        ParamBlock.OutHFA.Doubles[0] := ParamBlock.RegQ[0].Lo;
+        ParamBlock.OutHFA.Doubles[1] := ParamBlock.RegQ[1].Lo;
+        ParamBlock.OutHFA.Doubles[2] := ParamBlock.RegQ[2].Lo;
+        ParamBlock.OutHFA.Doubles[3] := ParamBlock.RegQ[3].Lo;
+      end;
+    end;
+  finally
+    ParamBlock.RegX[0] := StoredX;
+    ParamBlock.Regs128x4 := Stored128x4;
+  end;
+
+  if (Self.CallConv = ccSafeCall) and (ParamBlock.OutSafeCall < 0) then
+    CheckAutoResult(ParamBlock.OutSafeCall);
 end;
 {$ifend}
 
@@ -8328,32 +8443,44 @@ type
     FBuffer: TLuaBuffer;
     FAdvanced: TLuaBuffer;
 
-    function NewInvokable(const MethodKind: TMethodKind; const CallConv: TCallConv; const AResult: Pointer): Boolean;
+    function NewInvokable(const MethodKind: TLuaMethodKind; const CallConv: TCallConv; const AResult: PTypeInfo): PLuaInvokable;
     function InternalAddName(const Name: LuaString): NativeInt;
     function InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
       const PointerDepth: Integer; const ParamFlags: TParamFlags): PLuaClosureParam; overload;
     function InternalAddParam(const Param: TLuaProcParam): PLuaClosureParam; overload;
     procedure InternalInitParams(var Invokable: TLuaInvokable);
     function InternalBuildDone: __luapointer;
-    function InternalAddMethodParams(const AMethod: PTypeInfo): Boolean;
-    function InternalAddMethodedureParams(const AProcedure: PTypeInfo): Boolean;
-    function InternalAddReferenceParams(const AReference: PTypeInfo): Boolean;
   public
     procedure Clear;
-    function BuildMethod(const AMethod: PTypeInfo): __luapointer;
+    function BuildMethod(const AMethod: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$ifdef EXTENDEDRTTI}
-    function BuildProcedure(const AProcedure: PTypeInfo): __luapointer;
+    function BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$endif}
     // rtti?
-    function BuildReference(const AReference: PTypeInfo): __luapointer;
+    function BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
 
     // BuildInterface method
 
-    function BuildCustom(const MethodKind: TMethodKind; const Params: array of TLuaProcParam;
-      const AResult: Pointer; const CallConv: TCallConv): __luapointer;
+    function BuildCustom(const Params: array of TLuaProcParam; const AResult: Pointer;
+      const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
   end;
 
 const
+  LUA_METHOD_KINDS: array[{$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.TMethodKind] of TLuaMethodKind = (
+    {mkProcedure} mkStatic,
+    {mkFunction} mkStatic,
+    {mkConstructor} mkConstructor,
+    {mkDestructor} mkDestructor,
+    {mkClassProcedure} mkClass,
+    {mkClassFunction} mkClass,
+    {$if Defined(EXTENDEDRTTI) or Defined(FPC)}
+    {mkClassConstructor} mkStatic,
+    {mkClassDestructor} mkStatic,
+    {mkOperatorOverload} mkOperator,
+    {$ifend}
+    {mkSafeProcedure} mkStatic,
+    {mkSafeFunction} mkStatic
+  );
   PARAMNAME_RESULT: array[0..6] of Byte = (6, Ord('R'), Ord('e'), Ord('s'),
     Ord('u'), Ord('l'), Ord('t'));
   PARAMNAME_HIGH_ARRAY: array[0..11] of Byte = (11, Ord('H'), Ord('i'), Ord('g'),
@@ -8365,53 +8492,59 @@ begin
   FAdvanced.Clear;
 end;
 
-function TLuaInvokableBuilder.NewInvokable(const MethodKind: TMethodKind;
-  const CallConv: TCallConv; const AResult: Pointer): Boolean;
-var
-  Invokable: ^TLuaInvokable;
+function TLuaInvokableBuilder.NewInvokable(const MethodKind: TLuaMethodKind;
+  const CallConv: TCallConv; const AResult: PTypeInfo): PLuaInvokable;
 begin
   FBuffer.Size := 0;
   FAdvanced.Size := 0;
 
-  Invokable := FBuffer.Alloc(SizeOf(TLuaInvokable) - SizeOf(TLuaClosureParams));
-  FillChar(Invokable^, SizeOf(TLuaInvokable) - SizeOf(TLuaClosureParams), #0);
+  Result := FBuffer.Alloc(SizeOf(TLuaInvokable) - SizeOf(TLuaClosureParams));
+  FillChar(Result^, SizeOf(TLuaInvokable) - SizeOf(TLuaClosureParams), #0);
 
-  Invokable.MethodKind := MethodKind;
-  Invokable.CallConv := CallConv;
-  Invokable.ConstructorFlag := VALUE_NOT_DEFINED;
-  Invokable.Result.Value := VALUE_NOT_DEFINED;
-  Invokable.Result.DataValue := VALUE_NOT_DEFINED;
-  Invokable.Result.InsuranceValue := VALUE_NOT_DEFINED;
+  Result.MethodKind := MethodKind;
+  Result.CallConv := CallConv;
+  Result.Instance := VALUE_NOT_DEFINED;
+  Result.ConstructorFlag := VALUE_NOT_DEFINED;
+  Result.Result.Value := VALUE_NOT_DEFINED;
+  Result.Result.DataValue := VALUE_NOT_DEFINED;
+  Result.Result.InsuranceValue := VALUE_NOT_DEFINED;
 
   if (Assigned(AResult)) then
   begin
-    Invokable.Result.InternalSetTypeInfo(AResult, FLua, True);
-    if (Invokable.Result.Kind = pkUnknown) then
+    Result.Result.InternalSetTypeInfo(AResult, FLua, True);
+    if (Result.Result.Kind = pkUnknown) then
     begin
       FLua.FStringBuffer.Default := Format('Invalid result type "%s" (%s)', [
         FLua.FStringBuffer.Lua, FLua.FStringBuffer.Default]);
-      Result := False;
+      Result := nil;
       Exit;
     end
     {$ifdef CPUX86}
     else
-    if (Invokable.Result.Kind = pkFloat) and (CallConv <> ccSafeCall) and
-      (Invokable.Result.F.FloatType in [ftSingle, ftDouble, ftComp]) then
+    if (Result.Result.Kind = pkFloat) and (CallConv <> ccSafeCall) and
+      (Result.Result.F.FloatType in [ftSingle, ftDouble]) then
     begin
-      Invokable.Result.F.FloatType := ftExtended;
+      Result.Result.F.FloatType := ftExtended;
     end
     {$endif}
     ;
   end;
 
-  if ((MethodKind in [mkFunction, mkClassFunction, mkSafeFunction]) <> Assigned(AResult)) then
+  {$ifdef CPUX86}
+  if CallConv = ccCdecl then
   begin
-    FLua.FStringBuffer.Default := Format('Invalid method kind (%s)', [GetEnumName(TypeInfo(TMethodKind), Ord(MethodKind))]);
-    Result := False;
-    Exit;
-  end;
+    Result.StackCleaner := scInvokable;
 
-  Result := True;
+    {$ifdef MACOS}
+    if (Result.Result.F.Kind = pkRecord) then
+    case Result.Result.F.MetaType.Size of
+      0,1,2,4,8: ;
+    else
+      Result.StackCleaner := scInvokableEx;
+    end;
+    {$endif}
+  end;
+  {$endif}
 end;
 
 function TLuaInvokableBuilder.InternalAddName(const Name: LuaString): NativeInt;
@@ -8709,7 +8842,7 @@ type
   TSelfMode = (smNone, smFirst, smSecond, smLast);
 var
   i: Integer;
-  IsStatic, IsBackwardArg, IsConstructor: Boolean;
+  IsStatic, IsConstructor, IsBackwardArg: Boolean;
   ResultMode: TResultMode;
   SelfMode: TSelfMode;
   Param: ^TLuaClosureParam;
@@ -8970,29 +9103,119 @@ var
   end;
 
   procedure PutResult;
+  var
+    Ptr: Pointer;
   begin
     Param := @Invokable.Result;
     Param.Name := Pointer(@PARAMNAME_RESULT);
+
     if (ResultMode = rmRegister) then
     begin
-      Param.Value := NativeInt(
-        {$ifdef CPUINTEL}
+      Invokable.ResultKind := rkRegister;
+      Ptr :=
+        {$if Defined(CPUINTEL)}
           @PParamBlock(nil).OutEAX
-        {$else}
-          {$MESSAGE ERROR 'Unknown compiler'}
+        {$elseif Defined(CPUARM32)}
+          @PParamBlock(nil).OutCR
+        {$else .CPUARM64}
+          @PParamBlock(nil).OutX
+        {$ifend}
+        ;
+
+      if (Param.F.Kind = pkFloat) then
+      begin
+        {$ifdef CPUX86}
+        if (Param.F.FloatType = ftExtended{ftSingle, ftDouble}) then
+        begin
+          Ptr := @PParamBlock(nil).OutFPU;
+        end else
+        begin
+          Ptr := @PParamBlock(nil).OutInt64{ftComp, ftCurr};
+        end;
         {$endif}
-      );
+
+        {$ifdef CPUX64}
+        if (not (Param.F.FloatType in [ftComp, ftCurr])) then
+        begin
+          Ptr := @PParamBlock(nil).OutXMM0;
+
+          {$ifNdef MSWINDOWS}
+          if (Param.F.FloatType = ftExtended) then
+          begin
+            Ptr := @PParamBlock(nil).OutFPU;
+          end;
+          {$endif}
+        end;
+        {$endif}
+
+        {$if (Defined(CPUARM32) and (not Defined(ARM_NO_VFP_USE))) or Defined(CPUARM64)}
+         if {$ifdef CPUARM32}(Invokable.CallConv = ccReg) and {$endif}
+           (Param.F.FloatType in [ftSingle, ftDouble, ftExtended]) then
+         begin
+           Ptr := @PParamBlock(nil).{$ifdef CPUARM32}OutD{$else .CPUARM64}OutQ{$endif};
+         end;
+         {$ifend}
+      end;
+
+      {$ifdef CPUARM64}
+      if (Param.F.Kind = pkRecord) and (Param.MetaType.HFA) then
+      begin
+        Param.IsARMPartial := True;
+        Ptr := @PParamBlock(nil).OutHFA;
+
+        if (Param.MetaType.HFAElementType = ftSingle) then
+        begin
+          Invokable.ResultKind := rkHFASingle;
+        end else
+        begin
+          Invokable.ResultKind := rkHFADouble;
+        end;
+      end;
+      {$endif}
+
+      Param.Value := NativeInt(Ptr);
+      Param.DataValue := Param.Value;
+      Exit;
+    end;
+
+    Param.IsReference := True;
+    {$ifdef CPUARM64}
+    if (ResultMode = rmRefFirst) then
+    begin
+      Param.Value := NativeInt(@PParamBlock(nil).RegX8);
+    end else
+    {$endif}
+    begin
+      PutPtr(Param.Value);
+    end;
+
+    if (Param.F.Kind in [pkObject, pkWeakObject, pkInterface,
+      pkRecord, pkArray, pkSet, pkClosure]) then
+    begin
+      // user data
+      Invokable.ResultKind := rkUserData;
     end else
     begin
-      PutArg;
+      // buffer
+      Param.PointerDepth := 1;
+      Invokable.ResultKind := rkBuffer;
+      PutBuffer(Param.DataValue, Param.Size);
+
+      // is managed
+      case Param.F.Kind of
+        pkString:
+        begin
+          if (Param.F.StringType in [stAnsiString, stWideString, stUnicodeString]) then
+            Invokable.ResultKind := rkManagedBuffer;
+        end;
+        pkVariant: Invokable.ResultKind := rkManagedBuffer;
+      end;
     end;
-    Param.DataValue := Param.Value;
   end;
 
   procedure PutSelf;
   begin
-    Param := @Invokable.Params[0];
-    PutArg;
+    PutPtr(Invokable.Instance);
   end;
 
   procedure ApplyOffset(var Value: Integer); overload;
@@ -9020,10 +9243,9 @@ var
   end;
 begin
   // flags
-  IsStatic := (Invokable.MethodKind in [mkProcedure, mkFunction, mkSafeProcedure, mkSafeFunction
-    {$ifdef EXTENDEDRTTI}, mkClassConstructor, mkClassDestructor{$endif}]);
-  IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}False{$endif};
-  IsConstructor := (Invokable.MethodKind = {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.mkConstructor);
+  IsStatic := (Invokable.MethodKind = mkStatic);
+  IsConstructor := (Invokable.MethodKind = mkConstructor);
+  IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}True{$endif};
 
   // result mode
   ResultMode := rmNone;
@@ -9069,6 +9291,10 @@ begin
   // registers
   RegGen := 0;
   RegExt := 0;
+  {$ifdef CPUX86}
+  if (Invokable.CallConv <> ccReg) then
+    RegGen := REGGEN_COUNT;
+  {$endif}
   {$ifdef CPUARM32}
   if (Invokable.CallConv <> ccReg) then
     RegExt := REGEXT_COUNT;
@@ -9080,7 +9306,7 @@ begin
   if (SelfMode = smSecond) then PutSelf;
 
   // constructor flag
-  if (Invokable.MethodKind = {$ifdef UNITSCOPENAMES}System.{$endif}TypInfo.mkConstructor) then
+  if (IsConstructor) then
   begin
     TempParam.InternalSetTypeInfo(TypeInfo(Boolean), nil, False);
     Param := @TempParam;
@@ -9090,7 +9316,7 @@ begin
 
   // arguments
   Param := @Invokable.Params[Ord(SelfMode = smLast)];
-  for i := Ord(SelfMode <> smNone) to Invokable.ParamCount - 1 do
+  for i := 0 to Invokable.ParamCount - 1 do
   begin
     PutArg;
 
@@ -9106,6 +9332,7 @@ begin
   // last result/self
   if (ResultMode = rmRefLast) then PutResult;
   if (SelfMode = smLast) then PutSelf;
+  if (ResultMode = rmRegister) then PutResult;
 
   // total buffer (stack) size
   // calculate real offsets
@@ -9128,6 +9355,8 @@ begin
     Param := @Invokable.Result;
     ApplyOffset;
   end;
+  ApplyOffset(Invokable.Instance);
+  ApplyOffset(Invokable.ConstructorFlag);
 end;
 
 function TLuaInvokableBuilder.InternalBuildDone: __luapointer;
@@ -9137,11 +9366,17 @@ var
   Invokable: PLuaInvokable;
   Param: ^TLuaClosureParam;
 
+  function IsParamHFAManaged: Boolean;
+  begin
+    Result := (Param.F.Kind in [pkRecord, pkArray]) and
+      (Param.F.MetaType.HFA) and (Param.F.MetaType.Managed);
+  end;
+
   function IsParamFinal: Boolean;
   begin
     Result := False;
 
-    if (Param.IsInsurance) then
+    if (Param.IsInsurance) or (IsParamHFAManaged) then
     begin
       Result := True;
       Exit;
@@ -9171,7 +9406,7 @@ begin
   // align advanced buffer
   if (FAdvanced.Size and (SizeOf(Pointer) - 1) <> 0) then
   begin
-    FAdvanced.Alloc(SizeOf(Pointer) - (FAdvanced.Size and (SizeOf(Pointer))));
+    FAdvanced.Alloc(SizeOf(Pointer) - (FAdvanced.Size and (SizeOf(Pointer) - 1)));
   end;
 
   // initial params
@@ -9190,6 +9425,12 @@ begin
 
     Inc(Param);
   end;
+  Param := @Invokable.Result;
+  if (Invokable.ResultKind in [rkBuffer, rkManagedBuffer]) or (IsParamHFAManaged) then
+  begin
+    PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+    Inc(Invokable.InitialCount);
+  end;
 
   // final params
   Param := @Invokable.Params[0];
@@ -9205,6 +9446,12 @@ begin
       Inc(Param);
 
     Inc(Param);
+  end;
+  Param := @Invokable.Result;
+  if (Invokable.ResultKind = rkManagedBuffer) or (IsParamHFAManaged) then
+  begin
+    PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
+    Inc(Invokable.FinalCount);
   end;
 
   // concatenate buffers, unpack internal names
@@ -9250,71 +9497,86 @@ begin
   end;
 end;
 
-function TLuaInvokableBuilder.InternalAddMethodParams(const AMethod: PTypeInfo): Boolean;
+function TLuaInvokableBuilder.BuildMethod(const AMethod: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+var
+  CallConv: TCallConv;
+  AResult: PTypeInfo;
 begin
-  Clear;
-  Result := False;
-  // ToDo
-end;
+  Result := LUA_POINTER_INVALID;
 
-function TLuaInvokableBuilder.InternalAddMethodedureParams(const AProcedure: PTypeInfo): Boolean;
-begin
-  Clear;
-  Result := False;
   // ToDo
-end;
-
-function TLuaInvokableBuilder.InternalAddReferenceParams(const AReference: PTypeInfo): Boolean;
-begin
-  Clear;
-  Result := False;
-  // ToDo
-end;
-
-function TLuaInvokableBuilder.BuildMethod(const AMethod: PTypeInfo): __luapointer;
-begin
-  if (InternalAddMethodParams(AMethod)) then
+  if (MethodKind = TLuaMethodKind($ff)) then
   begin
-    Result := InternalBuildDone;
-  end else
-  begin
-    Result := LUA_POINTER_INVALID;
   end;
+  CallConv := High(TCallConv);
+  AResult := Pointer(High(NativeUInt));
+
+  if (not Assigned(NewInvokable(MethodKind, CallConv, AResult))) then
+    Exit;
+
+  // ToDo
+
+  Result := InternalBuildDone;
 end;
 
 {$ifdef EXTENDEDRTTI}
-function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo): __luapointer;
+function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+var
+  CallConv: TCallConv;
+  AResult: PTypeInfo;
 begin
-  if (InternalAddMethodedureParams(AProcedure)) then
+  Result := LUA_POINTER_INVALID;
+
+  // ToDo
+  if (MethodKind = TLuaMethodKind($ff)) then
   begin
-    Result := InternalBuildDone;
-  end else
-  begin
-    Result := LUA_POINTER_INVALID;
   end;
+  CallConv := High(TCallConv);
+  AResult := Pointer(High(NativeUInt));
+
+  if (not Assigned(NewInvokable(MethodKind, CallConv, AResult))) then
+    Exit;
+
+  // ToDo
+
+  Result := InternalBuildDone;
 end;
 {$endif}
 
-function TLuaInvokableBuilder.BuildReference(const AReference: PTypeInfo): __luapointer;
+function TLuaInvokableBuilder.BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+var
+  CallConv: TCallConv;
+  AResult: PTypeInfo;
 begin
-  if (InternalAddReferenceParams(AReference)) then
+  Result := LUA_POINTER_INVALID;
+
+  // ToDo
+  if (MethodKind = TLuaMethodKind($ff)) then
   begin
-    Result := InternalBuildDone;
-  end else
-  begin
-    Result := LUA_POINTER_INVALID;
   end;
+  CallConv := High(TCallConv);
+  AResult := Pointer(High(NativeUInt));
+
+  if (not Assigned(NewInvokable(MethodKind, CallConv, AResult))) then
+    Exit;
+
+  // ToDo
+
+  Result := InternalBuildDone;
 end;
 
-function TLuaInvokableBuilder.BuildCustom(const MethodKind: TMethodKind; const Params: array of TLuaProcParam;
-  const AResult: Pointer; const CallConv: TCallConv): __luapointer;
+function TLuaInvokableBuilder.BuildCustom(const Params: array of TLuaProcParam;
+  const AResult: Pointer; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
 var
   i: Integer;
 begin
-  NewInvokable(MethodKind, CallConv, AResult);
+  Result := LUA_POINTER_INVALID;
+  if (not Assigned(NewInvokable(MethodKind, CallConv, AResult))) then
+    Exit;
 
   for i := Low(Params) to High(Params) do
-    InternalAddParam(Params[i]);
+  if (not Assigned(InternalAddParam(Params[i]))) then
+    Exit;
 
   Result := InternalBuildDone;
 end;
@@ -10247,7 +10509,7 @@ begin
   for i := 0 to 127 do
   begin
     FUnicodeTable[i] := i;
-    FUTF8Table[i] := i + $01000;
+    FUTF8Table[i] := i + $01000000;
   end;
   SetCodePage(0);
 
@@ -11196,7 +11458,7 @@ begin
 
   repeat
     if (Count = 0) then Break;
-    if (Count <= SizeOf(Cardinal)) then
+    if (Count >= SizeOf(Cardinal)) then
     begin
       X := PCardinal(Source)^;
       if (X and $80 = 0) then
@@ -15427,7 +15689,7 @@ begin
   if (Closure.Header.InvokableMode) then
   begin
     Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(TLua(Closure.Header.Lua).FMemoryHeap).Unpack{$endif}(Closure.Invokable);
-    ArgsCount := Invokable.ParamCount - Byte(Closure.Header.InstanceKind <> ikNone);
+    ArgsCount := Invokable.ParamCount;
     if (ClosureArgsCount <> ArgsCount) then
       goto invalid_args_count;
 
@@ -16405,67 +16667,32 @@ begin
   end;
 end;
 
-const
-  METHOD_KINDS: array[TLuaMethodKind] of TMethodKind = (
-    {mkStatic} mkProcedure{/mkFunction},
-    {mkObject} mkProcedure{/mkFunction},
-    {mkClass} mkClassProcedure{/mkClassFunction},
-    {mkConstructor} System.TypInfo.mkConstructor,
-    {mkDestructor} System.TypInfo.mkDestructor
-  );
-
 function TLua.InternalBuildInvokable(const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer;
 var
-  Done: Boolean;
   Builder: ^TLuaInvokableBuilder;
-  Invokable: ^TLuaInvokable;
 begin
+  Result := LUA_POINTER_INVALID;
   Builder := @TLuaInvokableBuilder(FInvokableBuilder);
 
-  // add parameters
-  Done := False;
   if (Assigned(TypeInfo)) then
   case TypeInfo.Kind of
-    tkProcedure: Done := Builder.InternalAddMethodedureParams(TypeInfo);
-       tkMethod: Done := Builder.InternalAddMethodParams(TypeInfo);
-    tkInterface: Done := (IsReferenceTypeInfo(TypeInfo)) and
-                   (Builder.InternalAddReferenceParams(TypeInfo));
+    tkProcedure: Result := Builder.BuildProcedure(TypeInfo, MethodKind);
+       tkMethod: Result := Builder.BuildMethod(TypeInfo, MethodKind);
+    tkInterface:
+    begin
+      if (IsReferenceTypeInfo(TypeInfo)) then
+        Result := Builder.BuildReference(TypeInfo, MethodKind);
+    end;
   end;
-  if (not Done) then
-  begin
-    Result := LUA_POINTER_INVALID;
-    Exit;
-  end;
-
-  // system method kind correction, todo check
-  Invokable := Pointer(Builder.FBuffer.FBytes);
-  Invokable.MethodKind := METHOD_KINDS[MethodKind];
-  if (Invokable.Result.Kind <> pkUnknown) and (Invokable.MethodKind in [mkProcedure, mkClassProcedure]) then
-    Inc(Invokable.MethodKind);
-
-  Result := Builder.InternalBuildDone;
 end;
 
 function TLua.InternalBuildInvokable(const Params: array of TLuaProcParam; const AResult: PTypeInfo;
   const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
 var
-  i: Integer;
-  LMethodKind: TMethodKind;
   Builder: ^TLuaInvokableBuilder;
 begin
   Builder := @TLuaInvokableBuilder(FInvokableBuilder);
-
-  // system method kind, todo check
-  LMethodKind := METHOD_KINDS[MethodKind];
-  if (Assigned(AResult)) and (LMethodKind in [mkProcedure, mkClassProcedure]) then
-    Inc(LMethodKind);
-
-  // add parameters
-  Builder.NewInvokable(LMethodKind, CallConv, AResult);
-  for i := Low(Params) to High(Params) do
-    Builder.InternalAddParam(Params[i]);
-
-  Result := Builder.InternalBuildDone;
+  Result := Builder.BuildCustom(Params, AResult, MethodKind, CallConv);
 end;
 
 function TLua.InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
@@ -20584,9 +20811,9 @@ end;
 
 function TLua.InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
 label
-  skip_instance_param;
+  fill_instance, invalid_argument;
 var
-  i, Count: Integer;
+  i: Integer;
   Closure: PLuaClosure;
   Invokable: PLuaInvokable;
   InvokableData: NativeInt;
@@ -20598,51 +20825,82 @@ begin
   Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Closure.Invokable);
   InvokableData := NativeInt(AInvokableData);
 
-  Param := @Invokable.Params[0];
   case Closure.Header.Kind of
-    ckStatic:
-    begin
-      Count := Invokable.ParamCount;
-    end;
+    ckStatic: ;
     ckConstructor:
     begin
-      PBoolean(InvokableData + Param.DataValue)^ := (Closure.Header.InstanceKind <> ikClass);
-      goto skip_instance_param;
+      PBoolean(InvokableData + Invokable.ConstructorFlag)^ := (Closure.Header.InstanceKind <> ikClass);
+      goto fill_instance;
     end;
   else
-  skip_instance_param:
-    Count := Invokable.ParamCount - 1;
-    Inc(Param);
+  fill_instance:
+    PPointer(InvokableData + Invokable.Instance)^ := Closure.Instance;
   end;
-       {.$message 'здесь'}
-  for i := 1 to Count do
+
+  Param := @Invokable.Params[0];
+  for i := 1 to Invokable.ParamCount do
   begin
     LuaType := lua_type(Handle, i);
-
+       {$message 'здесь'}
     {if () then
     begin
 
     end else }
     begin
       Ptr := Pointer(InvokableData + Param.DataValue);
-      Param.SetValue(Ptr^, Self, i, LuaType);
+      if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
+      begin
+      invalid_argument:
+        unpack_lua_string(FStringBuffer.Lua, Closure.Header.Name);
+        unpack_lua_string(FStringBuffer.LuaReserved, Param.Name^);
+        Self.Error('Invalid %s.%s argument value: "%s" (%s)',
+          [FStringBuffer.Lua, FStringBuffer.LuaReserved, FStringBuffer.Unicode, FStringBuffer.Default]);
+      end;
     end;
 
     Inc(Param);
   end;
 
   // function/procedure invoke
-  if (Invokable.Result.DataValue <> VALUE_NOT_DEFINED) then
+  if (Invokable.ResultKind <> rkNone) then
   begin
+    // ToDo optional prepare result user data
+    if (Invokable.ResultKind = rkUserData) then
+    begin
+      case Invokable.Result.F.Kind of
+        pkInterface:
+        begin
 
-    Invokable.Invoke(Closure.Address, AInvokableData);
-       {.$message 'здесь'}
-    Result := 1;
+        end;
+        pkRecord:
+        begin
+
+        end;
+        pkArray:
+        begin
+
+        end;
+        pkSet:
+        begin
+
+        end;
+      end;
+    end;
+
+    // invoke
+    Invokable.Invoke(Closure.Address, Pointer(InvokableData));
+
+    // optional get value
+    if (Invokable.ResultKind <> rkUserData) then
+      Invokable.Result.GetValue(Pointer(InvokableData + Invokable.Result.DataValue)^, Self, 0);
   end else
   begin
-    Invokable.Invoke(Closure.Address, AInvokableData);
-    Result := 0;
+    // procedure
+    Invokable.Invoke(Closure.Address, Pointer(InvokableData));
   end;
+
+  // done
+  Result := Byte(Invokable.ResultKind <> rkNone);
 end;
 
             (*

@@ -121,7 +121,6 @@ unit CrystalLUA;
 interface
   uses {$ifdef UNITSCOPENAMES}System.Types, System.TypInfo, System.RTLConsts{$else}Types, TypInfo, RTLConsts{$endif},
        {$ifdef UNICODE}{$ifdef UNITSCOPENAMES}System.Character{$else}Character{$endif},{$endif}
-       {$ifdef EXTENDEDRTTI}{$ifdef UNITSCOPENAMES}System.Rtti{$else}Rtti{$endif},{$endif}
        {$ifdef MSWINDOWS}{$ifdef UNITSCOPENAMES}Winapi.Windows{$else}Windows{$endif},{$endif}
        {$ifdef POSIX}Posix.Base, Posix.String_, Posix.Unistd, Posix.SysTypes, Posix.PThread,{$endif}
        {$ifdef KOL}
@@ -157,6 +156,9 @@ type
   {$ifend}
   TBytes = array of Byte;
   PBytes = ^TBytes;
+  {$ifNdef EXTENDEDRTTI}
+  TCallConv = (ccReg, ccCdecl, ccPascal, ccStdCall, ccSafeCall);
+  {$endif}  
 
   // exception class
   ELua = class(Exception)
@@ -2508,6 +2510,102 @@ type
     Count: Cardinal;
     Fields: array [0..0] of TFieldInfo;
   end;
+
+  PClassMethodEntry = ^TClassMethodEntry;
+  TClassMethodEntry = packed record
+    Size: Word;
+    Address: Pointer;
+    Name: ShortString;
+  end;
+
+{$ifdef EXTENDEDRTTI}
+  TSpecialMethod = (smConstructor, smDestructor, smOperatorOverload);
+  TDispatchKind = (dkStatic, dkVtable, dkDynamic, dkMessage, dkInterface);
+  TMemberVisibility = (mvPrivate, mvProtected, mvPublic, mvPublished);
+
+  PExtendedClassMethodEntry = ^TExtendedClassMethodEntry;
+  TExtendedClassMethodEntry = packed record
+    Entry: PClassMethodEntry;
+    Flags: Word;
+    VirtualIndex: Smallint;
+
+    function IsAbstract: Boolean;
+    function IsSpecial: Boolean;
+    function IsClassMethod: Boolean;
+    function IsHasSelf: Boolean;
+    function DispatchKind: TDispatchKind;
+    function MemberVisibility: TMemberVisibility;
+    function SpecialMethod: TSpecialMethod;
+  end;
+
+function TExtendedClassMethodEntry.IsAbstract: Boolean;
+begin
+  Result := (Flags and (1 shl 7) <> 0);
+end;
+
+function TExtendedClassMethodEntry.IsSpecial: Boolean;
+begin
+  Result := (Flags and 4 <> 0);
+end;
+
+function TExtendedClassMethodEntry.IsClassMethod: Boolean;
+begin
+  if (IsSpecial) then
+  begin
+    Result := (SpecialMethod = smConstructor);
+  end else
+  begin
+    Result := (Flags and (1 shl 0) <> 0);
+  end;
+end;
+
+function TExtendedClassMethodEntry.IsHasSelf: Boolean;
+begin
+  if (IsSpecial) then
+  begin
+    Result := (SpecialMethod in [smConstructor, smDestructor]);
+  end else
+  begin
+    Result := (Flags and (1 shl 1) <> 0);
+  end;
+end;
+
+function TExtendedClassMethodEntry.DispatchKind: TDispatchKind;
+begin
+  Result := TDispatchKind((Flags shr 3) and 3);
+end;
+
+function TExtendedClassMethodEntry.MemberVisibility: TMemberVisibility;
+begin
+  Result := TMemberVisibility((Flags shr 5) and 3);
+end;
+
+function TExtendedClassMethodEntry.SpecialMethod: TSpecialMethod;
+begin
+  Result := TSpecialMethod((Flags shr 0) and 3);
+end;
+{$else .OLD_RTTI}
+type
+  PIntfMethodTable = ^TIntfMethodTable;
+  TIntfMethodTable = packed record
+    Count: Word; // methods in this interface
+    RttiCount: Word; // =Count, or $FFFF if no further data
+   {Entry: array[1..Count] of TIntfMethodEntry;
+    AttrData: TAttrData;}
+  end;
+
+  PIntfMethodEntry = ^TIntfMethodEntry;
+  TIntfMethodEntry = packed record
+    Name: ShortString;
+  { Kind: Byte; // 0=proc or 1=func
+    CC: TCallConv;
+    ParamCount: Byte;
+    Params: array[1..ParamCount] of TIntfMethodParam;
+    ResultTypeName: string; // only if func
+    ResultType: PPTypeInfo; // only if Len(Name) > 0
+    AttrData: TAttrData;}
+  end;  
+{$endif}
 
 function GetTail(var Name): Pointer; {$ifdef INLINESUPPORTSIMPLE}inline;{$endif}
 begin
@@ -8485,14 +8583,13 @@ type
     procedure Clear;
     function BuildMethod(const AMethod: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$ifdef EXTENDEDRTTI}
+    function BuildProcedureSignature(const ASignature: PProcedureSignature; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     function BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
-    {$endif}
-    // rtti?
     function BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildExtendedClassMethod(const AMethodEntry: PExtendedClassMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    {$endif}
     function BuildInterfaceMethod(const AMethodEntry: PIntfMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
-
-    // ToDo class/record method?
-
+    function BuildClassMethod(const AMethodEntry: PClassMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff); const SkipSelf: Boolean = True): __luapointer;
     function BuildCustom(const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
       const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
   end;
@@ -9615,36 +9712,36 @@ begin
 end;
 
 {$ifdef EXTENDEDRTTI}
-function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+function TLuaInvokableBuilder.BuildProcedureSignature(const ASignature: PProcedureSignature;
+  MethodKind: TLuaMethodKind): __luapointer;
 var
   i: Integer;
   CallConv: TCallConv;
-  ProcSig: PProcedureSignature;
   ResultType: PTypeInfo;
   Param: PProcedureParam;
   TypeInfo: PTypeInfo;
   ParamFlags: TParamFlags;
 begin
   Result := LUA_POINTER_INVALID;
-  ProcSig := GetTypeData(AProcedure).ProcSig;
-  if (not Assigned(ProcSig) or (ProcSig.Flags = 255)) then
+  if (ASignature.Flags = 255) then
   begin
     // error todo
     Exit;
   end;
 
+  // method information
   if (MethodKind = TLuaMethodKind($ff)) then
   begin
     MethodKind := mkStatic;
   end;
-  CallConv := ProcSig.CC;
-  ResultType := GetTypeInfo(ProcSig.ResultType);
+  CallConv := ASignature.CC;
+  ResultType := GetTypeInfo(ASignature.ResultType);
   if (not Assigned(NewInvokable(MethodKind, CallConv, ResultType))) then
     Exit;
 
   // parameters
-  Param := Pointer(NativeUInt(ProcSig) + SizeOf(TProcedureSignature));
-  for i := 0 to Integer(ProcSig.ParamCount) - 1 do
+  Param := Pointer(NativeUInt(ASignature) + SizeOf(TProcedureSignature));
+  for i := 0 to Integer(ASignature.ParamCount) - 1 do
   begin
     TypeInfo := GetTypeInfo(Param.ParamType);
     ParamFlags := TParamFlags(Param.Flags);
@@ -9657,7 +9754,11 @@ begin
   // done
   Result := InternalBuildDone;
 end;
-{$endif}
+
+function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+begin
+  Result := BuildProcedureSignature(GetTypeData(AProcedure).ProcSig, MethodKind);
+end;
 
 function TLuaInvokableBuilder.BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
 var
@@ -9672,8 +9773,39 @@ begin
   Result := BuildInterfaceMethod(MethodEntry, MethodKind);
 end;
 
+function TLuaInvokableBuilder.BuildExtendedClassMethod(const AMethodEntry: PExtendedClassMethodEntry; MethodKind: TLuaMethodKind): __luapointer;
+begin
+  if (MethodKind = TLuaMethodKind($ff)) then
+  begin
+    if (AMethodEntry.IsSpecial) then
+    begin
+      case AMethodEntry.SpecialMethod of
+       smConstructor: MethodKind := mkConstructor;
+        smDestructor: MethodKind := mkDestructor;
+      else
+        // smOperatorOverload
+        MethodKind := mkOperator;
+      end;
+    end else
+    if (AMethodEntry.DispatchKind = dkStatic) then
+    begin
+      MethodKind := mkStatic;
+    end else
+    if (AMethodEntry.IsClassMethod) then
+    begin
+      MethodKind := mkClass;
+    end else
+    begin
+      MethodKind := mkInstance;
+    end;
+  end;
+
+  Result := BuildClassMethod(AMethodEntry.Entry, MethodKind, AMethodEntry.IsHasSelf);
+end;
+{$endif}
+
 function TLuaInvokableBuilder.BuildInterfaceMethod(const AMethodEntry: PIntfMethodEntry;
-  MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+  MethodKind: TLuaMethodKind): __luapointer;
 type
   TMethodInfo = record
     IsFunc: Boolean;
@@ -9751,6 +9883,68 @@ begin
 
     if (InternalAddParam(Pointer(@Param.Name), Param.TypeInfo, 0, Param.Flags) = nil) then
       Exit;
+  end;
+
+  // done
+  Result := InternalBuildDone;
+end;
+
+function TLuaInvokableBuilder.BuildClassMethod(const AMethodEntry: PClassMethodEntry;
+  MethodKind: TLuaMethodKind; const SkipSelf: Boolean): __luapointer;
+type
+  PClassMethodParam = ^TClassMethodParam;
+  TClassMethodParam = packed record
+    Flags: TParamFlags;
+    ParamType: PPTypeInfo;
+    Location: Word;
+    Name: ShortString;
+  end;
+var
+  Ptr: PByte;
+  Count, i: Integer;
+  CallConv: TCallConv;
+  ResultType: PTypeInfo;
+  Param: PClassMethodParam;
+begin
+  Result := LUA_POINTER_INVALID;
+  Ptr := GetTail(AMethodEntry.Name);
+  if (Ptr = Pointer(NativeUInt(AMethodEntry) + AMethodEntry.Size)) then
+  begin
+    // todo?
+    Exit;
+  end;
+
+  // method information
+  if (MethodKind = TLuaMethodKind($ff)) then
+  begin
+    MethodKind := mkInstance;
+  end;
+  Inc(Ptr); // Version
+  CallConv := TCallConv(Ptr^);
+  Inc(Ptr);
+  ResultType := GetTypeInfo(PPointer(Ptr)^);
+  Inc(Ptr, SizeOf(Pointer));
+  if (not Assigned(NewInvokable(MethodKind, CallConv, ResultType))) then
+    Exit;
+
+  // parameters
+  Inc(Ptr, SizeOf(Word)); // ParOff
+  Count := Ptr^;
+  Inc(Ptr);
+  if (SkipSelf) then
+  begin
+    Dec(Count);
+    Ptr := GetTail(PClassMethodParam(Ptr).Name);
+    Ptr := SkipAttributes(Ptr);
+  end;
+  for i := 1 to Count do
+  begin
+    Param := Pointer(Ptr);
+    if (InternalAddParam(Pointer(@Param.Name), GetTypeInfo(Param.ParamType), 0, Param.Flags) = nil) then
+      Exit;
+
+    Ptr := GetTail(Param.Name);
+    Ptr := SkipAttributes(Ptr);
   end;
 
   // done
@@ -16868,13 +17062,21 @@ begin
 
   if (Assigned(TypeInfo)) then
   case TypeInfo.Kind of
-    tkProcedure: Result := Builder.BuildProcedure(TypeInfo, MethodKind);
-       tkMethod: Result := Builder.BuildMethod(TypeInfo, MethodKind);
+    tkMethod:
+    begin
+      Result := Builder.BuildMethod(TypeInfo, MethodKind);
+    end;  
+    {$ifdef EXTENDEDRTTI}
+    tkProcedure:
+    begin
+      Result := Builder.BuildProcedure(TypeInfo, MethodKind);
+    end;
     tkInterface:
     begin
       if (IsReferenceTypeInfo(TypeInfo)) then
         Result := Builder.BuildReference(TypeInfo, MethodKind);
     end;
+    {$endif}
   end;
 end;
 

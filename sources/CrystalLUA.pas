@@ -587,6 +587,8 @@ type
   // (internal) information needed to use interfaces between native and script side
   PLuaInterfaceInfo = ^TLuaInterfaceInfo;
   TLuaInterfaceInfo = object(TLuaMetaType)
+    Parent: __luapointer;
+    Count: Integer;
     // ToDo?
   end;
 
@@ -4390,7 +4392,7 @@ begin
   if (Length <> 0) then
   begin
     {$ifdef UNICODE}
-      Size := Length + 1;
+      Size := Length + 3;
       if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
       {$ifdef LUA_UNICODE}
         Buffer.Size := FLua.AnsiFromUtf8(Pointer(Buffer.FBytes), 0, Pointer(@RttiName[1]), Length);
@@ -8440,7 +8442,7 @@ const
 
   procedure InvokeError(const ReturnAddress: Pointer); far;
   begin
-    raise EInvocationError.CreateRes(Pointer(@SParameterCountExceeded)) at ReturnAddress;
+    raise Exception.CreateRes(Pointer(@SParameterCountExceeded)) at ReturnAddress;
   end;
 asm
       // .PARAMS 62 // There's actually room for 64, assembler is saving locals for Self, CodeAddress & ParamBlock
@@ -8627,7 +8629,7 @@ type
     function BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     function BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$endif}
-    function BuildInterfaceMethod(const AMethodEntry: PIntfMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildIntfMethod(const AMethodEntry: PIntfMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     function BuildClassMethod(const AMethodEntry: PClassMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff); const SkipSelf: Boolean = True): __luapointer;
     function BuildCustom(const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
       const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
@@ -9812,11 +9814,11 @@ begin
   Table := GetTail(TypeData.IntfUnit);
   MethodEntry := Pointer(NativeUInt(Table) + SizeOf(TIntfMethodTable));
 
-  Result := BuildInterfaceMethod(MethodEntry, MethodKind);
+  Result := BuildIntfMethod(MethodEntry, MethodKind);
 end;
 {$endif}
 
-function TLuaInvokableBuilder.BuildInterfaceMethod(const AMethodEntry: PIntfMethodEntry;
+function TLuaInvokableBuilder.BuildIntfMethod(const AMethodEntry: PIntfMethodEntry;
   MethodKind: TLuaMethodKind): __luapointer;
 type
   TMethodInfo = record
@@ -10870,7 +10872,6 @@ begin
 end;  
                 *)
 
-
 constructor TLua.Create();
 const
   STANDARD_NAMES: array[STD_TYPE..STD_VALUE] of Pointer = (
@@ -11013,15 +11014,15 @@ begin
   for i := Low(FScriptStack) to High(FScriptStack) do
     FScriptStack[i].Finalize;
 
-  // finalize names anddynamic arrays
+  // finalize names and dynamic arrays
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
   begin
     MetaType := TLuaMemoryHeap(FMemoryHeap).Unpack(TLuaDictionary(FMetaTypes).FItems[i].Value);
     MetaType.FName := '';
     case MetaType.Kind of
-      mtRecord, mtClass:
+      mtClass, mtRecord, mtInterface:
       begin
-        TLuaDictionary(PLuaRecordInfo(MetaType).FNameSpace).Clear;
+        TLuaDictionary(MetaType.FNameSpace).Clear;
       end;
     end;
   end;
@@ -11073,7 +11074,7 @@ begin
     for i := 1 to (128 div SizeOf(Integer)) do
     begin
       PInteger(Dest)^ := X;
-      Inc(X, $01010101);
+      Inc(X, $04040404);
       Inc(NativeInt(Dest), SizeOf(Integer));
     end;
 
@@ -11815,7 +11816,7 @@ type
 
 function InternalAnsiFromUtf8(const ConvertDesc: TUnicodeConvertDesc): Integer;
 label
-  ascii, ascii_write, unicode_write, non_ascii, unknown;
+  ascii_write, unicode_write, non_ascii, unknown;
 type
   TUnicodeTable = array[Byte] of Word;
   PUnicodeTable = ^TUnicodeTable;
@@ -11861,7 +11862,6 @@ begin
       X := PCardinal(Source)^;
       if (X and $80 = 0) then
       begin
-      ascii:
         if (BufferDest = @Buffer[0]) then
         begin
         ascii_write:
@@ -11910,13 +11910,17 @@ begin
     end else
     begin
       X := PByte(Source)^;
-      Inc(X, $ffffff00);
-      if (X and $80 = 0) then goto ascii;
     non_ascii:
       U := UTF8CHAR_SIZE[Byte(X)];
       if (U <= Count) then
       begin
         case U of
+          1:
+          begin
+            X := PByte(Source)^;
+            Dec(Count);
+            Inc(Source);
+          end;
           2:
           begin
             X := PWord(Source)^;
@@ -12043,7 +12047,7 @@ begin
 
   repeat
     if (Count = 0) then Break;
-    if (Count <= SizeOf(Cardinal)) then
+    if (Count >= SizeOf(Cardinal)) then
     begin
       X := PCardinal(Source)^;
       if (X and $80 = 0) then
@@ -12156,7 +12160,7 @@ var
   Count: NativeInt;
   Chars: PLuaChar;
   {$if Defined(LUA_UNICODE) or Defined(NEXTGEN) or Defined(UNICODE)}
-  Buffer: array[Byte] of LuaChar;
+  Buffer: array[Low(Byte)..High(Byte) + 3] of LuaChar;
   {$ifend}
 begin
   Count := PByte(@RttiName)^;
@@ -12244,7 +12248,7 @@ begin
       lua_pushlstring(Handle, Pointer(S), Count);
     end else
     begin
-      Size := Count + 1;
+      Size := Count + 3;
       if (Buffer.Capacity < Size) then
       begin
         Buffer.Size := 0;
@@ -12282,7 +12286,7 @@ begin
 
   {$ifdef LUA_ANSI}
     Buffer := @TLuaBuffer(FInternalBuffer);
-    Size := Count + 1;
+    Size := Count + 3;
     if (Buffer.Capacity < Size) then
     begin
       Buffer.Size := 0;
@@ -12419,7 +12423,7 @@ begin
       FillShortString(S, Chars, Count, MaxLength);
     {$else .LUA_UNICODE}
       Buffer := @TLuaBuffer(FInternalBuffer);
-      Size := Count + 1;
+      Size := Count + 3;
       if (Buffer.Capacity < Size) then
       begin
         Buffer.Size := 0;
@@ -12453,7 +12457,7 @@ begin
   if (CodePage <> CODEPAGE_UTF8) then
   {$endif}
   begin
-    Size := Count + 1;
+    Size := Count + 3;
     if (Buffer.Capacity < Size) then
     begin
       Buffer.Size := 0;
@@ -17006,8 +17010,114 @@ begin
 end;
 
 function TLua.InternalAddInterface(const TypeInfo: PTypeInfo): PLuaInterfaceInfo;
+var
+  Ptr: PByte;
+  IsFunc: Boolean;
+  Count, i, j: Integer;
+  MetaTypePtr, InvokablePtr, MethodPtr: __luapointer;
+  Parent: PLuaInterfaceInfo;
+  ParentTypeInfo: PTypeInfo;
+  ItemName: LuaString;
+  LuaItemName: __luaname;
+  MethodEntry: PIntfMethodEntry;
+  Item: PLuaDictionaryItem;
+  Method: ^TLuaMethod;
+  VmtOffset: NativeInt;
 begin
-  Result := nil{ToDo};
+  // try to find
+  MetaTypePtr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
+  if (MetaTypePtr <> LUA_POINTER_INVALID) then
+  begin
+    Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MetaTypePtr);
+    Exit;
+  end;
+
+  // parent
+  Parent := nil;
+  ParentTypeInfo := GetTypeInfo(GetTypeData(TypeInfo).IntfParent);
+  if (Assigned(ParentTypeInfo)) then
+    Parent := InternalAddInterface(ParentTypeInfo);
+
+  // name, check existing
+  unpack_lua_string(ItemName, PShortString(@TypeInfo.Name)^);
+  LuaItemName := TLuaNames(FNames).Add(ItemName);
+  if (TLuaDictionary(FMetaTypes).Find(LuaItemName) <> nil) then
+  begin
+    Result := Parent;
+    Exit;
+  end;
+
+  // global metatype, inherits name space, base VMT offset
+  Result := Pointer(InternalAddMetaType(mtInterface, ItemName, TypeInfo, SizeOf(Pointer)));
+  Result.Parent := LUA_POINTER_INVALID;
+  if (Assigned(Parent)) then
+  begin
+    Result.Count := Parent.Count;
+    Result.Parent := Parent.Ptr;
+    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(Parent.FNameSpace));
+    VmtOffset := Parent.Count * SizeOf(Pointer);
+  end else
+  begin
+    VmtOffset := 0;
+  end;
+
+  // method table
+  Ptr := GetTail(GetTypeData(TypeInfo).IntfUnit);
+  Inc(Result.Count, PWord(Ptr)^);
+  Inc(Ptr, SizeOf(Word));
+  Count := PWord(Ptr)^;
+  Inc(Ptr, SizeOf(Word));
+  if (Count = 0) or (Count = $ffff) then
+    Exit;
+  for i := 1 to Count do
+  begin
+    MethodEntry := Pointer(Ptr);
+    InvokablePtr := TLuaInvokableBuilder(FInvokableBuilder).BuildIntfMethod(MethodEntry);
+    LuaItemName := TLuaNames(FNames).Add(PShortString(@MethodEntry.Name)^);
+    Ptr := GetTail(MethodEntry.Name);
+
+    // InternalAddMethod
+    Item := TLuaDictionary(Result.FNameSpace).InternalFind(LuaItemName, True);
+    if (Item.Value <> LUA_POINTER_INVALID) then
+    begin
+      Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Item.Value);
+      Method.Invokable := InvokablePtr;
+    end else
+    begin
+      MethodPtr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
+      Item.Value := MethodPtr;
+      Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MethodPtr);
+
+      Method.Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
+      Method.MethodKind := mkInstance;
+      Method.InvokableMode := True;
+      Method.Invokable := InvokablePtr;
+      Inc(VmtOffset, SizeOf(Pointer));
+    end;
+
+    // skip method
+    IsFunc := (Ptr^ = 1);
+    Inc(Ptr);
+    Inc(Ptr);
+    j := Ptr^;
+    Inc(Ptr);
+    while (j <> 0) do
+    begin
+      Inc(Ptr);
+      Ptr := GetTail(Ptr^);
+      Ptr := GetTail(Ptr^);
+      Inc(Ptr, SizeOf(Pointer));
+      Ptr := SkipAttributes(Ptr);
+
+      Dec(j);
+    end;
+    if (IsFunc) then
+    begin
+      Ptr := GetTail(Ptr^);
+      Inc(Ptr, SizeOf(Pointer));
+    end;
+    Ptr := SkipAttributes(Ptr);
+  end;
 end;
 
 function TLua.InternalAddArray(const TypeInfo: PTypeInfo): PLuaArrayInfo;
@@ -17389,7 +17499,7 @@ begin
   // done
   Result := nil;
   if (Ptr <> LUA_POINTER_INVALID) then
-    Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(Lua.FMemoryHeap).Unpack{$endif}(Ptr);
+    Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
 end;
 
 function TLua.InternalBuildInvokable(const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer;

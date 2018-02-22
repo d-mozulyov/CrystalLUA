@@ -59,6 +59,7 @@ unit CrystalLUA;
     {$WARN UNSAFE_CODE OFF}
     {$WARN UNSAFE_TYPE OFF}
     {$WARN UNSAFE_CAST OFF}
+    {$WARN SYMBOL_DEPRECATED OFF}
   {$ifend}
   {$if CompilerVersion >= 20}
     {$define INLINESUPPORT}
@@ -774,8 +775,8 @@ type
     procedure stack_lua_string(var S: LuaString; const StackIndex: Integer); {$ifdef INLINESUPPORTSIMPLE}inline;{$endif}
     procedure stack_force_unicode_string(var S: UnicodeString; const StackIndex: Integer; const ExtendedMode: Boolean = True);
 
-    function  push_userdata(const MetaType: PLuaMetaType; const Instance: Pointer; const DcDestroy: Boolean): Pointer{PLuaUserData};
-    function  push_difficult_property(const PropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
+    function  push_userdata(const MetaType: PLuaMetaType; const Instance: Pointer; const RefMode: Boolean): Pointer{PLuaUserData};
+    function  push_complex_property(const PropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
     function  push_luaarg(const LuaArg: TLuaArg): Boolean;
     function  push_variant(const Value: Variant): Boolean;
     function  push_argument(const Value: TVarRec): Boolean;
@@ -787,19 +788,21 @@ type
     FRef: Integer;
     FEmptyRefs: __TLuaStack;
     FMemoryHeap: __TLuaMemoryHeap;
-    FStandardNames: __TLuaDictionary {__luaname, Value};
     FNames: array[1..24{$ifdef LARGEINT}* 2{$endif}] of Byte{TLuaNames};
     FMetaTypes: __TLuaDictionary {Pointer, PMetaType};
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
     FGlobalMetaTable: Integer;
     FFormatWrapper: Integer;
-//    FMethodInfo: PLuaRecordInfo;
 
-    // глобальные процедуры, переменные, калбеки глобальных переменных из Lua
-   (* GlobalNative: TLuaClassInfo; // нативные: методы и перменные
-    GlobalVariables: TLuaGlobalVariableDynArray; // полный список включая Lua-переменные
-  //  property  NameSpaceHash: TLuaHashIndexDynArray read GlobalNative.NameSpace; // Hash по всем глобальным переменным и функциям
-  *)
+    // standard name spaces
+    FStdObjectNameSpace: __TLuaDictionary;
+    FStdRecordNameSpace: __TLuaDictionary;
+    FStdInterfaceNameSpace: __TLuaDictionary;
+    FStdArrayNameSpace: __TLuaDictionary;
+    FStdSetNameSpace: __TLuaDictionary;
+
+    // special meta tables
+    FClosureMetaTable: Integer;
 
     // internal reference table
     function global_alloc_ref: Integer;
@@ -854,22 +857,23 @@ type
     function AllocProperty: __luapointer;
     procedure FreeProperty(const Value: __luapointer);  *)
 
-    function push_newfunction(const Callback: Pointer; const P1, P2: __luapointer; const StoreMode: Boolean): __luafunction;
-    procedure push_function(const Func: __luafunction);
+    function push_newfunction(const Callback: Pointer; const P1, P2: __luapointer; const StoreMode: Boolean = False): __luafunction;
+    //procedure push_function(const Func: __luafunction);
     function function_topointer(const StackIndex: Integer): Pointer;
 
-    procedure push_closure(const Name: __luaname; const Kind: Byte{TLuaClosureKind}; const InstanceKind: Byte{TLuaInstanceKind};
-      const Instance: Pointer; const Address: Pointer; const InvokableMode: Boolean; const InvokableArgsCount: __luapointer);
+    procedure push_closure(const Name: __luaname; const Kind{TLuaClosureKind}, Mode{TLuaClosureMode}: Byte;
+      const Instance: Pointer; const Address: Pointer; const MetaTypeArgsCountInvokable: Integer);
 
     procedure InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1: __luapointer = -1; const P2: __luapointer = -1);
-    procedure InternalUnregisterCallback(const Name: __luaname);
+    //procedure InternalUnregisterCallback(const Name: __luaname);
+    function  InternalNewMetaTable: Integer;
     function  InternalRegisterMetaTable(const MetaType: PLuaMetaType = nil): Integer;
     function  InternalTableToMetaType(const StackIndex: Integer): PLuaMetaType;
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname): Pointer{PLuaGlobalEntity};
     function  InternalAddMetaType(const Kind: TLuaMetaKind; const Name: LuaString; const TypeInfo: Pointer;
       const InstanceSize: Integer; const AdditionalSize: NativeInt = 0): PLuaMetaType;
-    function  InternalNearestClass(const AClass: TClass): PLuaMetaType;
     function  InternalAddClass(const AClass: TClass; const UseRtti: Boolean): PLuaClassInfo;
+    function  InternalGetClassInfo(const AClass: TClass): PLuaClassInfo;
     function  InternalAddRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
     function  InternalAddRecordEx(const Name: LuaString; const TypeInfo: Pointer; const UseRtti: Boolean): PLuaRecordInfo;
     function  InternalAddInterface(const TypeInfo: PTypeInfo): PLuaInterfaceInfo;
@@ -888,41 +892,49 @@ type
       const TypeInfo: Pointer; const IsDefault, IsAutoRegister: Boolean; const Getter, Setter, Flags: NativeUInt;
       const IndexParams: Integer): __luapointer;
   private
-    // script callbacks
-    function push_stdandard(const MetaType: PLuaClassInfo; const StdIndex: Integer; const UserData: Pointer): Boolean;
-    function set_stdandard(const MetaType: PLuaClassInfo; const StdIndex: Integer; const UserData: Pointer): Boolean;
+    // script callbacks helpers
+    function __print: Integer;
+    function __printf: Integer;
+
+    // ?
+    //function __Constructor(const AMetaType: __luapointer; const ModeCreate: Boolean): Integer;
+   // function __Destructor(const AMetaType: __luapointer; const ModeFree: Boolean): Integer;
+    function __GetUserData(const AMetaType: __luapointer; const CheckAlreadyDestroyed: Boolean = True): Pointer;
+    function __InitTableValues(const AUserData: Pointer{PLuaUserData}; const StackIndex: Integer): Integer;
+
+    // specific script callbacks
+    function __len(const AMetaType: __luapointer): Integer;
+    function __tostring(const AMetaType: __luapointer): Integer;
+    function __gc(const AMetaType: __luapointer): Integer;
+    function __call(const AMetaType: __luapointer): Integer;
+    function __operator(const AMetaType: __luapointer; const Kind: Cardinal{Byte}): Integer;
+    function __closuregc: Integer;
+
+    // index/newindex helpers
+    function push_standard(const MetaType: PLuaMetaType; const StdIndex: Cardinal): Boolean;
+    function set_standard(const MetaType: PLuaMetaType; const StdIndex: Cardinal): Boolean;
     function call_prop_getter(const Instance: Pointer; const AProp: Pointer): Pointer;
     procedure call_prop_setter(const Instance: Pointer; const AProp: Pointer; const Value: NativeInt);
 
-                (*
-    function __tostring(): integer;
-    function __inherits_from(): integer;
-    function __assign(): integer;
-    function __initialize_by_table(const userdata: PLuaUserData; const stack_index: integer): integer;
-    function __tmethod_call(const Method: TMethod): integer;
-    function __len(const ClassInfo: TLuaClassInfo): integer;
-    function __operator(const ClassInfo: TLuaClassInfo; const Kind: integer): integer;
-    function __constructor(const ClassInfo: TLuaClassInfo; const __create: boolean): integer;
-    function __destructor(const ClassInfo: TLuaClassInfo; const __free: boolean): integer;
-    function __call(const ClassInfo: TLuaClassInfo): integer;   *)
+    // index/newindex
     function __index(const AMetaType: __luapointer): Integer;
     function __newindex(const AMetaType: __luapointer): Integer;
     function __global_index(const ModifyLow, ModifyHigh: Cardinal): Integer;
     function __global_newindex(const ModifyLow, ModifyHigh: Cardinal): Integer;
-(*    function __array_index(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
-    function __array_newindex(const ClassInfo: TLuaClassInfo; const is_property: boolean): integer;
-    function __array_dynamic_resize(): integer;
-    function __array_include(const mode: integer{constructor, include, concat}): integer;
-    function __set_method(const is_construct: boolean; const method: integer{0..2}): integer;   *)
-    function __print: Integer;
-    function __printf: Integer;
-    function ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
 
- (*   PLuaInvokable
+    // internal closures
+    function __InheritsFrom(const AMetaType: PLuaMetaType; var ArgsCount: Integer): Integer;
+    function __Assign(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __ClassCreate(const AMetaType: PLuaMetaType; var ArgsCount: Integer): Integer;
+    function __ObjectFree(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __DynArrayInclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __DynArrayResize(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __SetInclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __SetExclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+    function __SetContains(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
 
-    function ClosureCallback(const Instance: Pointer; const AClosure: Pointer): Integer;  *)
-
-    function ClosureCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
+    // external closure callback
+    function UniversalCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
     function InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
   private
     // scripts and units routine
@@ -1054,7 +1066,7 @@ const
   TypeInfoPAnsiChar = PTypeInfo(NativeUInt($7BBB0000));
   TypeInfoPUTF8Char = PTypeInfo(NativeUInt($7BBB0000) + 65001);
 
-  // special difficult properties parameters
+  // special complex properties parameters
   INDEXED_PROPERTY = PLuaRecordInfo(NativeUInt($7EEEEEEE));
   NAMED_PROPERTY   = PLuaRecordInfo(NativeUInt($7AAAAAAA));
 
@@ -2694,7 +2706,10 @@ var
 begin
   Result := Assigned(Value) and (Value.Kind = tkEnumeration);
   if (not Result) then
+  begin
+    {$ifdef FPC}Result := Assigned(Value) and (Value.Kind = tkBool);{$endif}
     Exit;
+  end;
 
   Base := Value;
   repeat
@@ -2911,7 +2926,7 @@ begin
   case TypeInfo.Kind of
     tkVariant: ItemSize := SizeOf(Variant);
     tkLString, tkWString, tkInterface, tkDynArray, tkAString: ItemSize := SizeOf(Pointer);
-      tkArray, tkRecord, tkObject: ItemSize := PFieldTable(NativeUInt(TypeInfo) + PByte(@TypeInfo.Name)^).Size;
+      tkArray, tkRecord, tkObject: ItemSize := PAnonymousFieldTable(NativeUInt(TypeInfo) + PByte(@TypeInfo.Name)^).Size;
   else
     Exit;
   end;
@@ -3072,6 +3087,51 @@ end;
 
 
 { Low level helpers }
+
+function IsMemoryFilledZero(Source: PByte; Size: NativeUInt): Boolean;
+label
+  zero, non_zero;
+begin
+  if (Size <> 0) then
+  begin
+    if (Size >= SizeOf(NativeUInt)) then
+    repeat
+      if (PNativeUInt(Source)^ <> 0) then goto non_zero;
+      Dec(Size, SizeOf(NativeUInt));
+      Inc(Source, SizeOf(NativeUInt));
+    until (Size < SizeOf(NativeUInt));
+
+    {$ifdef LARGEINT}
+    if (Size >= SizeOf(Cardinal)) then
+    begin
+      if (PCardinal(Source)^ <> 0) then goto non_zero;
+      Dec(Size, SizeOf(Cardinal));
+      Inc(Source, SizeOf(Cardinal));
+    end;
+    {$endif}
+
+    if (Size >= SizeOf(Word)) then
+    begin
+      if (PWord(Source)^ <> 0) then goto non_zero;
+      Dec(Size, SizeOf(Word));
+      Inc(Source, SizeOf(Word));
+    end;
+
+    if (Size <> 0) then
+    begin
+      if (PByte(Source)^ <> 0) then goto non_zero;
+    end;
+
+    goto zero;
+  end else
+  begin
+  zero:
+    Result := True;
+    Exit;
+  non_zero:
+    Result := False;
+  end;
+end;
 
 function LStrLen(S: PAnsiChar): NativeUInt;
 label
@@ -6440,6 +6500,11 @@ begin
         Exit;
       end;
     end;
+    mtInterface:
+    begin
+      IInterface(PPointer(Instance)^) := IInterface(Value);
+      Exit;
+    end;
     mtArray:
     begin
       if (Self.Managed) then
@@ -6727,15 +6792,17 @@ end;
 { MetaType script instances (user data) }
 
 type
-  TLuaUserDataKind = (ukInstance, ukArray, ukSet, ukProperty);
+  TLuaInstanceKind = (ikNone{/ikComplexProperty/ikGlobal}, ikClass, ikObject, ikWeakObject,
+    ikRecord, ikInterface, ikArray, ikSet);
+
   TLuaUserData = object
   public
     Instance: Pointer;
 
-    Kind: TLuaUserDataKind;
-    ArrayParams: Byte; // Count(4bits) and Filled(4bits) for difficult properties
+    InstanceKind: TLuaInstanceKind;
+    ArrayParams: Byte; // Count(4bits) and Filled(4bits) for complex properties
     ConstMode: Boolean;
-    GcDestroy: Boolean; // automatically call finalizer/destructor
+    RefMode: Boolean;
 
     MetaType: __luapointer;
     (*case Integer of
@@ -6755,9 +6822,9 @@ begin
   begin
     Result := 'nil userdata';
   end else
-  if (Byte(Kind) > Byte(ukSet)) then
+  if (Byte(InstanceKind) > Byte(High(TLuaInstanceKind))) then
   begin
-    Result := 'unknown userdata';
+    Result := 'unknown user data';
   end else
   if (Instance = nil) then
   begin
@@ -6771,7 +6838,7 @@ begin
       ukInstance: Result := Lua.ClassesInfo[userdata.ClassIndex]._ClassName;
          ukArray: Result := userdata.ArrayInfo.Name;
            ukSet: Result := userdata.SetInfo.Name;
-      ukProperty: Result := Format('difficult property ''%s''', [userdata.PropertyInfo.PropertyName]);
+      ukProperty: Result := Format('complex property ''%s''', [userdata.PropertyInfo.PropertyName]);
     end; *)
   end;
 end;
@@ -6780,58 +6847,34 @@ end;
 { Internal types management, like Rtti.TValue routine }
 
 type
-  TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat,
-                   pkObject, pkWeakObject, pkString, pkVariant, pkInterface,
-                   pkPointer, pkClass, pkRecord, pkArray, pkSet,
-                   pkClosure, pkUniversal);
+  TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat, pkPointer,
+                   pkString, pkVariant, pkClass, pkObject, pkWeakObject, pkRecord,
+                   pkInterface, pkArray, pkSet, pkClosure, pkUniversal);
 
   TLuaBoolType = (btBoolean, btByteBool, btWordBool, btLongBool);
 
   TLuaStringType = (stShortString, stAnsiString, stWideString, stUnicodeString,
     stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
 
-  TLuaClosureKind = (ckStatic, ckClassStatic, ckInstance, ckClassIntance,
-    ckConstructor, ckDestructor, ckMethod, ckReference {Operator?});
+  TLuaClosureKind = (ckGlobal, ckClassStatic, ckInstance, ckClassInstance,
+    ckConstructor, ckInstanceConstructor, ckDestructor, ckMethod, ckReference {Operator?});
 
-  TLuaInstanceKind = (ikNone, ikRecord{, ikArray, ikSet,}, ikObject, ikWeakObject,
-    ikClass, ikInterface);
-
-  TLuaClosureHeader = packed record
-    Lua: Pointer;
-    Marker: Byte;
-    Kind: TLuaClosureKind;
-    InstanceKind: TLuaInstanceKind;
-    InvokableMode: Boolean;
-    Name: __luaname;
-  end;
+  TLuaClosureMode = (cmInternal, cmUniversal, cmInvokable);
 
   TLuaClosure = packed record
-    Header: TLuaClosureHeader;
-    Instance: Pointer;
+    Marker: Word;
+    Kind: TLuaClosureKind;
+    Mode: TLuaClosureMode;
+    Lua: Pointer;
+    Name: __luaname;
     Address: Pointer;
-    case Integer of
-      0: (Invokable: __luapointer{PLuaInvokable});
-      1: (ArgsCount: Integer);
+    Instance: Pointer;
+  case TLuaClosureMode of
+    cmInternal: (MetaType: __luapointer{PLuaMetaType});
+    cmUniversal: (ArgsCount: Integer);
+    cmInvokable: (Invokable: __luapointer{PLuaInvokable});
   end;
   PLuaClosure = ^TLuaClosure;
-
-  TLuaObjectClosure = packed record
-    Header: TLuaClosureHeader;
-    Instance: TObject;
-  end;
-  PLuaObjectClosure = ^TLuaObjectClosure;
-
-  TLuaWeakClosure = packed record
-    Header: TLuaClosureHeader;
-    {$ifdef WEAKREF}[Weak]{$endif} Instance: TObject;
-  end;
-  PLuaWeakClosure = ^TLuaWeakClosure;
-
-  TLuaInterfaceClosure = packed record
-    Header: TLuaClosureHeader;
-    Instance: IInterface;
-  end;
-  PLuaInterfaceClosure = ^TLuaInterfaceClosure;
 
   TLuaCustomParam = object
   private
@@ -6852,14 +6895,11 @@ type
       1: (MetaType: PLuaMetaType; FlagsEx: Cardinal);
     end;
 
-    function InternalSetTypeInfo(const Value: PTypeInfo; const Lua: TLua;
-      {const IsAutoRegister: Boolean;} const IsWeakObject: Boolean = False): Boolean;
-    procedure SetTypeInfo(const Value: PTypeInfo);
-    procedure SetMetaType(const Value: PLuaMetaType);
+    function InternalSetTypeInfo(const Lua: TLua; const Value: PTypeInfo; const IsWeakObject: Boolean = False): Boolean;
     function GetSize: Integer;
   public
-    property TypeInfo: PTypeInfo read F.TypeInfo write SetTypeInfo;
-    property MetaType: PLuaMetaType read F.MetaType write SetMetaType;
+    property TypeInfo: PTypeInfo read F.TypeInfo;
+    property MetaType: PLuaMetaType read F.MetaType;
     property Flags: Byte read F.Flags write F.Flags;
     property FlagsEx: Cardinal read F.FlagsEx write F.FlagsEx;
     property Size: Integer read GetSize;
@@ -6878,8 +6918,8 @@ type
   end;
   PLuaCustomParam = ^TLuaCustomParam;
 
-function TLuaCustomParam.InternalSetTypeInfo(const Value: PTypeInfo; const Lua: TLua;
-  {const IsAutoRegister: Boolean; }const IsWeakObject: Boolean): Boolean;
+function TLuaCustomParam.InternalSetTypeInfo(const Lua: TLua; const Value: PTypeInfo;
+  const IsWeakObject: Boolean): Boolean;
 begin
   F.TypeInfo := Value;
   F.FlagsEx := 0;
@@ -7050,7 +7090,7 @@ begin
     tkProcedure:
     begin
       F.Kind := pkClosure;
-      F.ClosureKind := ckStatic;
+      F.ClosureKind := ckGlobal;
       F.InstanceKind := ikNone;
     end;
     {$endif}
@@ -7062,17 +7102,6 @@ begin
     Lua.unpack_lua_string(Lua.FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
     GetTypeKindName(Lua.FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
   end;
-end;
-
-procedure TLuaCustomParam.SetTypeInfo(const Value: PTypeInfo);
-begin
-  InternalSetTypeInfo(Value, nil, False);
-end;
-
-procedure TLuaCustomParam.SetMetaType(const Value: PLuaMetaType);
-begin
-  F.MetaType := Value;
-  F.FlagsEx := (Ord(Value.F.Kind) + Ord(pkClass)) shl 8;
 end;
 
 function TLuaCustomParam.GetSize: Integer;
@@ -7114,7 +7143,7 @@ begin
           ftCurr: Result := SizeOf(Currency);
       end;
     end;
-    pkObject, pkWeakObject, pkPointer, pkClass, pkInterface:
+    pkPointer, pkClass, pkObject, pkWeakObject, pkInterface:
     begin
       Result := SizeOf(Pointer);
     end;
@@ -7285,24 +7314,30 @@ begin
     begin
       if (not push_variant(PVariant(Value)^)) then lua_pushnil(Handle);
     end;
-    pkInterface,
     pkPointer,
     pkClass,
     pkWeakObject,
-    pkObject:
+    pkObject,
+    pkInterface:
     begin
-      Value := PPointer(Value);
+      Value := PPointer(Value)^;
 
       if (Value = nil) then lua_pushnil(Handle)
       else
-      if (F.Kind in [pkInterface, pkPointer]) then lua_pushlightuserdata(Handle, Value)
+      case F.Kind of
+        pkPointer: lua_pushlightuserdata(Handle, Value);
+        pkClass: lua_rawgeti(Handle, LUA_REGISTRYINDEX, InternalGetClassInfo(TClass(Value)).Ref);
+        pkInterface: push_userdata(F.MetaType, Value, False);
       else
-      if (F.Kind = pkClass) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, InternalNearestClass(TClass(Value)).Ref)
-      else
-      // pkWeakObject/pkObject
-      if (TClass(Value^) = TLuaReference) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(Value).Index)
-      else
-      push_userdata(InternalNearestClass(TClass(Value^)), Value, False);
+        // pkWeakObject/pkObject
+        if (TClass(Value^) = TLuaReference) then lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(Value).Index)
+        else
+        push_userdata(InternalGetClassInfo(TClass(Value^)), Value, False);
+      end;
+    end;
+    pkClosure:
+    begin
+      // ToDo
     end;
   else
     // pkRecord, pkArray, pkSet, pkUniversal
@@ -7443,18 +7478,13 @@ function TLuaCustomParam.SetValue(var Dest; const Lua: TLua; const StackIndex: I
   function CastAsTObject(const Lua: TLua; const StackIndex: Integer): Pointer; far;
   var
     UserData: PLuaUserData;
-    MetaType: PLuaMetaType;
   begin
     UserData := lua_touserdata(Lua.Handle, StackIndex);
 
-    if (Assigned(UserData)) and (UserData.Kind = ukInstance) then
+    if (Assigned(UserData)) and (UserData.InstanceKind in [ikObject, ikWeakObject]) then
     begin
-      MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(Lua.FMemoryHeap).Unpack{$endif}(UserData.MetaType);
-      if (MetaType.F.Kind = mtClass) then
-      begin
-        Result := UserData.Instance;
-        Exit;
-      end;
+      Result := UserData.Instance;
+      Exit;
     end;
 
     Result := nil;
@@ -7507,8 +7537,9 @@ begin
   case F.Kind of
     pkBoolean:
     begin
+      Value := 0;
       case (LuaType) of
-            LUA_TNIL: Value := 0;
+            LUA_TNIL: ;
         LUA_TBOOLEAN: Value := NativeInt(lua_toboolean(Handle, StackIndex)) and 1;
          LUA_TSTRING: begin
                         Value := CastStringAsBoolean(PAnsiChar(lua_tolstring(Handle, StackIndex, Pointer(@FTempBuffer.N))), FTempBuffer.N);
@@ -7613,19 +7644,6 @@ begin
       if (not stack_variant(PVariant(Instance)^, StackIndex, F.VarOle)) then goto failure;
       goto done;
     end;
-    pkInterface{ToDo}:
-    begin
-      case LuaType of
-        LUA_TNIL: Value := 0;
-        LUA_TLIGHTUSERDATA: Value := NativeInt(lua_touserdata(Handle, StackIndex));
-      else
-        goto failure;
-      end;
-
-      FTempBuffer.N := Value;
-      IInterface(PPointer(Instance)^) := IInterface(FTempBuffer.N);
-      goto done;
-    end;
     pkPointer:
     begin
       case (LuaType) of
@@ -7662,23 +7680,6 @@ begin
 
       goto set_native;
     end;
-    pkWeakObject, {ToDo}
-    pkObject:
-    begin
-      case (LuaType) of
-        LUA_TNIL: Value := 0;
-        LUA_TUSERDATA:
-        begin
-          Value := NativeInt(CastAsTObject(Lua, StackIndex));
-          if (Value = 0) then goto failure;
-        end;
-      else
-        goto failure;
-      end;
-
-      // ToDo?
-      goto set_native; 
-    end;
     pkClass:
     begin
       case (LuaType) of
@@ -7702,6 +7703,42 @@ begin
 
       goto set_native;
     end;
+    pkWeakObject, {ToDo}
+    pkObject:
+    begin
+      case (LuaType) of
+        LUA_TNIL: Value := 0;
+        LUA_TUSERDATA:
+        begin
+          Value := NativeInt(CastAsTObject(Lua, StackIndex));
+          if (Value = 0) then goto failure;
+        end;
+      else
+        goto failure;
+      end;
+
+      // ToDo?
+      goto set_native; 
+    end;
+    pkInterface{ToDo}:
+    begin
+      Value := 0;
+      case LuaType of
+        LUA_TNIL: ;
+        LUA_TLIGHTUSERDATA: Value := NativeInt(lua_touserdata(Handle, StackIndex));
+      else
+        goto failure;
+      end;
+
+      FTempBuffer.N := Value;
+      IInterface(PPointer(Instance)^) := IInterface(FTempBuffer.N);
+      goto done;
+    end;
+    pkClosure:
+    begin
+      // ToDo
+      Value := 0;
+    end
   else
     // pkRecord, pkArray, pkSet, pkUniversal
     if (AssignMetaType(Lua, StackIndex, Instance, Self)) then goto done;
@@ -8681,7 +8718,7 @@ begin
 
   if (Assigned(ResultType)) then
   begin
-    Result.Result.InternalSetTypeInfo(ResultType, FLua, True);
+    Result.Result.InternalSetTypeInfo(FLua, ResultType, True);
     if (Result.Result.Kind = pkUnknown) then
     begin
       FLua.FStringBuffer.Default := Format('Invalid result type "%s" (%s)', [
@@ -8797,7 +8834,7 @@ var
   {$ifend}
 begin
   // TVarArg?
-  if (not CustomParam.InternalSetTypeInfo(TypeInfo, FLua, True)) then
+  if (not CustomParam.InternalSetTypeInfo(FLua, TypeInfo, True)) then
   begin
     Result := nil;
     Exit;
@@ -8923,7 +8960,7 @@ begin
   if (Result.IsArray) then
   begin
     HighArray := FBuffer.Alloc(SizeOf(TLuaInvokableParam));
-    HighArray.InternalSetTypeInfo(System.TypeInfo(Integer), FLua, True);
+    HighArray.InternalSetTypeInfo(FLua, System.TypeInfo(Integer), True);
     HighArray.Name := Pointer(@PARAMNAME_HIGH_ARRAY);
     HighArray.Value := VALUE_NOT_DEFINED;
     HighArray.DataValue := VALUE_NOT_DEFINED;
@@ -10001,6 +10038,8 @@ const
   PROP_CLASS_MODE = 1 shl 6;
   PROP_CONSTREF_MODE = 1 shl 7;
 
+  NAMESPACE_STD_MASK = Integer($ffffff00);
+  NAMESPACE_STD_PROC = $80;
   NAMESPACE_FLAG_PROC = 1;
   NAMESPACE_FLAG_INHERITED = 2;
   NAMESPACE_FLAGS_CLEAR = -4;
@@ -10266,55 +10305,6 @@ begin
   ThrowUnknown();
 end;
 
-
-// что-то типа InspectType
-function GetLuaItemSize(const Base: TLuaPropertyInfoBase): integer;
-begin
-  Result := 0;
-  if (Base.Information = nil) then exit;
-
-  case Base.Kind of
-   pkBoolean: case (Base.BoolType) of
-                btBoolean: Result := sizeof(boolean);
-                btWordBool: Result := sizeof(wordbool);
-                btLongBool: Result := sizeof(longbool);
-              end;
-
-   pkInteger: case (Base.OrdType) of
-                otSByte, otUByte: Result := sizeof(byte);
-                otSWord, otUWord: Result := sizeof(word);
-                otSLong, otULong: Result := sizeof(dword);
-              end;
-
-     pkFloat: case (Base.FloatType) of
-                ftSingle: Result := sizeof(single);
-                ftDouble: Result := sizeof(double);
-                ftExtended: Result := sizeof(extended);
-                ftComp: Result := sizeof(Comp);
-                ftCurr: Result := sizeof(Currency);
-              end;
-
-    pkString: case (Base.StringType) of
-                stShortString: Result := Base.str_max_len+1;
-
-                {todo UnicodeString?,}
-                stAnsiString,
-                stWideString: Result := sizeof(pointer);
-
-                stAnsiChar: Result := sizeof(AnsiChar);
-                stWideChar: Result := sizeof(WideChar);
-              end;
-
-   pkVariant: Result := sizeof(Variant);
-     pkInt64: Result := sizeof(int64);
-    pkObject, pkInterface, pkPointer, pkClass: Result := sizeof(Pointer);
-    pkRecord: Result := PLuaRecordInfo(Base.Information).FSize;
-     pkArray: Result := PLuaArrayInfo(Base.Information).FSize;
-       pkSet: Result := PLuaSetInfo(Base.Information).FSize;
-
-       //pkUniversal? наверное не надо - ибо только в массивах
-  end;          
-end;
 
 // имея проперти инфо, необходимо определить - является ли его тип сложным
 // необходимо ли его инициализировать/финализировать
@@ -10744,63 +10734,21 @@ const
   INSTANCE_MODES: array[0..2] of string = ('instance', 'type', 'class');
   PROPERTY_MODES: array[0..2] of string = ('property', 'field', 'variable');
 
-  // each userdata (except difficult properties)
-  STD_TYPE = 0;
-  STD_TYPE_NAME = 1;
-  STD_TYPE_PARENT = 2;
-  STD_INHERITS_FROM = 3;
-  STD_ASSIGN = 4;
-  STD_IS_REF = 5;
-  STD_IS_CONST = 6;
-  STD_IS_CLASS = 7;
-  STD_IS_RECORD = 8;
-  STD_IS_ARRAY = 9;
-  STD_IS_SET = 10;
-  STD_IS_EMPTY = 11;
-  // classes
-  STD_CREATE = 12;
-  STD_FREE = 13;
-  // arrays
-  STD_LOW = 14;
-  STD_HIGH = 15;
-  STD_LENGTH = 16;
-  STD_RESIZE = 17;
-  // sets
-  STD_INCLUDE = 18;
-  STD_EXCLUDE = 19;
-  STD_CONTAINS = 20;
-  // TLuaReference
-  STD_VALUE = 21;
+  // extended callback parameters
+  PTR_FALSE = Ord(False);
+  PTR_TRUE = Ord(True);
+  OPERATOR_NEG = 0;
+  OPERATOR_ADD = 1;
+  OPERATOR_SUB = 2;
+  OPERATOR_MUL = 3;
+  OPERATOR_DIV = 4;
+  OPERATOR_MOD = 5;
+  OPERATOR_POW = 6;
+  OPERATOR_EQUAL = 7;
+  OPERATOR_LESS = 8;
+  OPERATOR_LESS_EQUAL = 9;
+  OPERATOR_CONCAT = 10; {for dynamic arrays only}
 
-  ID_TYPE: array[0..4] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), 0);
-  ID_TYPENAME: array[0..8] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('N'), Ord('a'), Ord('m'), Ord('e'), 0);
-  ID_TYPEPARENT: array[0..10] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('P'), Ord('a'), Ord('r'), Ord('e'), Ord('n'), Ord('t'), 0);
-  ID_INHERITSFROM: array[0..12] of Byte = (Ord('I'), Ord('n'), Ord('h'), Ord('e'), Ord('r'), Ord('i'), Ord('t'), Ord('s'), Ord('F'), Ord('r'), Ord('o'), Ord('m'), 0);
-  ID_ASSIGN: array[0..6] of Byte = (Ord('A'), Ord('s'), Ord('s'), Ord('i'), Ord('g'), Ord('n'), 0);
-  ID_ISREF: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('f'), 0);
-  ID_ISCONST: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('o'), Ord('n'), Ord('s'), Ord('t'), 0);
-  ID_ISCLASS: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'), 0);
-  ID_ISRECORD: array[0..8] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'), 0);
-  ID_ISARRAY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), 0);
-  ID_ISSET: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('S'), Ord('e'), Ord('t'), 0);
-  ID_ISEMPTY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('E'), Ord('m'), Ord('p'), Ord('t'), Ord('y'), 0);
-  ID_CREATE: array[0..6] of Byte = (Ord('C'), Ord('r'), Ord('e'), Ord('a'), Ord('t'), Ord('e'), 0);
-  ID_FREE: array[0..4] of Byte = (Ord('F'), Ord('r'), Ord('e'), Ord('e'), 0);
-  ID_LOW: array[0..3] of Byte = (Ord('L'), Ord('o'), Ord('w'), 0);
-  ID_HIGH: array[0..4] of Byte = (Ord('H'), Ord('i'), Ord('g'), Ord('h'), 0);
-  ID_LENGTH: array[0..6] of Byte = (Ord('L'), Ord('e'), Ord('n'), Ord('g'), Ord('t'), Ord('h'), 0);
-  ID_RESIZE: array[0..6] of Byte = (Ord('R'), Ord('e'), Ord('s'), Ord('i'), Ord('z'), Ord('e'), 0);
-  ID_INCLUDE: array[0..7] of Byte = (Ord('I'), Ord('n'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
-  ID_EXCLUDE: array[0..7] of Byte = (Ord('E'), Ord('x'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
-  ID_CONTAINS: array[0..8] of Byte = (Ord('C'), Ord('o'), Ord('n'), Ord('t'), Ord('a'), Ord('i'), Ord('n'), Ord('s'), 0);
-  ID_VALUE: array[0..5] of Byte = (Ord('V'), Ord('a'), Ord('l'), Ord('u'), Ord('e'), 0);
-
-  ID_INDEX: array[0..7] of Byte = (Ord('_'), Ord('_'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
-  ID_NEWINDEX: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('n'), Ord('e'), Ord('w'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
-  ID_LEN: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), Ord('n'), 0);
-  ID_CALL: array[0..6] of Byte = (Ord('_'), Ord('_'), Ord('c'), Ord('a'), Ord('l'), Ord('l'), 0);
-  ID_GC: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('g'), Ord('c'), 0);
-  ID_TOSTRING: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('t'), Ord('o'), Ord('s'), Ord('t'), Ord('r'), Ord('i'), Ord('n'), Ord('g'), 0);
   ID_UNM: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('u'), Ord('n'), Ord('m'), 0);
   ID_ADD: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('a'), Ord('d'), Ord('d'), 0);
   ID_SUB: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('s'), Ord('u'), Ord('b'), 0);
@@ -10812,6 +10760,78 @@ const
   ID_LT: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('t'), 0);
   ID_LE: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), 0);
   ID_CONCAT: array[0..8] of Byte = (Ord('_'), Ord('_'), Ord('c'), Ord('o'), Ord('n'), Ord('c'), Ord('a'), Ord('t'), 0);
+
+  OPERATOR_NAMES: array[OPERATOR_NEG..OPERATOR_CONCAT] of Pointer = (
+    @ID_UNM, @ID_ADD, @ID_SUB, @ID_MUL, @ID_DIV, @ID_MOD, @ID_POW,
+    @ID_EQ, @ID_LT, @ID_LE, @ID_CONCAT);
+
+  // each userdata (except complex properties)
+  STD_TYPE = 0;
+  STD_TYPE_NAME = 1;
+  STD_TYPE_PARENT = 2;
+  STD_INHERITS_FROM = 3;
+  STD_ASSIGN = 4;
+  STD_IS_REF = 5;
+  STD_IS_CONST = 6;
+  STD_IS_CLASS = 7;
+  STD_IS_RECORD = 8;
+  STD_IS_INTERFACE = 9;
+  STD_IS_ARRAY = 10;
+  STD_IS_SET = 11;
+  STD_IS_EMPTY = 12;
+  // classes
+  STD_CREATE = 13;
+  STD_FREE = 14;
+  // arrays
+  STD_LENGTH = 15;
+  STD_RESIZE = 16;
+  // arrays and sets
+  STD_LOW = 17;
+  STD_HIGH = 18;
+  STD_INCLUDE = 19;
+  // sets
+  STD_EXCLUDE = 20;
+  STD_CONTAINS = 21;
+  // TLuaReference
+  STD_VALUE = 22;
+
+  ID_TYPE: array[0..4] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), 0);
+  ID_TYPENAME: array[0..8] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('N'), Ord('a'), Ord('m'), Ord('e'), 0);
+  ID_TYPEPARENT: array[0..10] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('P'), Ord('a'), Ord('r'), Ord('e'), Ord('n'), Ord('t'), 0);
+  ID_INHERITSFROM: array[0..12] of Byte = (Ord('I'), Ord('n'), Ord('h'), Ord('e'), Ord('r'), Ord('i'), Ord('t'), Ord('s'), Ord('F'), Ord('r'), Ord('o'), Ord('m'), 0);
+  ID_ASSIGN: array[0..6] of Byte = (Ord('A'), Ord('s'), Ord('s'), Ord('i'), Ord('g'), Ord('n'), 0);
+  ID_ISREF: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('f'), 0);
+  ID_ISCONST: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('o'), Ord('n'), Ord('s'), Ord('t'), 0);
+  ID_ISCLASS: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'), 0);
+  ID_ISRECORD: array[0..8] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'), 0);
+  ID_ISINTERFACE: array[0..11] of Byte = (Ord('I'), Ord('s'), Ord('I'), Ord('n'), Ord('t'), Ord('e'), Ord('r'), Ord('f'), Ord('a'), Ord('c'), Ord('e'), 0);
+  ID_ISARRAY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), 0);
+  ID_ISSET: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('S'), Ord('e'), Ord('t'), 0);
+  ID_ISEMPTY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('E'), Ord('m'), Ord('p'), Ord('t'), Ord('y'), 0);
+  ID_CREATE: array[0..6] of Byte = (Ord('C'), Ord('r'), Ord('e'), Ord('a'), Ord('t'), Ord('e'), 0);
+  ID_FREE: array[0..4] of Byte = (Ord('F'), Ord('r'), Ord('e'), Ord('e'), 0);
+  ID_LENGTH: array[0..6] of Byte = (Ord('L'), Ord('e'), Ord('n'), Ord('g'), Ord('t'), Ord('h'), 0);
+  ID_RESIZE: array[0..6] of Byte = (Ord('R'), Ord('e'), Ord('s'), Ord('i'), Ord('z'), Ord('e'), 0);
+  ID_LOW: array[0..3] of Byte = (Ord('L'), Ord('o'), Ord('w'), 0);
+  ID_HIGH: array[0..4] of Byte = (Ord('H'), Ord('i'), Ord('g'), Ord('h'), 0);
+  ID_INCLUDE: array[0..7] of Byte = (Ord('I'), Ord('n'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
+  ID_EXCLUDE: array[0..7] of Byte = (Ord('E'), Ord('x'), Ord('c'), Ord('l'), Ord('u'), Ord('d'), Ord('e'), 0);
+  ID_CONTAINS: array[0..8] of Byte = (Ord('C'), Ord('o'), Ord('n'), Ord('t'), Ord('a'), Ord('i'), Ord('n'), Ord('s'), 0);
+  ID_VALUE: array[0..5] of Byte = (Ord('V'), Ord('a'), Ord('l'), Ord('u'), Ord('e'), 0);
+
+  STANDARD_NAMES: array[STD_TYPE..STD_VALUE] of Pointer = (
+    @ID_TYPE, @ID_TYPENAME, @ID_TYPEPARENT, @ID_INHERITSFROM, @ID_ASSIGN, @ID_ISREF,
+    @ID_ISCONST, @ID_ISCLASS, @ID_ISRECORD, @ID_ISINTERFACE, @ID_ISARRAY, @ID_ISSET,
+    @ID_ISEMPTY, @ID_CREATE, @ID_FREE, @ID_LENGTH, @ID_RESIZE, @ID_LOW, @ID_HIGH,
+    @ID_INCLUDE, @ID_EXCLUDE, @ID_CONTAINS, @ID_VALUE);
+
+  ID_LEN: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), Ord('n'), 0);
+  ID_TOSTRING: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('t'), Ord('o'), Ord('s'), Ord('t'), Ord('r'), Ord('i'), Ord('n'), Ord('g'), 0);
+  ID_CALL: array[0..6] of Byte = (Ord('_'), Ord('_'), Ord('c'), Ord('a'), Ord('l'), Ord('l'), 0);
+  ID_GC: array[0..4] of Byte = (Ord('_'), Ord('_'), Ord('g'), Ord('c'), 0);
+  ID_INDEX: array[0..7] of Byte = (Ord('_'), Ord('_'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
+  ID_NEWINDEX: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('n'), Ord('e'), Ord('w'), Ord('i'), Ord('n'), Ord('d'), Ord('e'), Ord('x'), 0);
+
 
 
 
@@ -10874,12 +10894,6 @@ end;
 
 constructor TLua.Create();
 const
-  STANDARD_NAMES: array[STD_TYPE..STD_VALUE] of Pointer = (
-    @ID_TYPE, @ID_TYPENAME, @ID_TYPEPARENT, @ID_INHERITSFROM, @ID_ASSIGN, @ID_ISREF,
-    @ID_ISCONST, @ID_ISCLASS, @ID_ISRECORD, @ID_ISARRAY, @ID_ISSET, @ID_ISEMPTY,
-    @ID_CREATE, @ID_FREE, @ID_LOW, @ID_HIGH, @ID_LENGTH, @ID_RESIZE, @ID_INCLUDE,
-    @ID_EXCLUDE, @ID_CONTAINS, @ID_VALUE);
-
   // function _FORMATWRAPPER_(...) return string.format(...)  end
   FORMATWRAPPER_CODE: array[0..59] of Byte = (Ord('f'), Ord('u'), Ord('n'), Ord('c'), Ord('t'), Ord('i'), Ord('o'), Ord('n'),
     Ord(' '), Ord('_'), Ord('F'), Ord('O'), Ord('R'), Ord('M'), Ord('A'), Ord('T'), Ord('W'), Ord('R'), Ord('A'), Ord('P'),
@@ -10889,12 +10903,13 @@ const
     Ord(' '), Ord('e'), Ord('n'), Ord('d'));
 var
   i: Integer;
+  StandardNames: array[STD_TYPE..STD_VALUE] of __luaname;
 
   procedure AddSystemClosure(const Name: LuaString; const Callback: Pointer; const P1, P2: __luapointer);
   begin
     lua_pushnil(Handle);
     push_lua_string(Name);
-    push_newfunction(Callback, P1, P2, False);
+    push_newfunction(Callback, P1, P2);
     __global_newindex(0, 0);
     lua_settop(Handle, 0);
     with PLuaGlobalEntity(GetGlobalEntity(Name, True))^ do
@@ -10902,6 +10917,27 @@ var
       Kind := gkConst;
       ConstMode := True;
     end;
+  end;
+
+  procedure FillStandardNameSpace(var ANameSpace: __TLuaDictionary; const Values: array of Integer);
+  var
+    i: Integer;
+
+    procedure NameSpaceAdd(Value: Integer);
+    begin
+      case Value of
+        STD_INHERITS_FROM, STD_ASSIGN, STD_CREATE, STD_FREE,
+        STD_RESIZE, STD_INCLUDE, STD_EXCLUDE, STD_CONTAINS: Value := Value or NAMESPACE_STD_PROC;
+      end;
+
+      TLuaDictionary(ANameSpace).Add(StandardNames[Value and $7f], NAMESPACE_STD_MASK or Value);
+    end;
+  begin
+    for i := STD_TYPE to STD_IS_EMPTY do
+      NameSpaceAdd(i);
+
+    for i := Low(Values) to High(Values) do
+      NameSpaceAdd(Values[i]);
   end;
 begin
   // unicode
@@ -10922,14 +10958,6 @@ begin
   FHandle := lua_open;
   luaL_openlibs(Handle);
 
-  // standard names
-  for i := Low(STANDARD_NAMES) to High(STANDARD_NAMES) do
-  begin
-    lua_pushlstring(Handle, STANDARD_NAMES[i], LStrLen(STANDARD_NAMES[i]));
-    TLuaDictionary(FStandardNames).Add(lua_tolstring(Handle, -1, nil), i);
-    global_fill_value(global_alloc_ref);
-  end;
-
   // global callbacks
   FGlobalMetaTable := InternalRegisterMetaTable;
   global_push_value(FGlobalMetaTable);
@@ -10942,11 +10970,30 @@ begin
   lua_pcall(Handle, 0, 0, 0);
   lua_gc(Handle, 2{LUA_GCCOLLECT}, 0);
   with TLuaDictionary(FGlobalEntities) do
-    FFormatWrapper := PLuaGlobalEntity(TLuaMemoryHeap(FMemoryHeap).Unpack(FItems[Count - 1].Value)).Ref;
+    FFormatWrapper := PLuaGlobalEntity(TLuaMemoryHeap(FMemoryHeap).Unpack(FItems[Count - 1].Value)).Ptr;
 
   // print(f) wrappers
   AddSystemClosure('_PNT_', @TLua.__print, 0, 0);
   AddSystemClosure('printf', @TLua.__printf, 0, 0);
+
+  // standard name spaces
+  for i := Low(STANDARD_NAMES) to High(STANDARD_NAMES) do
+  begin
+    lua_pushlstring(Handle, STANDARD_NAMES[i], LStrLen(STANDARD_NAMES[i]));
+    StandardNames[i] := lua_tolstring(Handle, -1, nil);
+    global_fill_value(global_alloc_ref);
+  end;
+  FillStandardNameSpace(FStdObjectNameSpace, [STD_CREATE, STD_FREE]);
+  FillStandardNameSpace(FStdRecordNameSpace, []);
+  FillStandardNameSpace(FStdInterfaceNameSpace, []);
+  FillStandardNameSpace(FStdArrayNameSpace, [STD_LENGTH, STD_RESIZE, STD_LOW, STD_HIGH, STD_INCLUDE]);
+  FillStandardNameSpace(FStdSetNameSpace, [STD_LOW, STD_HIGH, STD_INCLUDE, STD_EXCLUDE, STD_CONTAINS]);
+
+  // managed closures
+  FClosureMetaTable := InternalNewMetaTable;
+  global_push_value(FClosureMetaTable);
+  InternalRegisterCallback(Pointer(@ID_GC), @TLua.__closuregc);
+  lua_settop(Handle, 0);
 
 
   (*
@@ -11015,6 +11062,11 @@ begin
     FScriptStack[i].Finalize;
 
   // finalize names and dynamic arrays
+  TLuaDictionary(FStdObjectNameSpace).Clear;
+  TLuaDictionary(FStdRecordNameSpace).Clear;
+  TLuaDictionary(FStdInterfaceNameSpace).Clear;
+  TLuaDictionary(FStdArrayNameSpace).Clear;
+  TLuaDictionary(FStdSetNameSpace).Clear;
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
   begin
     MetaType := TLuaMemoryHeap(FMemoryHeap).Unpack(TLuaDictionary(FMetaTypes).FItems[i].Value);
@@ -11032,7 +11084,6 @@ begin
   TLuaMemoryHeap(FMemoryHeap).Clear;
   TLuaBuffer(FInternalBuffer).Clear;
   TLuaInvokableBuilder(FInvokableBuilder).Clear;
-  TLuaDictionary(FStandardNames).Clear;
   TLuaNames(FNames).Clear;
   TLuaDictionary(FMetaTypes).Clear;
   TLuaDictionary(FGlobalEntities).Clear;
@@ -12628,9 +12679,81 @@ begin
   end;
 end;
 
-function TLua.push_userdata(const MetaType: PLuaMetaType; const Instance: Pointer; const DcDestroy: Boolean): Pointer{PLuaUserData};
+function TLua.push_userdata(const MetaType: PLuaMetaType; const Instance: Pointer; const RefMode: Boolean): Pointer{PLuaUserData};
+label
+  simple_case;
+const
+  INSTANCE_KINDS: array[TLuaMetaKind] of Integer = (
+    Ord(ikObject), Ord(ikRecord), Ord(ikInterface), Ord(ikArray), Ord(ikSet));
+var
+  UserData: PLuaUserData;
 begin
-  Result := nil{ToDo};
+  case MetaType.F.Kind of
+    mtClass:
+    begin
+      {$ifdef AUTOREFCOUNT}
+      if (Instance <> nil) then
+        TObject(Instance).__ObjAddRef;
+      {$endif}
+      goto simple_case;
+    end;
+    mtInterface:
+    begin
+      if (Instance <> nil) then
+        IInterface(Instance)._AddRef;
+      goto simple_case;
+    end;
+  else
+    if (RefMode) then
+    begin
+    simple_case:
+      UserData := lua_newuserdata(Handle, SizeOf(TLuaUserData));
+      UserData.Instance := Instance;
+    end else
+    begin
+      UserData := lua_newuserdata(Handle, SizeOf(TLuaUserData) + MetaType.Size);
+      UserData.Instance := Pointer(NativeUInt(UserData) + SizeOf(TLuaUserData));
+
+      if (MetaType.Managed) then
+      begin
+        case (MetaType.F.Kind) of
+          mtRecord:
+          begin
+            FillChar(UserData.Instance^, MetaType.F.Size, #0);
+            CopyRecord(UserData.Instance, Instance, PLuaRecordInfo(MetaType).F.TypeInfo);
+          end;
+        else
+          // mtArray
+          if (PLuaArrayInfo(MetaType).FIsDynamic) then
+          begin
+            PPointer(UserData.Instance)^ := PPointer(Instance)^;
+            if (PPointer(Instance)^ <> nil) then
+              DynArrayAddRef(PPointer(Instance)^);
+          end else
+          begin
+            FillChar(UserData.Instance^, MetaType.F.Size, #0);
+            CopyArray(UserData.Instance, Instance, PLuaArrayInfo(MetaType).FFinalTypeInfo,
+              PLuaArrayInfo(MetaType).FFinalItemsCount);
+          end;
+        end;
+      end else
+      begin
+        System.Move(Instance^, UserData.Instance^, MetaType.Size);
+      end;
+    end;
+  end;
+
+  // done
+  PInteger(@UserData.InstanceKind)^ := INSTANCE_KINDS[MetaType.F.Kind];
+  UserData.RefMode := RefMode;
+  UserData.MetaType := MetaType.Ptr;
+  if (MetaType.F.Kind = mtArray) then
+  begin
+    UserData.ArrayParams := PLuaArrayInfo(MetaType).Dimention shl 4;
+  end;
+  lua_rawgeti(Handle, LUA_REGISTRYINDEX, MetaType.Ref);
+  lua_setmetatable(Handle, -2);
+  Result := UserData;
 end;
             (*
 // основная функция пуша для сложных типов: объектов класса, структур, массивов и множеств
@@ -12749,13 +12872,13 @@ begin
 end;
         *)
 
-function TLua.push_difficult_property(const PropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
+function TLua.push_complex_property(const PropertyInfo; const Instance: Pointer): Pointer{PLuaUserData};
 begin
   Result := nil{ToDo};
 end;
           (*
 // запушить свойство
-function  TLua.push_difficult_property(const Instance: pointer; const PropertyInfo: TLuaPropertyInfo): PLuaUserData;
+function  TLua.push_complex_property(const Instance: pointer; const PropertyInfo: TLuaPropertyInfo): PLuaUserData;
 var
   Size: integer;
   array_params: byte;
@@ -13076,7 +13199,10 @@ begin
       if (UserData = nil) or (UserData.Instance = nil) then goto fail_user_data;
 
       MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(UserData.MetaType);
-      case (UserData.Kind) of
+      // ToDo
+      Ret.F.LuaType := ltPointer;
+      Ret.F.VPointer := MetaType;
+      (*case (UserData.InstanceKind) of
         ukInstance:
         begin
           if (MetaType.F.Kind = mtClass) then
@@ -13115,12 +13241,12 @@ begin
           end;
         end;
         ukProperty:
-        begin
+        begin *)
         fail_user_data:
           UserData.GetDescription(FStringBuffer.Default, Self);
           Result := False;
-        end;
-      end;
+    (*    end;
+      end;   *)
     end;
     LUA_TTABLE:
     begin
@@ -14763,10 +14889,11 @@ label
 var
   LastReturnAddress: Pointer;
   Entity: PLuaGlobalEntity;
-  Proc: ^TLuaClosure;
+  Proc: ^TLuaMethod;
   Arg: PLuaArg;
   V: PVarRec;
   i, Count, ErrCode: Integer;
+  LuaName: __luaname;
 begin
   LastReturnAddress := Self.BeginScriptStack(Options.ReturnAddress);
   try
@@ -14794,7 +14921,9 @@ begin
           gkProc:
           begin
             Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(Self.FMemoryHeap).Unpack{$endif}(Entity.Ptr);
-            //Self.push_function(Proc.Value);
+            LuaName := TLuaNames(Self.FNames).FindValue(Options.ProcName^);
+            Self.push_closure(LuaName, Ord(ckGlobal), Ord(Proc.InvokableMode) +1,
+              nil, Proc.Address, Proc.Invokable)
           end;
           gkScriptVariable:
           begin
@@ -15151,9 +15280,12 @@ fix_dest:
   {$endif}
   SetLength(Data, Size);
   {$ifNdef NEXTGEN}
-  S := Pointer(Data);
-  Inc(S, Size);
-  S^ := 0;
+  if (Pointer(Data) <> nil) then
+  begin
+    S := Pointer(Data);
+    Inc(S, Size);
+    S^ := 0;
+  end;
   {$endif}
   Result := 0;
 end;
@@ -15920,8 +16052,8 @@ end;    *)
 {$ifNdef LUA_NATIVEFUNC}
 type
   TLuaFunctionParams = packed record
-    Lua: TLua;
-    Callback: function(const Lua: TLua; const P1, P2: __luapointer): Integer;
+    Lua: Pointer;
+    Callback: function(const Lua: Pointer; const P1, P2: __luapointer): Integer;
     P1: __luapointer;
     P2: __luapointer;
   end;
@@ -15966,14 +16098,14 @@ begin
 end;
 {$endif}
 
-procedure TLua.push_function(const Func: __luafunction);
+(*procedure TLua.push_function(const Func: __luafunction);
 begin
   {$ifdef LUA_NATIVEFUNC}
     lua_pushcclosure(Handle, Func, 0);
   {$else}
     global_push_value(Func);
   {$endif}
-end;
+end;*)
 
 function TLua.function_topointer(const StackIndex: Integer): Pointer;
 {$ifdef LUA_NATIVEFUNC}
@@ -16008,7 +16140,7 @@ begin
       Result := PPointer(@Data.Bytes[23])^;
     end;
   {$endif}
-  if (Result <> @TLua.ProcCallback) then Exit;
+  if (Result <> @TLua.UniversalCallback{ToDo}) then Exit;
 
   // parameters
   {$ifdef CPUX86}
@@ -16043,7 +16175,7 @@ begin
   Params := lua_touserdata(Handle, -1);
   stack_pop;
   Result := @Params.Callback;
-  if (Result <> @TLua.ProcCallback) then Exit;
+  if (Result <> @TLua.UniversalCallback{ToDo}) then Exit;
 
   // parameters
   {$ifdef CPUX86}
@@ -16064,18 +16196,18 @@ end;
 {$endif}
 
 const
-  LUA_CLOSURE_MARKER = Byte((Ord('L') shr 2) + (Ord('C') shl 2) or (Ord('M') shr 4));
+  LUA_CLOSURE_MARKER = Word((Ord('L') shr 3) + (Ord('C') shl 5) or (Ord('M') shl 10));
 
 function LuaClosureWrapper(L: Plua_State): Integer; cdecl;
 label
   invalid_args_count;
+type
+  TInternalCallback = function(const Lua: Pointer;
+    const AUserDataMetaType: Pointer{PLuaUserData/PLuaMetaType}; var ArgsCount: Integer): Integer;
 const
-  INSTANCE_KINDS: array[TLuaInstanceKind] of string = (
-     'global', 'record', 'class instance', 'class instance', 'class', 'interface'
-    );
   CLOSURE_KINDS: array[TLuaClosureKind] of string = (
-    'method', 'method', 'method', 'method',
-    'constructor', 'destructor', 'method', 'reference'
+    'global method', 'static method', 'method', 'class method',
+    'constructor', 'constructor', 'destructor', 'method', 'reference'
   );
 var
   Closure: PLuaClosure;
@@ -16086,11 +16218,28 @@ var
   Name: ^LuaString;
 begin
   Closure := lua_touserdata(L, LUA_UPVALUEINDEX);
-  ClosureArgsCount := lua_gettop(TLua(Closure.Header.Lua).Handle);
+  ClosureArgsCount := lua_gettop(TLua(Closure.Lua).Handle);
 
-  if (Closure.Header.InvokableMode) then
-  begin
-    Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(TLua(Closure.Header.Lua).FMemoryHeap).Unpack{$endif}(Closure.Invokable);
+  case Closure.Mode of
+    cmInternal:
+    begin
+      ArgsCount := ClosureArgsCount;
+      Result := TInternalCallback(Closure.Address)(Closure.Lua, Closure.Instance, ArgsCount);
+      if (ClosureArgsCount <> ArgsCount) then
+        goto invalid_args_count;
+      Exit;
+    end;
+    cmUniversal:
+    begin
+      ArgsCount := Closure.ArgsCount;
+      if (ArgsCount <> -1) and (ClosureArgsCount <> ArgsCount) then
+        goto invalid_args_count;
+
+      Result := TLua(Closure.Lua).UniversalCallback(Closure, ClosureArgsCount);
+    end;
+  else
+    // cmInvokable
+    Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(TLua(Closure.Lua).FMemoryHeap).Unpack{$endif}(Closure.Invokable);
     ArgsCount := Invokable.ParamCount;
     if (ClosureArgsCount <> ArgsCount) then
       goto invalid_args_count;
@@ -16102,11 +16251,11 @@ begin
 
       if (Invokable.FinalCount = 0) then
       begin
-        Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, Pointer(@Buffer));
+        Result := TLua(Closure.Lua).InvokableCallback(Closure, Pointer(@Buffer));
       end else
       begin
         try
-          Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, Pointer(@Buffer));
+          Result := TLua(Closure.Lua).InvokableCallback(Closure, Pointer(@Buffer));
         finally
           Invokable.Finalize(Pointer(@Buffer));
         end;
@@ -16120,11 +16269,11 @@ begin
 
         if (Invokable.FinalCount = 0) then
         begin
-          Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, InvokableData);
+          Result := TLua(Closure.Lua).InvokableCallback(Closure, InvokableData);
         end else
         begin
           try
-            Result := TLua(Closure.Header.Lua).InvokableCallback(Closure, InvokableData);
+            Result := TLua(Closure.Lua).InvokableCallback(Closure, InvokableData);
           finally
             Invokable.Finalize(InvokableData);
           end;
@@ -16133,23 +16282,15 @@ begin
         FreeMem(InvokableData);
       end;
     end;
-  end else
-  begin
-    ArgsCount := Closure.ArgsCount;
-    if (ArgsCount <> -1) and (ClosureArgsCount <> ArgsCount) then
-      goto invalid_args_count;
-
-    Result := TLua(Closure.Header.Lua).ClosureCallback(Closure, ClosureArgsCount);
   end;
 
   Exit;
 invalid_args_count:
-  Name := @TLua(Closure.Header.Lua).FStringBuffer.Lua;
-  TLua(Closure.Header.Lua).unpack_lua_string(Name^, Closure.Header.Name);
-  TLua(Closure.Header.Lua).Error('Invalid arguments count of %s %s %s (%d), reqired: %d',
+  Name := @TLua(Closure.Lua).FStringBuffer.Lua;
+  TLua(Closure.Lua).unpack_lua_string(Name^, Closure.Name);
+  TLua(Closure.Lua).Error('Invalid arguments count of %s %s (%d), reqired: %d',
     [
-      INSTANCE_KINDS[Closure.Header.InstanceKind],
-      CLOSURE_KINDS[Closure.Header.Kind],
+      CLOSURE_KINDS[Closure.Kind],
       Name^,
       ClosureArgsCount,
       ArgsCount
@@ -16158,45 +16299,26 @@ invalid_args_count:
   Result := 0;
 end;
 
-procedure TLua.push_closure(const Name: __luaname; const Kind: Byte{TLuaClosureKind}; const InstanceKind: Byte{TLuaInstanceKind};
-  const Instance: Pointer; const Address: Pointer; const InvokableMode: Boolean; const InvokableArgsCount: __luapointer);
+procedure TLua.push_closure(const Name: __luaname; const Kind{TLuaClosureKind}, Mode{TLuaClosureMode}: Byte;
+      const Instance: Pointer; const Address: Pointer; const MetaTypeArgsCountInvokable: Integer);
 var
   Closure: PLuaClosure;
 begin
   Closure := lua_newuserdata(Handle, SizeOf(TLuaClosure));
-  Closure.Header.Lua := Pointer(Self);
-  Closure.Header.Marker := LUA_CLOSURE_MARKER;
-  Closure.Header.Kind := TLuaClosureKind(Kind);
-  Closure.Header.InstanceKind := TLuaInstanceKind(InstanceKind);
-  Closure.Header.InvokableMode := InvokableMode;
-  Closure.Header.Name := Name;
-
+  Closure.Marker := LUA_CLOSURE_MARKER;
+  Closure.Kind := TLuaClosureKind(Kind);
+  Closure.Mode := TLuaClosureMode(Mode);
+  Closure.Lua := Pointer(Self);
+  Closure.Name := Name;
   Closure.Address := Address;
-  Closure.Invokable := InvokableArgsCount;
+  Closure.Instance := Instance;
+  Closure.Invokable := MetaTypeArgsCountInvokable;
 
-  Closure.Instance := nil;
-  case TLuaInstanceKind(InstanceKind) of
-    {.$ifdef AUTOREFCOUNT}
-    ikObject:
-    begin
-      PLuaObjectClosure(Closure).Instance := TObject(Instance);
-      // ToDo
-    end;
-    {.$endif}
-    {.$ifdef WEAKREF}
-    ikWeakObject:
-    begin
-      PLuaWeakClosure(Closure).Instance := TObject(Instance);
-      // ToDo
-    end;
-    {.$endif}
-    ikInterface:
-    begin
-      PLuaInterfaceClosure(Closure).Instance := IInterface(Instance);
-      // ToDo
-    end;
-  else
-    Closure.Instance := Instance;
+  if (Closure.Kind = ckReference) and (Assigned(Closure.Instance)) then
+  begin
+    IInterface(Closure.Instance)._AddRef;
+    lua_rawgeti(Handle, LUA_REGISTRYINDEX, FClosureMetaTable);
+    lua_setmetatable(Handle, -2);
   end;
 
   lua_pushcclosure(Handle, LuaClosureWrapper, 1);
@@ -16205,11 +16327,11 @@ end;
 procedure TLua.InternalRegisterCallback(const Name: __luaname; const Callback: Pointer; const P1, P2: __luapointer);
 begin
   lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
-  push_newfunction(Callback, P1, P2, False);
+  push_newfunction(Callback, P1, P2);
   lua_rawset(Handle, -3);
 end;
 
-procedure TLua.InternalUnregisterCallback(const Name: __luaname);
+(*procedure TLua.InternalUnregisterCallback(const Name: __luaname);
 begin
   lua_pushlstring(Handle, Pointer(Name), LStrLen(Name));
 
@@ -16222,6 +16344,14 @@ begin
 
   lua_pushnil(Handle);
   lua_rawset(Handle, -3);
+end;*)
+
+function TLua.InternalNewMetaTable: Integer;
+begin
+  Result := global_alloc_ref;
+
+  lua_createtable(Handle, 0, 0);
+  global_fill_value(Result);
 end;
 
 function TLua.InternalRegisterMetaTable(const MetaType: PLuaMetaType): Integer;
@@ -16229,15 +16359,7 @@ const
   LUA_GLOBALSINDEX = -10002;
   LUA_RIDX_GLOBALS = 2;
 begin
-  Result := global_alloc_ref;
-
-  lua_createtable(Handle, 0, 0);
-  if (MetaType <> nil) then
-  begin
-    lua_pushlightuserdata(Handle, MetaType);
-    lua_rawseti(Handle, -2, 0);
-  end;
-  global_fill_value(Result);
+  Result := InternalNewMetaTable;
 
   if (not Assigned(MetaType)) then
   begin
@@ -16257,6 +16379,9 @@ begin
     MetaType.F.Ref := Result;
 
     global_push_value(Result);
+    lua_pushlightuserdata(Handle, MetaType);
+    lua_rawseti(Handle, -2, 0);
+
     lua_pushvalue(Handle, 1);
     lua_setmetatable(Handle, -2);
     stack_pop;
@@ -16353,6 +16478,17 @@ var
   Size: NativeInt;
   Ptr: __luapointer;
   Entity: PLuaGlobalEntity;
+
+  procedure RegisterOperators(const Values: array of Integer);
+  var
+    i, Value: Integer;
+  begin
+    for i := Low(Values) to High(Values) do
+    begin
+      Value := Values[i];
+      InternalRegisterCallback(OPERATOR_NAMES[Value], @TLua.__operator, Ptr, Value);
+    end;
+  end;
 begin
   // global entity
   LuaName := TLuaNames(FNames).Add(Name);
@@ -16387,54 +16523,39 @@ begin
   // clear instance (specific fields)
   System.FillChar(Pointer(NativeInt(Result) + SizeOf(TLuaMetaType))^,
     Size - SizeOf(TLuaMetaType), #0);
-end;
-             (*
-function  TLua.internal_add_class_info(const is_global_space: boolean = false): integer;
-var
-  ClassInfo: ^TLuaClassInfo;
-begin
-  if (is_global_space) then
-  begin
-    Result := -1;
-    ClassInfo := @GlobalNative;
-  end else
-  begin
-    Result := Length(ClassesInfo);
-    SetLength(ClassesInfo, Result+1);
-    ClassInfo := @ClassesInfo[Result];
-  end;
 
-  // заполнение
-  ZeroMemory(ClassInfo, sizeof(TLuaClassInfo));
-  ClassInfo._ClassIndex := Result;
-  ClassInfo._DefaultProperty := -1;
-  ClassInfo.ParentIndex := -1;
-end;          *)
+  // metatable callbacks
+  Ptr := Result.Ptr;
+  global_push_value(Result.F.Ref);
+  begin
+    // common
+    InternalRegisterCallback(Pointer(@ID_LEN), @TLua.__len, Ptr);
+    InternalRegisterCallback(Pointer(@ID_TOSTRING), @TLua.__tostring, Ptr);
+    InternalRegisterCallback(Pointer(@ID_CALL), @TLua.__call, Ptr);
+    InternalRegisterCallback(Pointer(@ID_GC), @TLua.__gc, Ptr, PTR_FALSE);
+    InternalRegisterCallback(Pointer(@ID_INDEX), @TLua.__index, Ptr);
+    InternalRegisterCallback(Pointer(@ID_NEWINDEX), @TLua.__newindex, Ptr);
 
-function TLua.InternalNearestClass(const AClass: TClass): PLuaMetaType;
-var
-  ClassValue: TClass;
-  Item: PLuaDictionaryItem;
-begin
-  ClassValue := AClass;
-  if (AClass <> nil) then
-  repeat
-    Item := TLuaDictionary(FMetaTypes).InternalFind(Pointer(ClassValue), False);
-    if (Assigned(Item)) then
-    begin
-      Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Item.Value);
-      Exit;
-    end else
-    begin
-      ClassValue := PPointer(NativeInt(ClassValue) + vmtParent)^;
-      if (ClassValue = nil) then Break;
-      {$ifNdef FPC}
-      ClassValue := PPointer(ClassValue)^;
-      {$endif}
+    // operators
+    case Kind of
+      mtRecord:
+      begin
+        RegisterOperators([OPERATOR_NEG, OPERATOR_ADD, OPERATOR_SUB, OPERATOR_MUL, OPERATOR_DIV,
+          OPERATOR_MOD, OPERATOR_POW, OPERATOR_EQUAL, OPERATOR_LESS, OPERATOR_LESS_EQUAL]);
+      end;
+      mtArray:
+      begin
+        if (Assigned(TypeInfo)) and (PTypeInfo(TypeInfo).Kind = tkDynArray) then
+          RegisterOperators([OPERATOR_CONCAT]);
+      end;
+      mtSet:
+      begin
+        RegisterOperators([OPERATOR_ADD, OPERATOR_SUB, OPERATOR_MUL, OPERATOR_EQUAL,
+          OPERATOR_LESS_EQUAL]);
+      end;
     end;
-  until (False);
-
-  Result := nil;
+  end;
+  lua_settop(Handle, 0);
 end;
 
 procedure __AddClassRtti(const Lua: TLua; const ClassInfo: PLuaClassInfo;
@@ -16731,11 +16852,11 @@ begin
     if (Length(ClassName) > 3) and (ClassName[1] = 'l') and
       (ClassName[2] = 'u') and (ClassName[3] = 'a') then
     begin
-      ClassRegistrator := AClass;
+      if (ClassRegistrator = nil) then ClassRegistrator := AClass;
       ClassChild := ClassValue;
       ClassValue := ClassValue.ClassParent;
       if (ClassValue = nil) then
-        raise ELua.Create('ClassRegistrator is defined, but really Class not found') at FReturnAddress;
+        raise ELua.Create('ClassRegistrator is defined, but real class not found') at FReturnAddress;
 
       if (ClassValue.InstanceSize <> ClassChild.InstanceSize) then
         raise ELua.CreateFmt('Class registrator "%s" can''t have own fields', [ClassChild.ClassName]) at FReturnAddress;
@@ -16763,10 +16884,11 @@ begin
     // globals, metatypes dictionary, metatable
     ClassInfo := Pointer(InternalAddMetaType(mtClass, ClassName, Pointer(ClassValue), SizeOf(Pointer)));
 
-    // register parents
+    // register parents, inherits name space
     if (ClassValue.ClassParent = nil) then
     begin
-      // default name space: todo
+      // TObject: default name space
+      TLuaDictionary(ClassInfo.FNameSpace).Assign(TLuaDictionary(FStdObjectNameSpace));
       ClassInfo.Parent := LUA_POINTER_INVALID;
       ClassInfo.DefaultProperty := LUA_POINTER_INVALID;
      end else
@@ -16776,7 +16898,9 @@ begin
       Item := Pointer(TLuaDictionary(ClassInfo.FNameSpace).FItems);
       for i := 1 to TLuaDictionary(ClassInfo.FNameSpace).Count do
       begin
-        Item.Value := Item.Value or NAMESPACE_FLAG_INHERITED;
+        if (Item.Value > 0) then
+          Item.Value := Item.Value or NAMESPACE_FLAG_INHERITED;
+
         Inc(Item);
       end;
 
@@ -16804,6 +16928,27 @@ begin
 
   // result
   Result := ClassInfo;
+end;
+
+function TLua.InternalGetClassInfo(const AClass: TClass): PLuaClassInfo;
+var
+  Item: PLuaDictionaryItem;
+begin
+  if (Assigned(AClass)) then
+  begin
+    Item := TLuaDictionary(FMetaTypes).InternalFind(Pointer(AClass), False);
+    if (Assigned(Item)) then
+    begin
+      Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Item.Value);
+      Exit;
+    end else
+    begin
+      Result := InternalAddClass(AClass, False);
+    end;
+  end else
+  begin
+    Result := nil;
+  end;
 end;
 
 function TLua.InternalAddRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
@@ -16938,6 +17083,7 @@ begin
   end else
   begin
     Result := Pointer(InternalAddMetaType(mtRecord, Name, RecordTypeInfo, RecordSize));
+    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdRecordNameSpace));
   end;
 
   if (not UseRtti) or (not Assigned(RecordTypeInfo)) then
@@ -17058,6 +17204,7 @@ begin
     VmtOffset := Parent.Count * SizeOf(Pointer);
   end else
   begin
+    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdInterfaceNameSpace));
     VmtOffset := 0;
   end;
 
@@ -17249,6 +17396,7 @@ begin
       AdvancedSize := Length(ABounds) * SizeOf(Integer);
       Inc(AdvancedSize, (Dimention - 1) * SizeOf(NativeInt));
       Result := Pointer(InternalAddMetaType(mtArray, FStringBuffer.Lua, ArrayTypeInfo, 0{fill later}, AdvancedSize));
+      Result.FNameSpace := FStdRecordNameSpace;
 
       Result.FIsDynamic := IsDynamic;
       Result.FDimention := Dimention;
@@ -17298,49 +17446,6 @@ begin
   end;
 end;
 
-procedure __TLuaRegEnum(const Self: TLua; const TypeInfo: PTypeInfo);
-var
-  i, VMin, VMax, Ref: Integer;
-  S: ^ShortString;
-  LuaName: __luaname;
-begin
-  if (NativeUInt(TypeInfo) <= $FFFF) then
-    raise ELua.Create('EnumTypeInfo not defined') at Self.FReturnAddress;
-
-  if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanTypeInfo(TypeInfo)) then
-  begin
-    Self.unpack_lua_string(Self.FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
-    GetTypeKindName(Self.FStringBuffer.Default, TypeInfo.Kind);
-    raise ELua.CreateFmt('Type "%s" (kind: %s) is not enumeration',
-      [Self.FStringBuffer.Lua, Self.FStringBuffer.Default]) at Self.FReturnAddress;
-  end;
-
-  // check fake (enumeration) storage
-  if (Assigned(TLuaDictionary(Self.FGlobalEntities).InternalFind(TypeInfo, False))) then
-    Exit;
-
-  // each enumeration value
-  with GetTypeData(TypeInfo)^ do
-  begin
-    VMin := MinValue;
-    VMax := MaxValue;
-    S := Pointer(@GetTypeData(BaseType^)^.NameList);
-
-    for i := VMin to VMax do
-    begin
-      LuaName := TLuaNames(Self.FNames).Add(S^);
-      Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName)).Ref;
-      lua_pushinteger(Self.Handle, i);
-      Self.global_fill_value(Ref);
-
-      Inc(NativeInt(S), PByte(S)^ + 1);
-    end;
-  end;
-
-  // fake (enumeration) storage
-  TLuaDictionary(Self.FGlobalEntities).Add(TypeInfo, LUA_POINTER_INVALID);
-end;
-
 function TLua.InternalAddSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
 const
   MASK_3 = $FF shl 3;
@@ -17375,6 +17480,7 @@ begin
     if (Ptr = LUA_POINTER_INVALID) then
     begin
       Result := Pointer(InternalAddMetaType(mtSet, FStringBuffer.Lua, TypeInfo, 0{fill later}));
+      Result.FNameSpace := FStdSetNameSpace;
 
       Result.FItemTypeInfo := ItemTypeInfo;
       Result.FLow := Low;
@@ -17398,7 +17504,7 @@ begin
 
       if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanTypeInfo(ItemTypeInfo)) then
       begin
-        __TLuaRegEnum(Self, ItemTypeInfo);
+        InternalAutoRegister(ItemTypeInfo);
       end;
     end else
     begin
@@ -17412,6 +17518,49 @@ begin
   begin
     Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
   end;
+end;
+
+procedure __TLuaRegEnum(const Self: TLua; const TypeInfo: PTypeInfo);
+var
+  i, VMin, VMax, Ref: Integer;
+  Ptr: PByte;
+  LuaName: __luaname;
+begin
+  if (NativeUInt(TypeInfo) <= $FFFF) then
+    raise ELua.Create('EnumTypeInfo not defined') at Self.FReturnAddress;
+
+  if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanTypeInfo(TypeInfo)) then
+  begin
+    Self.unpack_lua_string(Self.FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
+    GetTypeKindName(Self.FStringBuffer.Default, TypeInfo.Kind);
+    raise ELua.CreateFmt('Type "%s" (kind: %s) is not enumeration',
+      [Self.FStringBuffer.Lua, Self.FStringBuffer.Default]) at Self.FReturnAddress;
+  end;
+
+  // check fake (enumeration) storage
+  if (Assigned(TLuaDictionary(Self.FGlobalEntities).InternalFind(TypeInfo, False))) then
+    Exit;
+
+  // each enumeration value
+  with GetTypeData(TypeInfo)^ do
+  begin
+    VMin := MinValue;
+    VMax := MaxValue;
+    Ptr := Pointer(@GetTypeData(BaseType^)^.NameList);
+
+    for i := VMin to VMax do
+    begin
+      LuaName := TLuaNames(Self.FNames).Add(PShortString(Ptr)^);
+      Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName)).Ref;
+      lua_pushinteger(Self.Handle, i);
+      Self.global_fill_value(Ref);
+
+      Ptr := GetTail(Ptr^);
+    end;
+  end;
+
+  // fake (enumeration) storage
+  TLuaDictionary(Self.FGlobalEntities).Add(TypeInfo, LUA_POINTER_INVALID);
 end;
 
 function TLua.InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean): Pointer{PLuaMetaType/PLuaInvokable};
@@ -17889,7 +18038,6 @@ var
   PropName: __luaname;
   TypeName: ^LuaString;
   Value: TLuaProperty;
-  PropMeta: PLuaMetaType;
   Item: PLuaDictionaryItem;
   Entity: PLuaGlobalEntity;
   LastPtr, Ptr: __luapointer;
@@ -17916,17 +18064,9 @@ begin
   // parameters
   if (NativeUInt(TypeInfo) <= $FFFF) then
     raise ELua.CreateFmt('TypeInfo of %s.%s not defined', [TypeName^, Name]) at FReturnAddress;
-  PropMeta := Pointer(TLuaDictionary(FMetaTypes).InternalFind(TypeInfo, False));
-  if (Assigned(PropMeta)) then PropMeta := TLuaMemoryHeap(FMemoryHeap).Unpack(PLuaDictionaryItem(PropMeta).Value);
-  if (Assigned(PropMeta)) then
-  begin
-    Value.MetaType := PropMeta;
-  end else
-  begin
-    if (not Value.InternalSetTypeInfo(TypeInfo, Self, IsAutoRegister)) then
-      raise ELua.CreateFmt('Unknown type "%s" (%s) for %s.%s porperty',
-        [FStringBuffer.Lua, FStringBuffer.Default, TypeName^, Name]) at FReturnAddress;
-  end;
+  if (not Value.InternalSetTypeInfo(Self, TypeInfo)) then
+    raise ELua.CreateFmt('Unknown type "%s" (%s) for %s.%s porperty',
+      [FStringBuffer.Lua, FStringBuffer.Default, TypeName^, Name]) at FReturnAddress;
   Value.Getter := Getter;
   Value.Setter := Setter;
   Value.Index := IndexParams;
@@ -18102,362 +18242,6 @@ begin
 end;
        *)
 
-const
-  PTR_FALSE = pointer(ord(false));
-  PTR_TRUE = pointer(ord(true));
-  OPERATOR_NEG = 0;
-  OPERATOR_ADD = 1;
-  OPERATOR_SUB = 2;
-  OPERATOR_MUL = 3;
-  OPERATOR_DIV = 4;
-  OPERATOR_MOD = 5;
-  OPERATOR_POW = 6;
-  OPERATOR_EQUAL = 7;
-  OPERATOR_LESS = 8;
-  OPERATOR_LESS_EQUAL = 9;
-  OPERATOR_CONCAT = 10; {бонусный. только для динамических массивов}
-
-         (*
-// проинициализировать пространства имён и создать калбеки
-procedure TLua.INITIALIZE_NAME_SPACE();
-var
-  i: integer;
-
-  // добавить глобальное имя в свой список
-  procedure AddToNameSpace(var ClassInfo: TLuaClassInfo; const Name: string;
-                          const IsProc: boolean; const ClassIndex, Ind: integer);
-  var
-    NewValue, P: integer;
-    ProcInfo, PropertyInfo: pointer;
-  begin
-    // NewValue := (ord(IsProc) shl 31) or (ClassIndex shl 16) or (Ind);
-    NewValue := ClassIndex; // word part
-    with TSmallPoint(NewValue) do
-    begin y := Ind; if (not IsProc) then y := not y; end;
-    P := ClassInfo.NameSpacePlace(Self, pchar(Name), Length(Name), ProcInfo, PropertyInfo);
-
-    if (ProcInfo = nil) and (PropertyInfo = nil) then
-    begin
-      // добавить
-      with TLuaHashIndex(DynArrayInsert(ClassInfo.NameSpace, typeinfo(TLuaHashIndexDynArray), P)^) do
-      begin
-        Hash := StringHash(Name);
-        Index := NewValue;
-      end;
-    end else
-    begin
-      // изменить
-      ClassInfo.NameSpace[P].Index := NewValue;
-    end;
-  end;
-
-  // калбек для метатаблицы в стеке
-  procedure add_metatable_callback(const proc_name: pchar; const CFunctionProc: pointer); overload;
-  begin
-    lua_push_pchar(Handle, proc_name);
-
-    if (CFunctionProc = nil) then lua_pushnil(Handle)
-    else lua_pushcclosure(Handle, CFunctionProc, 0);
-
-    lua_rawset(Handle, -3);
-  end;
-  // зарегистрировать и добавить калбек
-  procedure add_metatable_callback(const proc_name: pchar; const CallbackProc: pointer; const P1: pointer; const P2: pointer); overload;
-  begin
-    if (CallbackProc = nil) then add_metatable_callback(proc_name, nil)
-    else add_metatable_callback(proc_name, pointer(AddLuaCallbackProc(Self, P1, P2, CallbackProc)));
-  end;
-
-  // сгенерировать и заполнить все калбеки
-  procedure CreateCallbacks(var ClassInfo: TLuaClassInfo);
-  var
-    i: integer;
-    Operators: TLuaOperators;
-
-
-    // калбек для метатаблицы в стеке
-    procedure register_callback(const proc_name: pchar; const CallbackProc: pointer; const Value: pointer=nil);
-    var
-      P1: pointer;
-    begin
-      P1 := @ClassInfo;
-      if (@ClassInfo = @GlobalNative) then P1 := PTR_FALSE;
-
-      add_metatable_callback(proc_name, CallbackProc, P1, Value);
-    end;
-
-    // зарегистрировать оператор
-    // учитывая фильтр Operators
-    procedure register_operator(const Value: integer);
-    const
-      OPERATORS_NAME: array[OPERATOR_NEG..OPERATOR_CONCAT]
-      of pansichar = ('__unm','__add','__sub','__mul','__div','__mod','__pow','__eq','__lt','__le','__concat');
-    var
-      CallbackProc: pointer;
-    begin
-      CallbackProc := @TLua.__operator;
-
-      if (Value in [OPERATOR_NEG..OPERATOR_POW]) then
-      begin
-        if (not (TLuaOperator(Value) in Operators)) then CallbackProc := nil;
-      end else
-      if (Value = OPERATOR_CONCAT) then with ClassInfo do
-      begin
-         if (_ClassKind <> ckArray) or (PLuaArrayInfo(_Class).Dimention <> 1)
-         or (not PLuaArrayInfo(_Class).IsDynamic) then CallbackProc := nil;
-      end else
-      begin
-        if (not (loCompare in Operators)) then CallbackProc := nil;
-        if (Value = OPERATOR_LESS) and (ClassInfo._ClassKind = ckSet) then CallbackProc := nil;
-      end;
-
-      add_metatable_callback(OPERATORS_NAME[Value], CallbackProc, @ClassInfo, pointer(Value));
-    end;
-
-  begin
-    // запушить метатаблицу
-    global_push_value(ClassInfo.Ref);
-
-    // заполнение метатаблицы базовыми функциями
-    if (@ClassInfo = @GlobalNative) then
-    begin
-      // глобальное пространство
-      register_callback('__index', @TLua.__global_index);
-      register_callback('__newindex', @TLua.__global_newindex);
-    end else
-    if (ClassInfo._ClassKind = ckArray) then
-    begin
-      // массив
-      register_callback('__index', @TLua.__array_index, PTR_FALSE);
-      register_callback('__newindex', @TLua.__array_newindex, PTR_FALSE);
-      register_callback('__len', @TLua.__len);
-      register_callback('__call', @TLua.__call);
-      register_callback('__gc', @TLua.__destructor, PTR_FALSE);
-
-      // оператор конкатенации
-      register_operator(OPERATOR_CONCAT);
-    end else
-    begin
-      // класс, структура или множество
-      register_callback('__index', @TLua.__index_prop_push);
-      register_callback('__newindex', @TLua.__newindex_prop_set);
-      register_callback('__len', @TLua.__len);
-      register_callback('__call', @TLua.__call);
-      register_callback('__gc', @TLua.__destructor, PTR_FALSE);
-
-
-      // персональные функции-конструкторы/деструкторы
-      if (ClassInfo._ClassKind = ckClass) then ClassInfo.__Create := pointer(AddLuaCallbackProc(Self, @ClassInfo, PTR_TRUE, @TLua.__constructor));
-      if (ClassInfo._ClassKind = ckClass) then ClassInfo.__Free := pointer(AddLuaCallbackProc(Self, @ClassInfo, PTR_TRUE, @TLua.__destructor));
-
-      // операторы для структур и множеств
-      case ClassInfo._ClassKind of
-        ckRecord: begin
-                    Operators := PLuaRecordInfo(ClassInfo._Class).FOperators;
-                    if (@PLuaRecordInfo(ClassInfo._Class).FOperatorCallback = nil) then Operators := [];
-                  end;
-
-           ckSet: Operators := [loNeg, loAdd, loSub, loMul, loCompare];
-      else
-         Operators := [];
-      end;
-      if (ClassInfo._ClassKind <> ckClass) then
-      for i := OPERATOR_NEG to OPERATOR_LESS_EQUAL do register_operator(i);
-    end;
-
-    // глобальный калбек __tostring
-    if (@ClassInfo <> @GlobalNative) then
-    begin
-      lua_push_pchar(Handle, '__tostring');
-      lua_pushcclosure(Handle, cfunction_tostring, 0);
-      lua_rawset(Handle, -3);
-    end;
-
-    // очистить стек
-    lua_settop(Handle, 0);
-
-    // создать калбеки для функций
-    for i := 0 to Length(ClassInfo.Procs)-1 do
-    ClassInfo.Procs[i].lua_CFunction := pointer(AddLuaCallbackProc(Self, @ClassInfo, @ClassInfo.Procs[i], @TLua.ProcCallback));
-  end;
-
-  // создать глобальное пространство имён для класса,
-  // включая пространство имён предка
-  procedure FillNameSpace(var AlreadyInitialized: TBooleanDynArray; var ClassInfo: TLuaClassInfo; const ClassIndex: integer); overload;
-  var
-    i, ParentIndex: integer;
-  begin
-    if (AlreadyInitialized[ClassIndex]) then exit;
-    ClassInfo._ClassSimple := false;
-
-    // зарегистрировать предка, взять его таблицу глобальных имён
-    ParentIndex := ClassInfo.ParentIndex;
-    if (ParentIndex >= 0) then
-    begin
-      FillNameSpace(AlreadyInitialized, ClassesInfo[ParentIndex], ParentIndex);
-      DynArrayCopy(ClassInfo.NameSpace, ClassesInfo[ParentIndex].NameSpace, typeinfo(TLuaHashIndexDynArray));
-    end else
-    begin
-      ClassInfo.NameSpace := nil;
-    end;
-
-    // дополнить информацию о методах
-    for i := 0 to Length(ClassInfo.Procs)-1 do
-    AddToNameSpace(ClassInfo, ClassInfo.Procs[i].ProcName, true, ClassIndex, i);
-
-    // добавить информацию о каждом из свойств
-    for i := 0 to Length(ClassInfo.Properties)-1 do
-    AddToNameSpace(ClassInfo, ClassInfo.Properties[i].PropertyName, false, ClassIndex, i);
-
-
-    // определить, является ли класс "простым"
-    // это значит что у него нет функций, количество свойств <= 10 и все содержатся в его Properties
-    ClassInfo._ClassSimple := (ClassInfo.Procs = nil) and (Length(ClassInfo.Properties) <= 10);
-    if (ClassInfo._ClassSimple) then
-    for i := 0 to Length(ClassInfo.NameSpace)-1 do
-    if (ClassInfo.NameSpace[i].Index and $FFFF <> ClassIndex) then
-    begin
-      ClassInfo._ClassSimple := false;
-      break;
-    end;
-
-    // пометить, что зарегистрировано
-    AlreadyInitialized[ClassIndex] := true;
-  end;
-
-  // создать список всевозможножных методов и свойств
-  // включай методы и свойства предков
-  // !!! для GlobalNative этого делать не нужно. Глобальные переменные всегда актуальны
-  procedure FillNameSpace(); overload;
-  var
-    i, Count: integer;
-    AlreadyInitialized: TBooleanDynArray;
-  begin
-    // инициализация массива
-    Count := Length(ClassesInfo);
-    SetLength(AlreadyInitialized, Count);
-    if (Count <> 0) then ZeroMemory(pointer(AlreadyInitialized), Count);
-
-    // инициализация классов
-    for i := 0 to Count-1 do
-    FillNameSpace(AlreadyInitialized, ClassesInfo[i], i);
-  end;
-
-begin
-  if (FInitialized) then exit;
-  DeleteCFunctionDumps(Self);
-
-  // создать список всевозможножных методов и свойств
-  // включай методы и свойства предков
-  // !!! для GlobalNative этого делать не нужно. Глобальные переменные всегда актуальны
-  FillNameSpace();
-
-
-  // создать универсальные калбеки
-  begin
-    cfunction_tostring := pointer(AddLuaCallbackProc(Self, nil, nil, @TLua.__tostring));
-    cfunction_inherits_from := pointer(AddLuaCallbackProc(Self, nil, nil, @TLua.__inherits_from));
-    cfunction_assign := pointer(AddLuaCallbackProc(Self, nil, nil, @TLua.__assign));
-    cfunction_dynarray_resize := pointer(AddLuaCallbackProc(Self, nil, nil, @TLua.__array_dynamic_resize));
-    cfunction_array_include := pointer(AddLuaCallbackProc(Self, pointer(1), nil, @TLua.__array_include));
-    cfunction_set_include  := pointer(AddLuaCallbackProc(Self, PTR_FALSE, pointer(0), @TLua.__set_method));
-    cfunction_set_exclude  := pointer(AddLuaCallbackProc(Self, PTR_FALSE, pointer(1), @TLua.__set_method));
-    cfunction_set_contains := pointer(AddLuaCallbackProc(Self, PTR_FALSE, pointer(2), @TLua.__set_method));
-  end;
-
-  // сгенерировать и заполнить специфичные калбеки
-  begin
-    CreateCallbacks(GlobalNative);
-
-    for i := 0 to Length(ClassesInfo)-1 do
-    CreateCallbacks(ClassesInfo[i]);
-
-    // сложные свойства
-    global_push_value(mt_properties);
-    add_metatable_callback('__index', @TLua.__array_index, nil, PTR_TRUE);
-    add_metatable_callback('__newindex', @TLua.__array_newindex, nil, PTR_TRUE);
-    add_metatable_callback('__gc', @TLua.__destructor, nil, nil);
-    add_metatable_callback('__tostring', cfunction_tostring);
-    lua_settop(Handle, 0);
-  end;
-
-  // отсортировать таблицу CFunctionDumps
-  {$ifdef NO_CRYSTAL}
-    QuickSort4(pointer(CFunctionDumps), 0, Length(CFunctionDumps)-1);
-  {$else}
-    SortArray4(CFunctionDumps);
-  {$endif}
-
-  // флаг "всё проинициализированно"
-  FInitialized := true;  
-end;
-        *)
-          (*
-// преобразование userdata или метатаблицы в строку
-function __arrayindex_description(const Prefix, Value: string; const Index, Dimention: integer): string; forward;
-function TLua.__tostring(): integer;
-var
-  userdata: PLuaUserData;
-
-  // описание difficult свойства - это отдельная тема 
-  procedure FillPropertyDescription();
-  begin
-    with userdata^, FBufferArg do
-    str_data := __arrayindex_description('NON FINSHED DIFFICULT PROPERTY: ' + PropertyInfo.PropertyName,
-               'xxx', integer(array_params) and $F - 1, array_params shr 4);
-  end;
-
-  // то же самое для сложных многомерных массивов
-  procedure FillArrayDescription();
-  begin
-    with userdata^, FBufferArg do
-    str_data := __arrayindex_description(ArrayInfo.Name, 'xxx', integer(array_params) and $F - 1, array_params shr 4);
-  end;
-
-
-begin
-  Result := 1;
-
-  if (lua_type(Handle, 1) = LUA_TTABLE) then
-  begin
-    lua_push_pascalstring(Handle, ClassesInfo[LuaTableToClass(Handle, 1)]._ClassName);
-  end else
-  begin
-    userdata := lua_touserdata(Handle, 1);
-
-    if (userdata = nil) or (userdata.instance = nil) then lua_push_pascalstring(Handle, 'Incorrect userdata')
-    else
-    with userdata^ do
-    if (kind = ukProperty) then
-    begin
-      FillPropertyDescription();
-      lua_push_pascalstring(Handle, FBufferArg.str_data);
-    end else
-    if (kind = ukArray) and (array_params and $F <> 0) then
-    begin
-      FillArrayDescription();
-      lua_push_pascalstring(Handle, FBufferArg.str_data);
-    end else
-    begin
-      // TObject, Record, Set
-      stack_luaarg(FBufferArg, 1, true); 
-
-      with FBufferArg do
-      begin
-        if (LuaType <> ltEmpty) and (LuaType <> ltString) then
-        begin
-          if (str_data <> '') then str_data := '';
-          TForceString(@TLuaArg.ForceString)(FBufferArg, str_data);
-        end;
-
-        if (LuaType = ltEmpty) or (str_data = '') then
-          lua_push_pascalstring(Handle, 'nil')
-        else
-          lua_push_pascalstring(Handle, str_data);
-      end;
-    end;
-  end;    
-end;      *)
             (*
 
 // является ли объект наследником (Класса, PLuaRecordInfo, PLuaArrayInfo, PLuaSetInfo)
@@ -18862,7 +18646,7 @@ begin
                                              if (FSize <= 4) then CorrectPointer(P^, FSize);
                             else
                               { ukProperty }
-                              ThrowWrongParameter(i, 'DifficultProperty');
+                              ThrowWrongParameter(i, 'ComplexProperty');
                             end;
                           end;
                         end;
@@ -18895,157 +18679,6 @@ end;
 
 
              (*
-// взять 2 первых параметра в калбеке
-// если первый аргумент не понятен - Result = false
-function __read_lua_arguments(const Handle: pointer; var userdata: PLuaUserData;
-                                  var S: pchar; var luatype, SLength, stdindex: integer): boolean;
-type
-  T12bytes = array[0..2] of integer;
-var
-  Data: ^T12bytes;// absolute S;
-const
-  _Type = $65707954;
-  _Name = $656D614E;
-  _Pare = $65726150;
-  _nt   = $0000746E;
-  _Inhe = $65686E49;
-  _rits = $73746972;
-  _From = $6D6F7246;
-  _Assi = $69737341;
-  _gn   = $00006E67;
-  _IsRe = $65527349;
-  _f    = $00000066;
-  _IsCo = $6F437349;
-  _nst  = $0074736E;
-  _IsCl = $6C437349;
-  _ass  = $00737361;
-  _cord = $64726F63;
-  _IsAr = $72417349;
-  _ray  = $00796172;
-  _IsSe = $65537349;
-  _t    = $00000074;
-  _IsEm = $6D457349;
-  _pty  = $00797470;
-  _Crea = $61657243;
-  _te   = $00006574;
-  _Free = $65657246;
-  _Low  = $00776F4C;
-  _High = $68676948;
-  _Leng = $676E654C;
-  _th   = $00006874;
-  _Resi = $69736552;
-  _ze   = $0000657A;
-  _Incl = $6C636E49;
-  _ude  = $00656475;
-  _Excl = $6C637845;
-  _Cont = $746E6F43;
-  _ains = $736E6961;
-  _Valu = $756C6156;
-  _e    = $00000065;
-
-begin
-  case lua_type(Handle, 1) of
-    LUA_TTABLE: begin
-                  userdata := nil;
-                  Result := true;
-                end;
- LUA_TUSERDATA: begin
-                  userdata := lua_touserdata(Handle, 1);
-                  Result := (userdata <> nil);
-                end;
-  else
-    Result := false;
-    exit;
-  end;
-  if (not Result) then exit;
-
-
-  SLength := 0;
-  luatype := lua_type(Handle, 2);
-  if (luatype = LUA_TSTRING) then S := lua_tolstring(Handle, 2, @SLength);
-  if (SLength = 0) then
-  begin
-    S := nil;
-    stdindex := -1;
-    exit;
-  end;
-
-  //  ----------- STD_INDEX часть -------------
-  Data := pointer(S);
-  case (SLength) of
-    3: begin
-         if (Data[0] = _Low) then stdindex := STD_LOW
-         else stdindex := 0;
-       end;
-    4: begin
-         if (Data[0] = _Type) then stdindex := STD_TYPE
-         else
-         if (Data[0] = _Free) then stdindex := STD_FREE
-         else
-         if (Data[0] = _High) then stdindex := STD_HIGH
-         else
-         stdindex := 0;
-       end;
-    5: begin
-         if (Data[0] = _IsRe) and (word(Data[1]) = _f) then stdindex := STD_IS_REF
-         else
-         if (Data[0] = _IsSe) and (word(Data[1]) = _t) then stdindex := STD_IS_SET
-         else
-         if (Data[0] = _Valu) and (word(Data[1]) = _e) then stdindex := STD_VALUE
-         else
-         stdindex := 0;
-       end;
-    6: begin
-         if (Data[0] = _Crea) and (word(Data[1]) = _te) then stdindex := STD_CREATE
-         else
-         if (Data[0] = _Leng) and (word(Data[1]) = _th) then stdindex := STD_LENGTH
-         else
-         if (Data[0] = _Resi) and (word(Data[1]) = _ze) then stdindex := STD_RESIZE
-         else
-         if (Data[0] = _Assi) and (word(Data[1]) = _gn) then stdindex := STD_ASSIGN
-         else
-         stdindex := 0;
-       end;
-    7: begin
-         if (Data[0] = _IsCo) and (Data[1] = _nst) then stdindex := STD_IS_CONST
-         else
-         if (Data[0] = _IsCl) and (Data[1] = _ass) then stdindex := STD_IS_CLASS
-         else
-         if (Data[0] = _IsEm) and (Data[1] = _pty) then stdindex := STD_IS_EMPTY
-         else
-         if (Data[0] = _IsAr) and (Data[1] = _ray) then stdindex := STD_IS_ARRAY
-         else
-         if (Data[0] = _Incl) and (Data[1] = _ude) then stdindex := STD_INCLUDE
-         else
-         if (Data[0] = _Excl) and (Data[1] = _ude) then stdindex := STD_EXCLUDE
-         else
-         stdindex := 0;
-       end;
-    8: begin
-         if (Data[0] = _Type) and (Data[1] = _Name) then stdindex := STD_TYPE_NAME
-         else
-         if (Data[0] = _IsRe) and (Data[1] = _cord) then stdindex := STD_IS_RECORD
-         else
-         if (Data[0] = _Cont) and (Data[1] = _ains) then stdindex := STD_CONTAINS
-         else
-         stdindex := 0;
-       end;
-   10: begin
-         if (Data[0] = _Type) and (Data[1] = _Pare) and (word(Data[2]) = _nt) then
-           stdindex := STD_TYPE_PARENT
-         else
-           stdindex := 0;
-       end;
-   12: begin
-         if (Data[0] = _Inhe) and (Data[1] = _rits) and (Data[2] = _From) then
-           stdindex := STD_INHERITS_FROM
-         else
-           stdindex := 0;
-       end;
-  else
-    stdindex := 0;
-  end;
-end;      *)
 
            (*
 // проверка на допустимость вызова дефолтного свойства
@@ -19059,156 +18692,9 @@ begin
   if (Parameters <> INDEXED_PROPERTY) then                                       {todo потом посмотреть более детально}
   Result := (Parameters = NAMED_PROPERTY) or (Lua.ClassesInfo[FClassIndex].Properties[0].Base.Kind = pkString);
 end;            *)
-                  (*
-// функция взятия стандартного свойства или метода.
-// функция вызывается редко, поэтому вынесена в отдельный код
-// true если "попал"
-function __push_std_prop(const Lua: TLua; const _ClassInfo: TLuaClassInfo; const stdindex: integer; const userdata: PLuaUserData; const S: pansichar): boolean;
-
-  // невозможно вызвать метод, потому что инстенст - константа
-  procedure ThrowConst();
-  begin
-    Lua.ScriptAssert('%s() method can''t be called, because %s instance is const', [S, _ClassInfo._ClassName]);
-  end;
-begin
-  Result := false;
-
-    with Lua do
-    case (stdindex) of
-           STD_TYPE: begin
-                       global_push_value(_ClassInfo.Ref);
-                       Result := true;
-                     end;
-      STD_TYPE_NAME: begin
-                       lua_push_pascalstring(Handle, _ClassInfo._ClassName);
-                       Result := true;
-                     end;
-    STD_TYPE_PARENT: begin
-                       if (_ClassInfo.ParentIndex < 0) then lua_pushnil(Handle)
-                       else global_push_value(ClassesInfo[_ClassInfo.ParentIndex].Ref);
-
-                       Result := true;
-                     end;
-  STD_INHERITS_FROM: begin
-                       lua_pushcclosure(Handle, lua_CFunction(cfunction_inherits_from), 0);
-                       Result := true;
-                     end;
-         STD_ASSIGN: begin
-                       if (userdata <> nil) then
-                       begin
-                         if (_ClassInfo._ClassKind <> ckClass) and (userdata.is_const) then ThrowConst();
-                         lua_pushcclosure(Handle, lua_CFunction(cfunction_assign), 0);
-                         Result := true;
-                       end;
-                     end;
-         STD_IS_REF: begin
-                       lua_pushboolean(Handle, (userdata <> nil) and (not userdata.gc_destroy));
-                       Result := true;
-                     end;
-       STD_IS_CONST: begin
-                       lua_pushboolean(Handle, (userdata <> nil) and (userdata.is_const));
-                       Result := true;
-                     end;
-       STD_IS_CLASS: begin
-                       lua_pushboolean(Handle, _ClassInfo._ClassKind = ckClass);
-                       Result := true;
-                     end;
-      STD_IS_RECORD: begin
-                       lua_pushboolean(Handle, _ClassInfo._ClassKind = ckRecord);
-                       Result := true;
-                     end;
-         STD_IS_SET: begin
-                       lua_pushboolean(Handle, _ClassInfo._ClassKind = ckSet);
-                       Result := true;
-                     end;
-       STD_IS_EMPTY: begin
-                       if (userdata = nil) or (userdata.instance = nil) then lua_pushboolean(Handle, true)
-                       else
-                       case _ClassInfo._ClassKind of
-                         ckClass: lua_pushboolean(Handle, false{todo ?});
-                        ckRecord: lua_pushboolean(Handle, IsMemoryZeroed(userdata.instance, PLuaRecordInfo(_ClassInfo._Class).FSize));
-                           ckSet: lua_pushboolean(Handle, IsMemoryZeroed(userdata.instance, PLuaSetInfo(_ClassInfo._Class).FSize));
-                       end;
-
-                       Result := true;
-                     end;
-         STD_CREATE: begin
-                       if (userdata = nil) and (_ClassInfo._ClassKind = ckClass) then
-                       begin
-                         lua_pushcclosure(Handle, lua_CFunction(_ClassInfo.__Create), 0);
-                         Result := true;
-                       end;
-                     end;
-           STD_FREE: begin
-                       if (userdata <> nil) and (_ClassInfo._ClassKind = ckClass) then
-                       begin
-                         lua_pushcclosure(Handle, lua_CFunction(_ClassInfo.__Free), 0);
-                         Result := true;
-                       end;
-                     end;
-            STD_LOW: begin
-                       if (_ClassInfo._ClassKind = ckSet) then
-                       begin
-                         lua_pushinteger(Handle, PLuaSetInfo(_ClassInfo._Class).FLow);
-                         Result := true;
-                       end;
-                     end;
-           STD_HIGH: begin
-                       if (_ClassInfo._ClassKind = ckSet) then
-                       begin
-                         lua_pushinteger(Handle, PLuaSetInfo(_ClassInfo._Class).FHigh);
-                         Result := true;
-                       end;
-                     end;
-        STD_INCLUDE: begin
-                       if (_ClassInfo._ClassKind = ckSet) and (userdata <> nil) then
-                       begin
-                         if (userdata.is_const) then ThrowConst();
-                         lua_pushcclosure(Handle, lua_CFunction(cfunction_set_include), 0);
-                         Result := true;
-                       end;
-                     end;
-        STD_EXCLUDE: begin
-                       if (_ClassInfo._ClassKind = ckSet) and (userdata <> nil) then
-                       begin
-                         if (userdata.is_const) then ThrowConst();
-                         lua_pushcclosure(Handle, lua_CFunction(cfunction_set_exclude), 0);
-                         Result := true;
-                       end;
-                     end;
-       STD_CONTAINS: begin
-                       if (_ClassInfo._ClassKind = ckSet) and (userdata <> nil) then
-                       begin
-                         lua_pushcclosure(Handle, lua_CFunction(cfunction_set_contains), 0);
-                         Result := true;
-                       end;
-                     end;
-          STD_VALUE: begin
-                       if (_ClassInfo._ClassIndex = TLUA_REFERENCE_CLASS_INDEX) and (userdata <> nil) and (userdata.instance <> nil) then
-                       begin
-                         lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(userdata.instance).Index);
-                         Result := true;
-                       end;
-                     end;
-    end;
-end;
-       *)
 
              (*
-// размер TypeInfo
-function TLua.__len(const ClassInfo: TLuaClassInfo): integer;
-begin
-  Result := 1;
 
-  case (ClassInfo._ClassKind) of
-    ckClass: lua_pushinteger(Handle, TClass(ClassInfo._Class).InstanceSize);
-   ckRecord: lua_pushinteger(Handle, PLuaRecordInfo(ClassInfo._Class).FSize);
-    ckArray: lua_pushinteger(Handle, PLuaArrayInfo(ClassInfo._Class).FSize);
-      ckSet: lua_pushinteger(Handle, PLuaSetInfo(ClassInfo._Class).FSize);
-  else
-    lua_pushinteger(Handle, 0);
-  end;
-end;
            *)
                          (*
 // операторы над структурами и множествами
@@ -19395,6 +18881,168 @@ begin
 end;
            *)
 
+
+                  (*
+function TLua.__destructor(const ClassInfo: TLuaClassInfo; const __free: boolean): integer;
+var
+  luatype: integer;
+  userdata: PLuaUserData;
+begin
+  Result := 0;
+
+  luatype := lua_type(Handle, 1);
+  if (luatype <> LUA_TUSERDATA) then
+  ScriptAssert('Wrong destruction type "%s"', [LuaTypeName(luatype)]);
+
+  userdata := lua_touserdata(Handle, 1);
+
+  // не надо удалять объекты при __gc, если не стоит соответствующего флага
+  if (not __free) and (not userdata .gc_destroy) then exit;
+
+  // если уже удалён
+  if (userdata.instance = nil) then
+  begin
+    if (__free) then
+    ScriptAssert('Instance of %s type is already destroyed', [ClassInfo._ClassName]);
+
+    exit;
+  end;
+
+  // очистить данные для массивов и сложных свойств
+  if (@ClassInfo = nil) then
+  with userdata^ do
+  begin
+    if (kind = ukProperty) then
+    with PropertyInfo^ do
+    begin
+      if (Parameters = NAMED_PROPERTY) then
+        pstring(integer(userdata)+sizeof(TLuaUserData))^ := ''
+      else
+        Finalize(pointer(integer(userdata)+sizeof(TLuaUserData)), PLuaRecordInfo(Parameters).FTypeInfo);
+    end;
+
+    instance := nil;
+    exit;
+  end;
+
+  // вызвать дестуктор Object-а или очистить структуру
+  case (ClassInfo._ClassKind) of
+     ckClass: TObject(userdata.instance).Free;
+    ckRecord: begin
+                // удаление Record внутри UserData
+                with PLuaRecordInfo(ClassInfo._Class)^ do
+                if (FTypeInfo <> nil) then Finalize(userdata.instance, FTypeInfo);
+              end;
+     ckArray: begin
+                // удаление массива
+                with PLuaArrayInfo(ClassInfo._Class)^ do
+                if (FTypeInfo <> nil) then Finalize(userdata.instance, FTypeInfo, FItemsCount);
+              end;
+  end;            
+
+  // занулить в любом случае
+  userdata.instance := nil;
+end;
+                 *)
+function TLua.__print: Integer;
+var
+  Count, i: Integer;
+{$ifNdef UNICODE}
+  Output: THandle;
+  Written: Cardinal;
+const
+  CRLF_CHAR: WideChar = #10;
+{$endif}
+begin
+  Count := lua_gettop(Handle);
+
+  if (Count = 0) then
+  begin
+    Writeln;
+  end else
+  for i := 1 to Count do
+  begin
+    stack_force_unicode_string(FStringBuffer.Unicode, i, False);
+
+    if (i <> 1) then Write(#9);
+
+    {$ifdef UNICODE}
+      if (i = Count) then
+      begin
+        Writeln(FStringBuffer.Unicode);
+      end else
+      begin
+        Write(FStringBuffer.Unicode);
+      end;
+    {$else .MSWINDOWS}
+      Output := GetStdHandle(STD_OUTPUT_HANDLE);
+      WriteConsoleW(Output, Pointer(FStringBuffer.Unicode), Length(FStringBuffer.Unicode), Written, nil);
+      if (i = Count) then WriteConsoleW(Output, @CRLF_CHAR, 1, Written, nil);
+    {$endif}
+  end;
+
+  Result := 0;
+end;
+
+function TLua.__printf: Integer;
+const
+  SLN_CONST: Cardinal = Ord('S') + (Ord('l') shl 8) + (Ord('n') shl 16);
+var
+  Count, ErrCode, P: Integer;
+  Err: ^string;
+begin
+  Count := lua_gettop(Handle);
+
+  global_push_value(FFormatWrapper);
+  lua_insert(Handle, 1);
+  ErrCode := lua_pcall(Self.Handle, Count, LUA_MULTRET, 0);
+  if (ErrCode = 0) then ErrCode := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
+  if (ErrCode <> 0) then
+  begin
+    Err := @FStringBuffer.Default;
+    {$ifdef UNICODE}
+      stack_unicode_string(Err^, -1);
+    {$else}
+      stack_ansi_string(Err^, -1, 0);
+    {$endif}
+    stack_pop;
+    P := Pos(']', Err^);
+    Delete(Err^, 1, P);
+
+    repeat
+      P := Pos('format', Err^);
+      if (P = 0) then Break;
+
+      Err^[P + 0] := 'p';
+      Err^[P + 1] := 'r';
+      Err^[P + 2] := 'i';
+      Err^[P + 3] := 'n';
+      Err^[P + 4] := 't';
+      Err^[P + 5] := 'f';
+    until (False);
+
+    Self.Error(Err^);
+  end;
+
+  Result := __print;
+end;
+
+(*function TLua.__Constructor(const AMetaType: __luapointer; const ModeCreate: Boolean): Integer;
+//var
+  //UserData: PLuaUserData;
+ // MetaType: PLuaMetaType;
+begin
+ // UserData := __GetUserData(AMetaType);
+ // MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+
+//  if (lua_type(Handle, 1) <> LUA_TTABLE) or (InternalTableToMetaType(2) <> MetaType) then
+//    Error('Incorrect usage of %s constructor.', [MetaType.FName]);
+
+
+
+  Result := 0{ToDo}
+end;*)
+
              (*
 // по умолчанию сюда приходит калбек конструктора Create() для классов.
 // но сюда так же перенаправляются конструкторы "на стеке" из __call(create = false)
@@ -19509,141 +19157,568 @@ begin
   if (initialize_mode) then
   __initialize_by_table(userdata, lua_gettop(Handle)-1 {аналог -2 в прямой адресации})
 end;            *)
-                  (*
-function TLua.__destructor(const ClassInfo: TLuaClassInfo; const __free: boolean): integer;
-var
-  luatype: integer;
-  userdata: PLuaUserData;
+
+(*function TLua.__Destructor(const AMetaType: __luapointer; const ModeFree: Boolean): Integer;
+{var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType; }
 begin
-  Result := 0;
+  //UserData := __GetUserData(AMetaType);
+  //MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
 
-  luatype := lua_type(Handle, 1);
-  if (luatype <> LUA_TUSERDATA) then
-  ScriptAssert('Wrong destruction type "%s"', [LuaTypeName(luatype)]);
+  Result := 0{ToDo}
+end;*)
 
-  userdata := lua_touserdata(Handle, 1);
-
-  // не надо удалять объекты при __gc, если не стоит соответствующего флага
-  if (not __free) and (not userdata .gc_destroy) then exit;
-
-  // если уже удалён
-  if (userdata.instance = nil) then
-  begin
-    if (__free) then
-    ScriptAssert('Instance of %s type is already destroyed', [ClassInfo._ClassName]);
-
-    exit;
+function TLua.__GetUserData(const AMetaType: __luapointer; const CheckAlreadyDestroyed: Boolean): Pointer;
+label
+  invalid_instance;
+var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType;
+begin
+  UserData := nil;
+  case lua_type(Handle, 1) of
+    LUA_TTABLE: ;
+ LUA_TUSERDATA: begin
+                  UserData := lua_touserdata(Handle, 1);
+                  if (not Assigned(UserData)) then goto invalid_instance;
+                  if (not Assigned(UserData.Instance)) and (CheckAlreadyDestroyed) then
+                  begin
+                    MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+                    Self.InternalErrorFmt('%s instance is already destroyed', [MetaType.FName]);
+                  end;
+                end;
+  else
+  invalid_instance:
+    MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+    Self.InternalErrorFmt('%s: invalid self argument', [MetaType.FName]);
   end;
 
-  // очистить данные для массивов и сложных свойств
-  if (@ClassInfo = nil) then
-  with userdata^ do
-  begin
-    if (kind = ukProperty) then
-    with PropertyInfo^ do
-    begin
-      if (Parameters = NAMED_PROPERTY) then
-        pstring(integer(userdata)+sizeof(TLuaUserData))^ := ''
-      else
-        Finalize(pointer(integer(userdata)+sizeof(TLuaUserData)), PLuaRecordInfo(Parameters).FTypeInfo);
-    end;
-
-    instance := nil;
-    exit;
-  end;
-
-  // вызвать дестуктор Object-а или очистить структуру
-  case (ClassInfo._ClassKind) of
-     ckClass: TObject(userdata.instance).Free;
-    ckRecord: begin
-                // удаление Record внутри UserData
-                with PLuaRecordInfo(ClassInfo._Class)^ do
-                if (FTypeInfo <> nil) then Finalize(userdata.instance, FTypeInfo);
-              end;
-     ckArray: begin
-                // удаление массива
-                with PLuaArrayInfo(ClassInfo._Class)^ do
-                if (FTypeInfo <> nil) then Finalize(userdata.instance, FTypeInfo, FItemsCount);
-              end;
-  end;            
-
-  // занулить в любом случае
-  userdata.instance := nil;
+  Result := UserData;
 end;
-                 *)
-                   (*
-// первый параметр стека всегда есть!
-// калбек вызывается тогда, когда у Типа (класс, структура, массив, множество)
-// или его экземпляра вызывается метод
-// например так: TButton(Form1), TPoint(12, 13), Form1. OnClick(), ArrayInstance(/*ошибка*/)
-//
-// калбек так же вызывается при инициализации таблицей
-// например так:
-// Button1 {Caption="Text", Color=clBtnFace}
-//
-// соответственно придёт и такой калбек:
-// Button1( {Caption="Text", Color=clBtnFace} )
-//
-// все ошибочные случаи так же нужно отследить
-function TLua.__call(const ClassInfo: TLuaClassInfo): integer;
-var
-  userdata: PLuaUserData;
+
+function TLua.__InitTableValues(const AUserData: Pointer{PLuaUserData};
+  const StackIndex: Integer): Integer;
+//var
+ // UserData: PLuaUserData;
 begin
+//  UserData := AUserData;
+
+  Result := 0{ToDo};
+end;
+
+function TLua.__len(const AMetaType: __luapointer): Integer;
+var
+  MetaType: PLuaMetaType;
+begin
+  MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+  lua_pushinteger(Handle, MetaType.F.Size);
+  Result := 1;
+end;
+
+function TLua.__tostring(const AMetaType: __luapointer): Integer;
+label
+  push_type_name, invalid_user_data;
+type
+  TObjectToString = procedure(Instance: Pointer; var Result: string);
+  TSetDescription = procedure(MetaType, Instance: Pointer; var Result: LuaString);
+var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType;
+  (*
+  procedure FillPropertyDescription();
+  begin
+    with userdata^, FBufferArg do
+    str_data := __arrayindex_description('NON FINISHED COMPLEX PROPERTY: ' + PropertyInfo.PropertyName,
+               'xxx', integer(array_params) and $F - 1, array_params shr 4);
+  end;
+
+  procedure FillArrayDescription();
+  begin
+    with userdata^, FBufferArg do
+    str_data := __arrayindex_description(ArrayInfo.Name, 'xxx', integer(array_params) and $F - 1, array_params shr 4);
+  end;
+  *)
+begin
+  UserData := __GetUserData(AMetaType, False);
+  MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+
+  if (UserData = nil) then
+  begin
+    goto push_type_name;
+  end else
+  if (UserData.Instance = nil) then
+  begin
+    goto invalid_user_data;
+  end else
+  case UserData.InstanceKind of
+    ikNone{/ikComplexProperty}:
+    begin
+      push_lua_string('ikComplexProperty: ToDo');
+    end;
+    ikClass:
+    begin
+      push_lua_string(InternalGetClassInfo(TClass(UserData.Instance)).FName);
+    end;
+    ikObject,
+    ikWeakObject:
+    begin
+      {$ifdef EXTENDEDRTTI}
+      TObjectToString(PPointer(PNativeUInt(UserData.Instance)^ + NativeUInt(vmtToString))^)(UserData.Instance, FStringBuffer.Default);
+      push_unicode_string(FStringBuffer.Default);
+      {$else}
+      push_lua_string(InternalGetClassInfo(TClass(PPointer(UserData.Instance)^)).FName);
+      {$endif}
+    end;
+    ikRecord, ikInterface, ikArray:
+    begin
+    push_type_name:
+      push_lua_string(MetaType.FName);
+    end;
+    ikSet:
+    begin
+      TSetDescription(@TLuaSetInfo.Description)(MetaType, UserData.Instance, FStringBuffer.Lua);
+      push_lua_string(FStringBuffer.Lua);
+    end;
+  else
+  invalid_user_data:
+    push_lua_string('Invalid user data');
+  end;
+
+  Result := 1;
+end;
+
+function TLua.__gc(const AMetaType: __luapointer): Integer;
+var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType;
+begin
+  UserData := __GetUserData(AMetaType, False);
+  MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+
+  if (Assigned(UserData)) and (not UserData.RefMode) and
+    (Assigned(UserData.Instance)) and (MetaType.Managed) then
+  case MetaType.F.Kind of
+    mtRecord:
+    begin
+      FinalizeArray(UserData.Instance, MetaType.F.TypeInfo, 1);
+    end;
+    mtInterface:
+    begin
+      IInterface(UserData.Instance^) := nil;
+    end;
+    mtArray:
+    begin
+      FinalizeArray(UserData.Instance, PLuaArrayInfo(MetaType).FFinalTypeInfo,
+        PLuaArrayInfo(MetaType).FFinalItemsCount);
+    end;
+  end;
+
   Result := 0;
+end;
 
-  // если первый параметр именно класс - то переадресуем в конструктор
-  if (lua_type(Handle,1)=LUA_TTABLE) and (ClassInfo._ClassIndex=LuaTableToClass(Handle,1)) then
+function TLua.__call(const AMetaType: __luapointer): Integer;
+var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType;
+begin
+  UserData := __GetUserData(AMetaType);
+  MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+
+  if (UserData = nil) then
   begin
-    Result := __constructor(ClassInfo, false);
-    exit;
+    //Result := __Constructor(MetaType.Ptr, False);
+    Exit;
   end;
 
-  // остался случай когда происходит "вызов" экземпляра
-  // либо событие, либо "инициализация по таблице", либо ошибка
-
-
-  // "event"
-  if (ClassInfo._ClassIndex = TMETHOD_CLASS_INDEX) then
+  if (lua_gettop(Handle) = 2) and (lua_type(Handle, 2) = LUA_TTABLE) and
+    (InternalTableToMetaType(2) = nil) then
   begin
-    userdata := lua_touserdata(Handle, 1);
-    if (userdata = nil) or (userdata.ClassIndex <> TMETHOD_CLASS_INDEX) then  ScriptAssert('Wrong TMethod usage', []);
-
-    Result := __tmethod_call(TMethod(userdata.instance^));
-    exit;
-  end;
-
-  // если происходит инициализация по таблице
-  if (lua_gettop(Handle)=2) and (lua_type(Handle,2)=LUA_TTABLE) and (LuaTableToClass(Handle,2)<0) then
-  begin
-    userdata := lua_touserdata(Handle, 1);
-    if (userdata = nil) {но вообще быть не должно} then ScriptAssert('Unsupported operation.', []);
-
-    // проверка на возможность инициализации по таблице
-    // в будущем возможно будет инициализация по всем типам
-    // todo ?
-    if (userdata.kind <> ukInstance) then
-    ScriptAssert('%s can not be initialized by a table.', [ClassInfo._ClassName]);
-
-    // вызов
-    __initialize_by_table(userdata, 2);
+    if (MetaType.F.Kind in [mtClass, mtRecord]) then
+    begin
+      Result := __InitTableValues(UserData, 2);
+    end else
+    begin
+      Error('%s can not be initialized by a table.', [MetaType.Name]);
+      Result := 0;
+    end;
   end else
   begin
-    // 100% ошибочная ситуация вызова конструктора из экземпляра
-    // но я перенаправляю вызов в конструктор (там нужное сообщение покажется)
-    Result := __constructor(ClassInfo, false);
+    // falure constructor: call default constructor (actual error message)
+    //Result := __Constructor(MetaType.Ptr, False);
   end;
 end;
-             *)
 
-function TLua.push_stdandard(const MetaType: PLuaClassInfo; const StdIndex: Integer;
-  const UserData: Pointer): Boolean;
+function TLua.__operator(const AMetaType: __luapointer; const Kind: Cardinal{Byte}): Integer;
+{var
+  UserData: PLuaUserData;
+  MetaType: PLuaMetaType; }
 begin
-  Result := False{ToDo};
+ // UserData := __GetUserData(AMetaType);
+ // MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
+
+  Result := 0{ToDo}
 end;
 
-function TLua.set_stdandard(const MetaType: PLuaClassInfo; const StdIndex: Integer; const UserData: Pointer): Boolean;
+function TLua.__closuregc: Integer;
+var
+  Closure: PLuaClosure;
 begin
-  Result := False{ToDo};
+  Closure := lua_touserdata(Handle, 1);
+  if (Assigned(Closure)) then
+  begin
+    IInterface(Closure.Instance) := nil;
+  end;
+
+  Result := 0;
+end;
+
+function TLua.push_standard(const MetaType: PLuaMetaType; const StdIndex: Cardinal): Boolean;
+label
+  ret_false, is_filled_zero, done;
+var
+  Ptr: __luapointer;
+  ArrayIndex, Count: Integer;
+  UserData: PLuaUserData;
+
+  procedure ErrorConst;
+  begin
+    stack_lua_string(FStringBuffer.Lua, 2);
+    Error('%s() method can''t be called, because %s instance is constant', [FStringBuffer.Lua, MetaType.Name]);
+  end;
+begin
+  UserData := __GetUserData(MetaType.Ptr, StdIndex <> STD_IS_EMPTY);
+
+  case (StdIndex) of
+    STD_TYPE:
+    begin
+      global_push_value(MetaType.Ref);
+      goto done;
+    end;
+    STD_TYPE_NAME:
+    begin
+      push_lua_string(MetaType.FName);
+      goto done;
+    end;
+    STD_TYPE_PARENT:
+    begin
+      Ptr := LUA_POINTER_INVALID;
+      case MetaType.F.Kind of
+        mtClass:
+        begin
+          Ptr := PLuaClassInfo(MetaType).Parent;
+        end;
+        mtInterface:
+        begin
+          Ptr := PLuaInterfaceInfo(MetaType).Parent;
+        end;
+      end;
+
+      if (Ptr = LUA_POINTER_INVALID) then
+      begin
+        lua_pushnil(Handle);
+      end else
+      begin
+        Ptr := PLuaMetaType({$ifdef LARGEINT}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr)).Ptr;
+        global_push_value(Ptr);
+      end;
+
+      goto done;
+    end;
+    STD_INHERITS_FROM:
+    begin
+      push_closure(Pointer(@ID_INHERITSFROM), Ord(ckClassInstance), Ord(cmInternal),
+        MetaType, @TLua.__InheritsFrom, 1);
+      goto done;
+    end;
+    STD_ASSIGN:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        if (MetaType.F.Kind <> mtClass) and (UserData.ConstMode) then ErrorConst;
+        push_closure(Pointer(@ID_ASSIGN), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__Assign, 1);
+        goto done;
+      end;
+    end;
+    STD_IS_REF:
+    begin
+      lua_pushboolean(Handle, (Assigned(UserData)) and (UserData.RefMode));
+      goto done;
+    end;
+    STD_IS_CONST:
+    begin
+      lua_pushboolean(Handle, (Assigned(UserData)) and (UserData.ConstMode));
+      goto done;
+    end;
+    STD_IS_CLASS:
+    begin
+      lua_pushboolean(Handle, MetaType.F.Kind = mtClass);
+      goto done;
+    end;
+    STD_IS_RECORD:
+    begin
+      lua_pushboolean(Handle, MetaType.F.Kind = mtRecord);
+      goto done;
+    end;
+    STD_IS_INTERFACE:
+    begin
+      lua_pushboolean(Handle, MetaType.F.Kind = mtInterface);
+      goto done;
+    end;
+    STD_IS_SET:
+    begin
+      lua_pushboolean(Handle, MetaType.F.Kind = mtSet);
+      goto done;
+    end;
+    STD_IS_EMPTY:
+    begin
+      if (not Assigned(UserData)) or (UserData.Instance = nil) then
+      begin
+        lua_pushboolean(Handle, not Assigned(UserData));
+      end else
+      case MetaType.F.Kind of
+        mtClass,
+        mtInterface:
+        begin
+        ret_false:
+          lua_pushboolean(Handle, False);
+        end;
+        mtArray:
+        begin
+          if (not PLuaArrayInfo(MetaType).IsDynamic) then goto is_filled_zero;
+          lua_pushboolean(Handle, PPointer(UserData.Instance)^ = nil);
+        end
+      else
+      is_filled_zero:
+        lua_pushboolean(Handle, IsMemoryFilledZero(UserData.Instance, MetaType.F.Size));
+      end;
+
+      goto done;
+    end;
+    STD_CREATE:
+    begin
+      if (not Assigned(UserData)) then
+      begin
+        push_closure(Pointer(@ID_CREATE), Ord(ckClassInstance), Ord(cmInternal),
+          MetaType, @TLua.__ClassCreate, -1);
+        goto done;
+      end;
+    end;
+    STD_FREE:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        push_closure(Pointer(@ID_FREE), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__ObjectFree, 0);
+        goto done;
+      end;
+    end;
+    STD_LENGTH:
+    begin
+      with PLuaArrayInfo(MetaType)^ do
+      if (IsDynamic) then
+      begin
+        Count := 0;
+        if (Assigned(UserData)) then Count := DynArrayLength(PPointer(UserData.Instance)^);
+      end else
+      begin
+        ArrayIndex := 0;
+        if (Assigned(UserData)) then ArrayIndex := (UserData.ArrayParams and $F) * 2;
+        Count := Integer(PMemoryItems(FBounds).Cardinals[ArrayIndex + 1]) -
+          Integer(PMemoryItems(FBounds).Cardinals[ArrayIndex]) + 1;
+      end;
+
+      lua_pushinteger(Handle, Count);
+      goto done;
+    end;
+    STD_RESIZE:
+    begin
+      if (Assigned(UserData)) and (PLuaArrayInfo(MetaType).IsDynamic) then
+      begin
+        if (UserData.ConstMode) then ErrorConst;
+        push_closure(Pointer(@ID_RESIZE), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__DynArrayResize, -1);
+        goto done;
+      end;
+    end;
+    STD_LOW:
+    begin
+      if (MetaType.F.Kind = mtArray) then
+      begin
+        with PLuaArrayInfo(MetaType)^ do
+        begin
+          Count := 0;
+          if (not IsDynamic) then
+          begin
+            if (not Assigned(UserData)) then
+            begin
+              Count := FBounds^;
+            end else
+            begin
+              ArrayIndex := (UserData.ArrayParams and $F) * 2;
+              Count := Integer(PMemoryItems(FBounds).Cardinals[ArrayIndex]);
+            end;
+          end;
+
+          lua_pushinteger(Handle, Count);
+          goto done;
+        end;
+      end else
+      begin
+        // mtSet
+        lua_pushinteger(Handle, PLuaSetInfo(MetaType).FLow);
+        goto done;
+      end;
+    end;
+    STD_HIGH:
+    begin
+      if (MetaType.F.Kind = mtArray) then
+      begin
+        with PLuaArrayInfo(MetaType)^ do
+        begin
+          if (IsDynamic) then
+          begin
+            Count := -1;
+            if (Assigned(UserData)) then Count := DynArrayLength(PPointer(UserData.Instance)^) - 1;
+          end else
+          begin
+            ArrayIndex := 0;
+            if (Assigned(UserData)) then
+            begin
+              ArrayIndex := (UserData.ArrayParams and $F) * 2;
+            end;
+
+            Inc(ArrayIndex);
+            Count := Integer(PMemoryItems(FBounds).Cardinals[ArrayIndex]);
+          end;
+
+          lua_pushinteger(Handle, Count);
+          goto done;
+        end;
+      end else
+      begin
+        // mtSet
+        lua_pushinteger(Handle, PLuaSetInfo(MetaType).FHigh);
+        goto done;
+      end;
+    end;
+    STD_INCLUDE:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        if (MetaType.F.Kind = mtArray) then
+        begin
+          if (UserData.ArrayParams and $F + 1 = UserData.ArrayParams shr 4) then
+          begin
+            if (UserData.ConstMode) then ErrorConst;
+            push_closure(Pointer(@ID_INCLUDE), Ord(ckInstance), Ord(cmInternal),
+              UserData, @TLua.__DynArrayInclude, -1);
+            goto done;
+          end;
+        end else
+        begin
+          // mtSet
+          if (UserData.ConstMode) then ErrorConst;
+          push_closure(Pointer(@ID_INCLUDE), Ord(ckInstance), Ord(cmInternal),
+            UserData, @TLua.__SetInclude, -1);
+          goto done;
+        end;
+      end;
+    end;
+    STD_EXCLUDE:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        if (UserData.ConstMode) then ErrorConst;
+        push_closure(Pointer(@ID_EXCLUDE), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__SetExclude, -1);
+        goto done;
+      end;
+    end;
+    STD_CONTAINS:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        if (UserData.ConstMode) then ErrorConst;
+        push_closure(Pointer(@ID_CONTAINS), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__SetContains, -1);
+        goto done;
+      end;
+    end;
+   (* STD_VALUE:
+    begin
+      lua_rawgeti(Handle, LUA_REGISTRYINDEX, TLuaReference(UserData.Instance).Index);
+      goto done;
+    end;   *)
+  end;
+
+  Result := False;
+  Exit;
+done:
+  Result := True;
+end;
+
+function TLua.set_standard(const MetaType: PLuaMetaType; const StdIndex: Cardinal): Boolean;
+label
+  invalid_array_length, done;
+var
+  UserData: PLuaUserData;
+
+  procedure ErrorConst;
+  begin
+    stack_lua_string(FStringBuffer.Lua, 2);
+    Error('%s can''t be called, because %s instance is constant', [FStringBuffer.Lua, MetaType.Name]);
+  end;
+begin
+  case (StdIndex) of
+    STD_LENGTH:
+    begin
+      if (MetaType.F.Kind = mtArray) and (PLuaArrayInfo(MetaType).FIsDynamic) then
+      begin
+        UserData := __GetUserData(MetaType.Ptr);
+        if (Assigned(UserData)) then
+        begin
+          if (not UserData.ConstMode) then
+          begin
+            if (lua_type(Handle, 3) = LUA_TNUMBER) then
+            begin
+              FTempBuffer.D := lua_tonumber(Handle, 3);
+              if (not NumberToInteger(FTempBuffer.D, FTempBuffer.I)) or
+               (FTempBuffer.I < 0) then goto invalid_array_length;
+
+              {$ifdef LARGEINT}
+              TPoint(FTempBuffer.I64).Y := 0;
+              {$endif}
+              DynArraySetLength(PPointer(UserData.Instance)^,
+                PTypeInfo(PLuaArrayInfo(MetaType).FMultiplies[UserData.ArrayParams and $F]),
+                1, @FTempBuffer.N);
+              goto done;
+            end else
+            begin
+            invalid_array_length:
+              stack_force_unicode_string(FStringBuffer.Unicode, 3);
+              Error('Invalid %s.Length value "%s"', [MetaType.Name, FStringBuffer.Unicode]);
+            end;
+          end else
+          begin
+            Error('Length can''t be changed, because %s instance is constant', [MetaType.Name]);
+          end;
+        end;
+      end;
+    end;
+   (* STD_VALUE:
+    begin
+      lua_pushvalue(Handle, 3);
+      lua_rawseti(Handle, LUA_REGISTRYINDEX, TLuaReference(userdata.instance).Index);
+      goto done;
+    end;   *)
+  end;
+
+  Result := False;
+  Exit;
+done:
+  Result := True;
 end;
 
 function TLua.call_prop_getter(const Instance: Pointer; const AProp: Pointer): Pointer;
@@ -19671,6 +19746,10 @@ begin
     pkPointer,
     pkClass: ;
     pkObject:
+    begin
+      // ???
+    end;
+    pkWeakObject:
     begin
       // ???
     end;
@@ -19704,6 +19783,10 @@ begin
     pkInterface:
     begin
       P3 := NativeInt(@FTempBuffer.Intf);
+    end;
+    pkClosure:
+    begin
+      // ToDo
     end;
   else
     // pkRecord, pkArray, pkSet, pkUniversal
@@ -19742,7 +19825,7 @@ begin
   if (P3 = 0) then
   begin
     case Prop.Kind of
-      // pkObject{???}
+      // pkObject, pkWeakObject{???}
       pkInt64:
       begin
         Result := @FTempBuffer.I64;
@@ -19881,36 +19964,20 @@ end;
 
 function TLua.__index(const AMetaType: __luapointer): Integer;
 label
-  invalid_instance, property_push, field_push, done;
+  not_found, property_push, field_push, done;
 var
-  MetaType: ^TLuaClassInfo;
   UserData: PLuaUserData;
+  MetaType: PLuaClassInfo{PLuaMetaType};
   LuaType: Integer;
   LuaName: __luaname;
   Item: PLuaDictionaryItem;
   Ptr: __luapointer;
   Prop: ^TLuaProperty;
-  Proc: ^TLuaClosure;
+  Proc: ^TLuaMethod;
   Flags: Integer;
   Instance, Value: Pointer;
 begin
-  // instance/class
   MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
-  UserData := nil;
-  case lua_type(Handle, 1) of
-    LUA_TTABLE: ;
- LUA_TUSERDATA: begin
-                  UserData := lua_touserdata(Handle, 1);
-                  if (not Assigned(UserData)) then goto invalid_instance;
-                  if (not Assigned(UserData.Instance)) then
-                  begin
-                    Self.InternalErrorFmt('%s instance is already destroyed', [MetaType.FName]);
-                  end;
-                end;
-  else
-  invalid_instance:
-    Self.InternalError('Invalid self argument');
-  end;
 
   // argument
   LuaName := nil;
@@ -19918,38 +19985,49 @@ begin
   if (LuaType = LUA_TSTRING) then LuaName := lua_tolstring(Handle, 2, nil);
 
   // try to find
-  if (Assigned(LuaName)) and (MetaType.F.Kind <= mtRecord) then
+  if (Assigned(LuaName)) then
   begin
     Item := TLuaDictionary(MetaType.FNameSpace).InternalFind(LuaName, False);
     if (Assigned(Item)) then
     begin
       Ptr := Item.Value;
-      if (Ptr and NAMESPACE_FLAG_PROC = 0) then
+      if (Ptr >= 0) then
       begin
-        Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
-        Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
-        goto property_push;
+        UserData := __GetUserData(AMetaType);
+
+        if (Ptr and NAMESPACE_FLAG_PROC = 0) then
+        begin
+          // property
+          Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
+          Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
+          goto property_push;
+        end else
+        begin
+          // method
+          Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
+          Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
+          // ToDo
+          lua_pushlightuserdata(Handle, Proc);
+          //  push_function(Proc.Value);
+          goto done;
+        end;
       end else
       begin
-        Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
-        Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
-        //push_function(Proc.Value);
-        goto done;
+        // standard item
+        if push_standard(MetaType, Ptr and $7f) then
+        begin
+          goto done;
+        end else
+        begin
+          UserData := __GetUserData(AMetaType);
+          goto not_found;
+        end;
       end;
     end;
   end;
 
-  // try to find standard
-  if (Assigned(LuaName)) then
-  begin
-    Item := TLuaDictionary(FStandardNames).InternalFind(LuaName, False);
-    if (Assigned(Item)) then
-    begin
-      if (push_stdandard(MetaType, Item.Value, UserData)) then goto done;
-    end;
-  end;
-
   // try look default property
+  UserData := __GetUserData(AMetaType);
   if (MetaType.F.Kind = mtClass) and (MetaType.DefaultProperty <> LUA_POINTER_INVALID) then
   begin
     Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MetaType.DefaultProperty);
@@ -19958,6 +20036,7 @@ begin
   end;
 
   // not found
+not_found:
   stack_force_unicode_string(FStringBuffer.Unicode, 2);
   Self.InternalErrorFmt('"%s" not found in %s %s', [FStringBuffer.Unicode, MetaType.FName,
     INSTANCE_MODES[Byte(UserData = nil) + (Byte(UserData = nil) and Byte(MetaType.F.Kind = mtClass))]]);
@@ -20007,7 +20086,7 @@ end;
 
 function TLua.__newindex(const AMetaType: __luapointer): Integer;
 label
-  invalid_instance, property_set, failure_set, done;
+  failure_set_method, property_set, failure_set, done;
 const
   PROP_FIELD = Ord(pmField) shl PROP_SLOTSETTER_SHIFT;
 var
@@ -20116,23 +20195,7 @@ var
   end;
 
 begin
-  // instance/class
   MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
-  UserData := nil;
-  case lua_type(Handle, 1) of
-    LUA_TTABLE: ;
- LUA_TUSERDATA: begin
-                  UserData := lua_touserdata(Handle, 1);
-                  if (not Assigned(UserData)) then goto invalid_instance;
-                  if (not Assigned(UserData.Instance)) then
-                  begin
-                    Self.InternalErrorFmt('%s instance is already destroyed', [MetaType.FName]);
-                  end;
-                end;
-  else
-  invalid_instance:
-    Self.InternalError('Invalid self argument');
-  end;
 
   // argument
   LuaName := nil;
@@ -20140,37 +20203,52 @@ begin
   if (LuaType = LUA_TSTRING) then LuaName := lua_tolstring(Handle, 2, nil);
 
   // try to find
-  if (Assigned(LuaName)) and (MetaType.F.Kind <= mtRecord) then
+  if (Assigned(LuaName)) then
   begin
     Item := TLuaDictionary(MetaType.FNameSpace).InternalFind(LuaName, False);
     if (Assigned(Item)) then
     begin
       Ptr := Item.Value;
-      if (Ptr and NAMESPACE_FLAG_PROC = 0) then
+      if (Ptr >= 0) then
       begin
-        Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
-        Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
-        goto property_set;
+        UserData := __GetUserData(AMetaType);
+
+        if (Ptr and NAMESPACE_FLAG_PROC = 0) then
+        begin
+          // property
+          Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
+          Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
+          goto property_set;
+        end else
+        begin
+          // method
+        failure_set_method:
+          stack_lua_string(FStringBuffer.Lua, 2);
+          Self.InternalErrorFmt('%s.%s method can not be changed', [MetaType.FName, FStringBuffer.Lua]);
+          goto done;
+        end;
       end else
       begin
-        stack_lua_string(FStringBuffer.Lua, 2);
-        Self.InternalErrorFmt('Method %s.%s can not be changed', [MetaType.FName, FStringBuffer.Lua]);
-        goto done;
+        // standard item
+        if set_standard(MetaType, Ptr and $7f) then
+        begin
+          goto done;
+        end else
+        begin
+          if (Ptr and NAMESPACE_STD_PROC <> 0) then
+          begin
+            goto failure_set_method;
+          end else
+          begin
+            goto failure_set;
+          end;
+        end;
       end;
     end;
   end;
 
-  // try to find standard
-  if (Assigned(LuaName)) then
-  begin
-    Item := TLuaDictionary(FStandardNames).InternalFind(LuaName, False);
-    if (Assigned(Item)) then
-    begin
-      if (set_stdandard(MetaType, Item.Value, UserData)) then goto done;
-    end;
-  end;
-
   // try look default property
+  UserData := __GetUserData(AMetaType);
   if (MetaType.F.Kind = mtClass) and (MetaType.DefaultProperty <> LUA_POINTER_INVALID) then
   begin
     Prop := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MetaType.DefaultProperty);
@@ -20255,12 +20333,17 @@ property_set:
             if (not CallIntfSetter(Self, Pointer(Setter), Prop)) then goto failure_set;
             goto done;
           end;
-          pkObject:
+          pkObject, pkWeakObject:
           begin
             {ToDo}
             if (not Prop.SetValue(Pointer(@FTempBuffer.N)^, Self, -1)) then
               goto failure_set;
             Value := FTempBuffer.N;
+          end;
+          pkClosure:
+          begin
+            // ToDo
+            Value := 0;
           end;
         else
           // pkRecord, pkArray, pkSet, pkUniversal
@@ -20368,7 +20451,8 @@ begin
     gkProc:
     begin
       Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Entity.Ptr);
-      push_closure(LuaName, Ord(ckStatic), Ord(ikNone), nil, Proc.Address, Proc.InvokableMode, Proc.Invokable);
+      push_closure(LuaName, Ord(ckGlobal), Ord(Proc.InvokableMode) +1,
+        nil, Proc.Address, Proc.Invokable);
     end;
   else
     // gkConst, gkScriptVariable
@@ -20730,7 +20814,7 @@ var
   // невозможно вызвать метод, потому что инстенст - константа
   procedure ThrowConst();
   begin
-    ScriptAssert('%s() method can''t be called, because %s instance is const', [S, ClassInfo._ClassName]);
+    ScriptAssert('%s() method can''t be called, because %s instance is constant', [S, ClassInfo._ClassName]);
   end;
 
   // push значение свойства
@@ -21559,95 +21643,67 @@ begin
   end;
 end;      *)
 
-function TLua.__print: Integer;
-var
-  Count, i: Integer;
-{$ifNdef UNICODE}
-  Output: THandle;
-  Written: Cardinal;
-const
-  CRLF_CHAR: WideChar = #10;
-{$endif}
+function TLua.__InheritsFrom(const AMetaType: PLuaMetaType; var ArgsCount: Integer): Integer;
 begin
-  Count := lua_gettop(Handle);
+  Result := 0{ToDo};
+end;
 
-  if (Count = 0) then
+function TLua.__Assign(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+begin
+  Result := 0{ToDo};
+end;
+
+function TLua.__ClassCreate(const AMetaType: PLuaMetaType; var ArgsCount: Integer): Integer;
+begin
+  Result := 0{ToDo};
+end;
+
+function TLua.__ObjectFree(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+var
+  UserData: PLuaUserData;
+  Obj: Pointer;
+begin
+  if (ArgsCount <> 0) then
   begin
-    Writeln;
+    ArgsCount := 0;
+    Result := 0;
+    Exit;
   end else
-  for i := 1 to Count do
   begin
-    stack_force_unicode_string(FStringBuffer.Unicode, i, False);
-
-    if (i <> 1) then Write(#9);
-
-    {$ifdef UNICODE}
-      if (i = Count) then
-      begin
-        Writeln(FStringBuffer.Unicode);
-      end else
-      begin
-        Write(FStringBuffer.Unicode);
-      end;
-    {$else .MSWINDOWS}
-      Output := GetStdHandle(STD_OUTPUT_HANDLE);
-      WriteConsoleW(Output, Pointer(FStringBuffer.Unicode), Length(FStringBuffer.Unicode), Written, nil);
-      if (i = Count) then WriteConsoleW(Output, @CRLF_CHAR, 1, Written, nil);
-    {$endif}
+    UserData := AUserData;
+    Obj := UserData.Instance;
+    UserData.Instance := nil;
+    TObject(Obj).{$IFDEF AUTOREFCOUNT}DisposeOf{$else}Free{$endif};
+    Result := 0;
   end;
-
-  Result := 0;
 end;
 
-function TLua.__printf: Integer;
-const
-  SLN_CONST: Cardinal = Ord('S') + (Ord('l') shl 8) + (Ord('n') shl 16);
-var
-  Count, ErrCode, P: Integer;
-  Err: ^string;
+function TLua.__DynArrayInclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
 begin
-  Count := lua_gettop(Handle);
-
-  global_push_value(FFormatWrapper);
-  lua_insert(Handle, 1);
-  ErrCode := lua_pcall(Self.Handle, Count, LUA_MULTRET, 0);
-  if (ErrCode = 0) then ErrCode := lua_gc(Self.Handle, 2{LUA_GCCOLLECT}, 0);
-  if (ErrCode <> 0) then
-  begin
-    Err := @FStringBuffer.Default;
-    {$ifdef UNICODE}
-      stack_unicode_string(Err^, -1);
-    {$else}
-      stack_ansi_string(Err^, -1, 0);
-    {$endif}
-    stack_pop;
-    P := Pos(']', Err^);
-    Delete(Err^, 1, P);
-
-    repeat
-      P := Pos('format', Err^);
-      if (P = 0) then Break;
-
-      Err^[P + 0] := 'p';
-      Err^[P + 1] := 'r';
-      Err^[P + 2] := 'i';
-      Err^[P + 3] := 'n';
-      Err^[P + 4] := 't';
-      Err^[P + 5] := 'f';
-    until (False);
-
-    Self.Error(Err^);
-  end;
-
-  Result := __print;
+  Result := 0{ToDo};
 end;
 
-function TLua.ProcCallback(const AClassInfo: __luapointer; const AProcInfo: __luapointer): Integer;
+function TLua.__DynArrayResize(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
 begin
-  Result := 0;
+  Result := 0{ToDo};
 end;
 
-function TLua.ClosureCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
+function TLua.__SetInclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+begin
+  Result := 0{ToDo};
+end;
+
+function TLua.__SetExclude(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+begin
+  Result := 0{ToDo};
+end;
+
+function TLua.__SetContains(const AUserData: Pointer{PLuaUserData}; var ArgsCount: Integer): Integer;
+begin
+  Result := 0{ToDo};
+end;
+
+function TLua.UniversalCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
 begin
   Result := 0;
 end;
@@ -21668,11 +21724,12 @@ begin
   Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Closure.Invokable);
   InvokableData := NativeInt(AInvokableData);
 
-  case Closure.Header.Kind of
-    ckStatic: ;
-    ckConstructor:
+  case Closure.Kind of
+    ckGlobal: ;
+    ckConstructor,
+    ckInstanceConstructor:
     begin
-      PBoolean(InvokableData + Invokable.ConstructorFlag)^ := (Closure.Header.InstanceKind <> ikClass);
+      PBoolean(InvokableData + Invokable.ConstructorFlag)^ := (Closure.Kind = ckInstanceConstructor);
       goto fill_instance;
     end;
   else
@@ -21694,7 +21751,7 @@ begin
       if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
       begin
       invalid_argument:
-        unpack_lua_string(FStringBuffer.Lua, Closure.Header.Name);
+        unpack_lua_string(FStringBuffer.Lua, Closure.Name);
         unpack_lua_string(FStringBuffer.LuaReserved, Param.Name^);
         Self.Error('Invalid %s.%s argument value: "%s" (%s)',
           [FStringBuffer.Lua, FStringBuffer.LuaReserved, FStringBuffer.Unicode, FStringBuffer.Default]);

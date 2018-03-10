@@ -469,7 +469,7 @@ type
 //  TLuaReferenceDynArray = array of TLuaReference;
 //  {$hints on}
 
-  TLuaMetaKind = (mtClass, mtRecord, mtInterface, mtArray, mtSet);
+  TLuaMetaKind = (mtClass, mtInterface, mtRecord, mtArray, mtSet);
   TLuaMetaType = object
   protected
     F: record
@@ -509,9 +509,9 @@ type
     property HFAElementType: TFloatType read GetHFAElementType;
     property HFAElementCount: Integer read GetHFAElementCount;
 
-    procedure Dispose(const Instance: Pointer{/TObject});
-    procedure Clear(const Instance: Pointer{/TObject}; const FillZero: Boolean);
-    procedure Assign(const Instance, Value: Pointer{/TObject});
+    procedure Dispose(const Value: Pointer{/TObject/IInterface});
+    procedure Clear(var Instance; const FillZero: Boolean);
+    procedure Assign(var Instance; const Value: Pointer{/TObject/IInterface});
   public
     property Lua: TLua read FLua;
     property Name: LuaString read FName;
@@ -804,8 +804,8 @@ type
 
     // standard name spaces
     FStdObjectNameSpace: __TLuaDictionary;
-    FStdRecordNameSpace: __TLuaDictionary;
     FStdInterfaceNameSpace: __TLuaDictionary;
+    FStdRecordNameSpace: __TLuaDictionary;
     FStdArrayNameSpace: __TLuaDictionary;
     FStdSetNameSpace: __TLuaDictionary;
 
@@ -917,6 +917,8 @@ type
     function __Assign(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
     function __Free(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
     function __ClassCreate(const AMetaType: PLuaMetaType; const ArgsCount: Integer): Integer;
+    function __IntfAddRef(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
+    function __IntfRelease(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
     function __DynArrayInclude(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
     function __DynArrayResize(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
     function __SetInclude(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
@@ -6435,39 +6437,40 @@ end;
 
 procedure TLuaMetaType.CheckInstance(const AKind: TLuaMetaKind; const ReturnAddress: Pointer);
 const
-  KINDS: array[TLuaMetaKind] of string = ('class', 'record', 'interface', 'array', 'set');
+  KINDS: array[TLuaMetaKind] of string = ('class', 'interface', 'record', 'array', 'set');
 begin
   if (NativeUInt(@Self) <= $FFFF) or (NativeInt(@Self) and (SizeOf(Pointer) - 1) <> 0) or
     (F.Marker <> LUA_METATYPE_MARKER) or (F.Kind <> AKind) then
     raise ELua.CreateFmt('Invalid %s instance: %p', [KINDS[AKind], @Self]) at ReturnAddress;
 end;
 
-procedure TLuaMetaType.Dispose(const Instance: Pointer{/TObject});
+procedure TLuaMetaType.Dispose(const Value: Pointer{/TObject/IInterface});
 begin
   case F.Kind of
     mtClass:
     begin
-      TObject(Instance).{$IFDEF AUTOREFCOUNT}DisposeOf{$else}Free{$endif};
+      TObject(Value).{$IFDEF AUTOREFCOUNT}DisposeOf{$else}Free{$endif};
     end;
     mtInterface:
     begin
-      IInterface(PPointer(Instance)^) := nil;
+      if (Assigned(Value)) then
+        IInterface(Value)._Release;
     end;
     mtRecord:
     begin
       if (Self.Managed) then
-        FinalizeArray(Instance, F.TypeInfo, 1);
+        FinalizeArray(Value, F.TypeInfo, 1);
     end;
     mtArray:
     begin
       if (Self.Managed) then
-        FinalizeArray(Instance, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
+        FinalizeArray(Value, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
     end;
     mtSet: ;
   end;
 end;
 
-procedure TLuaMetaType.Clear(const Instance: Pointer{/TObject}; const FillZero: Boolean);
+procedure TLuaMetaType.Clear(var Instance; const FillZero: Boolean);
 begin
   case F.Kind of
     mtClass:
@@ -6482,60 +6485,67 @@ begin
     end;
     mtInterface:
     begin
-      IInterface(PPointer(Instance)^) := nil;
+      IInterface(Instance) := nil;
     end;
     mtRecord:
     begin
       if (Self.Managed) then
-        FinalizeArray(Instance, F.TypeInfo, 1);
+        FinalizeArray(@Instance, F.TypeInfo, 1);
     end;
     mtArray:
     begin
       if (Self.Managed) then
-        FinalizeArray(Instance, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
+        FinalizeArray(@Instance, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
     end;
     mtSet: ;
   end;
 
   if (FillZero) then
   begin
-    FillChar(Instance^, F.Size, #0);
+    FillChar(Instance, F.Size, #0);
   end;
 end;
 
-procedure TLuaMetaType.Assign(const Instance, Value: Pointer{/TObject});
+procedure TLuaMetaType.Assign(var Instance; const Value: Pointer{/TObject/IInterface});
+var
+  Obj: ^TObject;
 begin
   case F.Kind of
     mtClass:
     begin
-      CopyObject(TObject(Instance), TObject(Value));
+      Obj := Pointer(@Instance);
+      if (not Assigned(Obj^)) then
+      begin
+        Obj^ := TClass(PPointer(Value)^).NewInstance;
+      end;
+      CopyObject(Obj^, TObject(Value));
+      Exit;
+    end;
+    mtInterface:
+    begin
+      IInterface(Instance) := IInterface(Value);
       Exit;
     end;
     mtRecord:
     begin
       if (Self.Managed) then
       begin
-        CopyArray(Instance, Value, F.TypeInfo, 1);
+        CopyArray(@Instance, Value, F.TypeInfo, 1);
         Exit;
       end;
-    end;
-    mtInterface:
-    begin
-      IInterface(PPointer(Instance)^) := IInterface(Value);
-      Exit;
     end;
     mtArray:
     begin
       if (Self.Managed) then
       begin
-        CopyArray(Instance, Value, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
+        CopyArray(@Instance, Value, PLuaArrayInfo(@Self).FFinalTypeInfo, PLuaArrayInfo(@Self).FFinalItemsCount);
         Exit;
       end;
     end;
     mtSet: ;
   end;
 
-  System.Move(Value^, Instance^, F.Size);
+  System.Move(Value^, Instance, F.Size);
 end;
 
 
@@ -6889,8 +6899,8 @@ end;
 
 type
   TLuaParamKind = (pkUnknown, pkBoolean, pkInteger, pkInt64, pkFloat, pkPointer,
-                   pkString, pkVariant, pkClass, pkObject, pkWeakObject, pkRecord,
-                   pkInterface, pkArray, pkSet, pkClosure, pkUniversal);
+                   pkString, pkVariant, pkClass, pkObject, pkWeakObject, pkInterface,
+                   pkRecord, pkArray, pkSet, pkClosure, pkUniversal);
 
   TLuaBoolType = (btBoolean, btByteBool, btWordBool, btLongBool);
 
@@ -7544,7 +7554,7 @@ function TLuaCustomParam.SetValue(var Dest; const Lua: TLua; const StackIndex: I
     case lua_type(Lua.Handle, StackIndex) of
       LUA_TNIL:
       begin
-        MetaType.Clear(Instance, True);
+        MetaType.Clear(Instance^, True);
       end;
       LUA_TUSERDATA:
       begin
@@ -7553,7 +7563,7 @@ function TLuaCustomParam.SetValue(var Dest; const Lua: TLua; const StackIndex: I
           (UserData.MetaType <> {$ifdef SMALLINT}__luapointer(MetaType){$else}MetaType.Ptr{$endif}) then
           goto failure;
 
-        MetaType.Assign(Instance, UserData.Instance);
+        MetaType.Assign(Instance^, UserData.Instance);
       end;
     else
     failure:
@@ -8216,13 +8226,13 @@ var
         FinalizeArray(Ptr, TypeInfo(TObject), Count);
       end;
       {$endif}
-      pkVariant:
-      begin
-        FinalizeArray(Ptr, TypeInfo(Variant), Count);
-      end;
       pkInterface:
       begin
         FinalizeArray(Ptr, TypeInfo(IInterface), Count);
+      end;
+      pkVariant:
+      begin
+        FinalizeArray(Ptr, TypeInfo(Variant), Count);
       end;
       pkString:
       begin
@@ -8253,7 +8263,7 @@ var
 
         for i := 1 to Count do
         begin
-          MetaType.Clear(Ptr, False);
+          MetaType.Clear(Ptr^, False);
           Inc(NativeInt(Ptr), MetaType.Size);
         end;
 
@@ -10067,13 +10077,13 @@ end;
 
 const
   {$ifdef SMALLINT}
-    PROPSLOT_MASK    = $FF000000;
-    PROPSLOT_FIELD   = $FF000000;
-    PROPSLOT_VIRTUAL = $FE000000;
+    PROPSLOT_MASK    = NativeUInt($FF000000);
+    PROPSLOT_FIELD   = NativeUInt($FF000000);
+    PROPSLOT_VIRTUAL = NativeUInt($FE000000);
   {$else .LARGEINT}
-    PROPSLOT_MASK    = $FF00000000000000;
-    PROPSLOT_FIELD   = $FF00000000000000;
-    PROPSLOT_VIRTUAL = $FE00000000000000;
+    PROPSLOT_MASK    = NativeUInt($FF00000000000000);
+    PROPSLOT_FIELD   = NativeUInt($FF00000000000000);
+    PROPSLOT_VIRTUAL = NativeUInt($FE00000000000000);
   {$endif}
   PROPSLOT_CLEAR = (not PROPSLOT_MASK);
 
@@ -10691,8 +10701,8 @@ const
   STD_IS_REF = 5;
   STD_IS_CONST = 6;
   STD_IS_CLASS = 7;
-  STD_IS_RECORD = 8;
-  STD_IS_INTERFACE = 9;
+  STD_IS_INTERFACE = 8;
+  STD_IS_RECORD = 9;
   STD_IS_ARRAY = 10;
   STD_IS_SET = 11;
   STD_IS_EMPTY = 12;
@@ -10700,18 +10710,21 @@ const
   // STD_EQUALS ?
   // classes
   STD_CREATE = 14;
+  // interfaces
+  STD_ADDREF = 15;
+  STD_RELEASE = 16;
   // arrays
-  STD_LENGTH = 15;
-  STD_RESIZE = 16;
+  STD_LENGTH = 17;
+  STD_RESIZE = 18;
   // arrays and sets
-  STD_LOW = 17;
-  STD_HIGH = 18;
-  STD_INCLUDE = 19;
+  STD_LOW = 19;
+  STD_HIGH = 20;
+  STD_INCLUDE = 21;
   // sets
-  STD_EXCLUDE = 20;
-  STD_CONTAINS = 21;
+  STD_EXCLUDE = 22;
+  STD_CONTAINS = 23;
   // TLuaReference
-  STD_VALUE = 22;
+  STD_VALUE = 24;
 
   ID_TYPE: array[0..4] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), 0);
   ID_TYPENAME: array[0..8] of Byte = (Ord('T'), Ord('y'), Ord('p'), Ord('e'), Ord('N'), Ord('a'), Ord('m'), Ord('e'), 0);
@@ -10721,12 +10734,14 @@ const
   ID_ISREF: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('f'), 0);
   ID_ISCONST: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('o'), Ord('n'), Ord('s'), Ord('t'), 0);
   ID_ISCLASS: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'), 0);
-  ID_ISRECORD: array[0..8] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'), 0);
   ID_ISINTERFACE: array[0..11] of Byte = (Ord('I'), Ord('s'), Ord('I'), Ord('n'), Ord('t'), Ord('e'), Ord('r'), Ord('f'), Ord('a'), Ord('c'), Ord('e'), 0);
+  ID_ISRECORD: array[0..8] of Byte = (Ord('I'), Ord('s'), Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'), 0);
   ID_ISARRAY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'), 0);
   ID_ISSET: array[0..5] of Byte = (Ord('I'), Ord('s'), Ord('S'), Ord('e'), Ord('t'), 0);
   ID_ISEMPTY: array[0..7] of Byte = (Ord('I'), Ord('s'), Ord('E'), Ord('m'), Ord('p'), Ord('t'), Ord('y'), 0);
   ID_FREE: array[0..4] of Byte = (Ord('F'), Ord('r'), Ord('e'), Ord('e'), 0);
+  ID_ADDREF: array[0..7] of Byte = (Ord('_'), Ord('A'), Ord('d'), Ord('d'), Ord('R'), Ord('e'), Ord('f'), 0);
+  ID_RELEASE: array[0..8] of Byte = (Ord('_'), Ord('R'), Ord('e'), Ord('l'), Ord('e'), Ord('a'), Ord('s'), Ord('e'), 0);
   ID_CREATE: array[0..6] of Byte = (Ord('C'), Ord('r'), Ord('e'), Ord('a'), Ord('t'), Ord('e'), 0);
   ID_LENGTH: array[0..6] of Byte = (Ord('L'), Ord('e'), Ord('n'), Ord('g'), Ord('t'), Ord('h'), 0);
   ID_RESIZE: array[0..6] of Byte = (Ord('R'), Ord('e'), Ord('s'), Ord('i'), Ord('z'), Ord('e'), 0);
@@ -10739,9 +10754,9 @@ const
 
   STANDARD_NAMES: array[STD_TYPE..STD_VALUE] of Pointer = (
     @ID_TYPE, @ID_TYPENAME, @ID_TYPEPARENT, @ID_INHERITSFROM, @ID_ASSIGN, @ID_ISREF,
-    @ID_ISCONST, @ID_ISCLASS, @ID_ISRECORD, @ID_ISINTERFACE, @ID_ISARRAY, @ID_ISSET,
-    @ID_ISEMPTY, @ID_FREE, @ID_CREATE, @ID_LENGTH, @ID_RESIZE, @ID_LOW, @ID_HIGH,
-    @ID_INCLUDE, @ID_EXCLUDE, @ID_CONTAINS, @ID_VALUE);
+    @ID_ISCONST, @ID_ISCLASS, @ID_ISINTERFACE, @ID_ISRECORD, @ID_ISARRAY, @ID_ISSET,
+    @ID_ISEMPTY, @ID_FREE, @ID_CREATE, @ID_ADDREF, @ID_RELEASE, @ID_LENGTH, @ID_RESIZE,
+    @ID_LOW, @ID_HIGH, @ID_INCLUDE, @ID_EXCLUDE, @ID_CONTAINS, @ID_VALUE);
 
   ID_LEN: array[0..5] of Byte = (Ord('_'), Ord('_'), Ord('l'), Ord('e'), Ord('n'), 0);
   ID_TOSTRING: array[0..10] of Byte = (Ord('_'), Ord('_'), Ord('t'), Ord('o'), Ord('s'), Ord('t'), Ord('r'), Ord('i'), Ord('n'), Ord('g'), 0);
@@ -10902,8 +10917,8 @@ begin
     global_fill_value(global_alloc_ref);
   end;
   FillStandardNameSpace(FStdObjectNameSpace, [STD_CREATE]);
+  FillStandardNameSpace(FStdInterfaceNameSpace, [STD_ADDREF, STD_RELEASE]);
   FillStandardNameSpace(FStdRecordNameSpace, []);
-  FillStandardNameSpace(FStdInterfaceNameSpace, []);
   FillStandardNameSpace(FStdArrayNameSpace, [STD_LENGTH, STD_RESIZE, STD_LOW, STD_HIGH, STD_INCLUDE]);
   FillStandardNameSpace(FStdSetNameSpace, [STD_LOW, STD_HIGH, STD_INCLUDE, STD_EXCLUDE, STD_CONTAINS]);
 
@@ -10981,8 +10996,8 @@ begin
 
   // finalize names and dynamic arrays
   TLuaDictionary(FStdObjectNameSpace).Clear;
-  TLuaDictionary(FStdRecordNameSpace).Clear;
   TLuaDictionary(FStdInterfaceNameSpace).Clear;
+  TLuaDictionary(FStdRecordNameSpace).Clear;
   TLuaDictionary(FStdArrayNameSpace).Clear;
   TLuaDictionary(FStdSetNameSpace).Clear;
   for i := 0 to TLuaDictionary(FMetaTypes).Count - 1 do
@@ -10990,7 +11005,7 @@ begin
     MetaType := TLuaMemoryHeap(FMemoryHeap).Unpack(TLuaDictionary(FMetaTypes).FItems[i].Value);
     MetaType.FName := '';
     case MetaType.Kind of
-      mtClass, mtRecord, mtInterface:
+      mtClass, mtInterface, mtRecord:
       begin
         TLuaDictionary(MetaType.FNameSpace).Clear;
       end;
@@ -12602,19 +12617,29 @@ label
   simple_case;
 const
   INSTANCE_KINDS: array[TLuaMetaKind] of Integer = (
-    Ord(ikObject), Ord(ikRecord), Ord(ikInterface), Ord(ikArray), Ord(ikSet));
+    Ord(ikObject), Ord(ikInterface), Ord(ikRecord), Ord(ikArray), Ord(ikSet));
 var
   UserData: PLuaUserData;
   Size: Integer;
 begin
-  if (not GcDestroy) or (MetaType.F.Kind = mtClass) then
+  if (not GcDestroy) or (MetaType.F.Kind in [mtClass, mtInterface]) then
   begin
     UserData := lua_newuserdata(Handle, SizeOf(TLuaUserData));
     UserData.Instance := Instance;
-    {$ifdef AUTOREFCOUNT}
-    if (Assigned(Instance)) and (MetaType.F.Kind = mtClass) and (GcDestroy) then
-      TObject(Instance).__ObjAddRef;
-    {$endif}
+    if (Assigned(Instance)) and (GcDestroy) then
+    begin
+      if (MetaType.F.Kind = mtInterface) then
+      begin
+        IInterface(UserData.Instance)._AddRef;
+      end
+      {$ifdef AUTOREFCOUNT}
+      else // mtClass
+      begin
+        TObject(Instance).__ObjAddRef;
+      end
+      {$endif}
+      ;
+    end;
   end else
   begin
     Size := (MetaType.Size + SizeOf(NativeUInt) - 1) and Integer(-SizeOf(NativeUInt));
@@ -12652,12 +12677,6 @@ begin
           mtRecord:
           begin
             CopyRecord(UserData.Instance, Instance, PLuaRecordInfo(MetaType).F.TypeInfo);
-          end;
-          mtInterface:
-          begin
-            PPointer(UserData.Instance)^ := PPointer(Instance)^;
-            if (PPointer(Instance)^ <> nil) then
-              IInterface(PPointer(Instance)^)._AddRef;
           end;
           mtArray:
           begin
@@ -16243,8 +16262,8 @@ end;
 function TLua.InternalAddMetaType(const Kind: TLuaMetaKind; const Name: LuaString;
   const TypeInfo: Pointer; const InstanceSize: Integer; const AdditionalSize: NativeInt): PLuaMetaType;
 const
-  SIZES: array[TLuaMetaKind] of Integer = (SizeOf(TLuaClassInfo), SizeOf(TLuaRecordInfo),
-    SizeOf(TLuaInterfaceInfo), SizeOf(TLuaArrayInfo), SizeOf(TLuaSetInfo));
+  SIZES: array[TLuaMetaKind] of Integer = (SizeOf(TLuaClassInfo), SizeOf(TLuaInterfaceInfo),
+    SizeOf(TLuaRecordInfo), SizeOf(TLuaArrayInfo), SizeOf(TLuaSetInfo));
 var
   LuaName: __luaname;
   Size: NativeInt;
@@ -16278,9 +16297,10 @@ begin
   {$ifdef LARGEINT}
   Result.F.Ptr := Ptr;
   {$endif}
-  Result.F.TypeInfo := TypeInfo;
   Result.FLua := Self;
   Result.FName := Name;
+  Result.F.Size := InstanceSize;
+  Result.F.TypeInfo := TypeInfo;
   Result.FillManagedValue;
   Result.FillHFAValue;
 
@@ -17004,7 +17024,7 @@ begin
     end else
     begin
       MethodPtr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
-      Item.Value := MethodPtr;
+      Item.Value := MethodPtr or NAMESPACE_FLAG_PROC;
       Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MethodPtr);
 
       Method.Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
@@ -18627,6 +18647,10 @@ construct:
       UserData.Instance := Pointer(PLuaClassInfo(MetaType).F.AClass.NewInstance);
       goto class_record_construct;
     end;
+    mtInterface:
+    begin
+     // ToDo
+    end;
     mtRecord:
     begin
     class_record_construct:
@@ -18638,10 +18662,6 @@ construct:
         goto done;
       end;
       // ToDo
-    end;
-    mtInterface:
-    begin
-     // ToDo
     end;
     mtArray:
     begin
@@ -18981,7 +19001,7 @@ end;
 
 function TLua.push_standard(const MetaType: PLuaMetaType; const StdIndex: Cardinal): Boolean;
 label
-  ret_false, is_filled_nil, is_filled_zero, done;
+  ret_false, is_filled_zero, done;
 var
   Ptr: __luapointer;
   ArrayIndex, Count: Integer;
@@ -19063,14 +19083,14 @@ begin
       lua_pushboolean(Handle, MetaType.F.Kind = mtClass);
       goto done;
     end;
-    STD_IS_RECORD:
-    begin
-      lua_pushboolean(Handle, MetaType.F.Kind = mtRecord);
-      goto done;
-    end;
     STD_IS_INTERFACE:
     begin
       lua_pushboolean(Handle, MetaType.F.Kind = mtInterface);
+      goto done;
+    end;
+    STD_IS_RECORD:
+    begin
+      lua_pushboolean(Handle, MetaType.F.Kind = mtRecord);
       goto done;
     end;
     STD_IS_SET:
@@ -19085,20 +19105,15 @@ begin
         lua_pushboolean(Handle, True);
       end else
       case MetaType.F.Kind of
-        mtClass:
+        mtClass, mtInterface:
         begin
         ret_false:
           lua_pushboolean(Handle, False);
         end;
-        mtInterface:
-        begin
-        is_filled_nil:
-          lua_pushboolean(Handle, PPointer(UserData.Instance)^ = nil);
-        end;
         mtArray:
         begin
-          if (PLuaArrayInfo(MetaType).IsDynamic) then goto is_filled_nil;
-          goto is_filled_zero;
+          if (not PLuaArrayInfo(MetaType).IsDynamic) then goto is_filled_zero;
+          lua_pushboolean(Handle, PPointer(UserData.Instance)^ = nil);
         end
       else
       is_filled_zero:
@@ -19122,6 +19137,24 @@ begin
       begin
         push_closure(Pointer(@ID_CREATE), Ord(ckClassInstance), Ord(cmInternal),
           MetaType, @TLua.__ClassCreate, {???} 0 + ($ffff shl 16));
+        goto done;
+      end;
+    end;
+    STD_ADDREF:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        push_closure(Pointer(@ID_ADDREF), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__IntfAddRef, 0 + (0 shl 16));
+        goto done;
+      end;
+    end;
+    STD_RELEASE:
+    begin
+      if (Assigned(UserData)) then
+      begin
+        push_closure(Pointer(@ID_RELEASE), Ord(ckInstance), Ord(cmInternal),
+          UserData, @TLua.__IntfRelease, 0 + (0 shl 16));
         goto done;
       end;
     end;
@@ -19576,6 +19609,15 @@ end;
 function TLua.__index(const AMetaType: __luapointer): Integer;
 label
   not_found, property_push, field_push, done;
+const
+  CLOSURE_KINDS: array[TLuaMethodKind] of TLuaClosureKind = (
+    {mkStatic}ckGlobal,
+    {mkInstance}ckInstance,
+    {mkClass}ckClassInstance,
+    {mkConstructor}ckInstanceConstructor,
+    {mkDestructor}ckDestructor,
+    {mkOperator}High(TLuaClosureKind)
+  );
 var
   UserData: PLuaUserData;
   MetaType: PLuaClassInfo{PLuaMetaType};
@@ -19586,7 +19628,7 @@ var
   Prop: ^TLuaProperty;
   Proc: ^TLuaMethod;
   Flags: Integer;
-  Instance, Value: Pointer;
+  Instance, Value, Address: Pointer;
 begin
   MetaType := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(AMetaType);
 
@@ -19617,9 +19659,29 @@ begin
           // method
           Ptr := Ptr and NAMESPACE_FLAGS_CLEAR;
           Proc := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
-          // ToDo
-          lua_pushlightuserdata(Handle, Proc);
-          //  push_function(Proc.Value);
+          Value := Pointer(MetaType.AClass);
+          Instance := Value;
+          if (Proc.MethodKind in [mkInstance, {mkConstructor, }mkDestructor]) then
+          begin
+            if (not Assigned(UserData)) then
+            begin
+              stack_lua_string(FStringBuffer.Lua, 2);
+              Self.Error('%s.%s method is not a class method', [MetaType.FName, FStringBuffer.Lua]);
+              goto done;
+            end else
+            begin
+              Instance := UserData.Instance;
+              Value := PPointer(Instance)^;
+            end;
+          end;
+          Address := Proc.Address;
+          if (NativeUInt(Address) >= PROPSLOT_VIRTUAL) then
+          begin
+            Address := PPointer((NativeUInt(Address) and PROPSLOT_CLEAR) + NativeUInt(Value))^;
+          end;
+          push_closure(LuaName, Byte(CLOSURE_KINDS[Proc.MethodKind]),
+            Ord(cmUniversal) + Ord(Proc.InvokableMode),
+            Instance, Address, Proc.Invokable);
           goto done;
         end;
       end else
@@ -21258,7 +21320,7 @@ begin
   end;
 
   // assign
-  MetaType.Assign(UserData.Instance, ValueUserData.Instance);
+  MetaType.Assign(UserData.Instance^, ValueUserData.Instance);
 
 done:
   Result := 0;
@@ -21285,6 +21347,32 @@ end;
 function TLua.__ClassCreate(const AMetaType: PLuaMetaType; const ArgsCount: Integer): Integer;
 begin
   Result := __call(AMetaType.Ptr, True);
+end;
+
+function TLua.__IntfAddRef(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
+var
+  UserData: PLuaUserData;
+  Count: Integer;
+begin
+  UserData := AUserData;
+  Count := IInterface(UserData.Instance)._AddRef;
+  lua_pushinteger(Handle, Count);
+  Result := 1;
+end;
+
+function TLua.__IntfRelease(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
+var
+  UserData: PLuaUserData;
+  Count: Integer;
+begin
+  UserData := AUserData;
+  Count := IInterface(UserData.Instance)._Release;
+  if (Count = 0) then
+  begin
+    UserData.Instance := nil;
+  end;
+  lua_pushinteger(Handle, Count);
+  Result := 1;
 end;
 
 function TLua.__DynArrayInclude(const AUserData: Pointer{PLuaUserData}; const ArgsCount: Integer): Integer;
@@ -21379,11 +21467,11 @@ begin
     if (Invokable.ResultKind = rkUserData) then
     begin
       case Invokable.Result.F.Kind of
-        pkRecord:
+        pkInterface:
         begin
 
         end;
-        pkInterface:
+        pkRecord:
         begin
 
         end;

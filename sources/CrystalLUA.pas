@@ -600,7 +600,7 @@ type
   PLuaClassInfo = ^TLuaClassInfo;
   TLuaClassInfo = object(TLuaMetaType)
   protected
-    function VmtOffset(const Proc: Pointer): NativeInt;
+    function VmtOffset(const Proc: Pointer; const StandardProcs: Boolean): NativeInt;
   public
     // lua_CFunction
     CFunctionCreate, CFunctionFree: Pointer;
@@ -874,8 +874,8 @@ type
     function  InternalAddArrayEx(const Identifier, ItemTypeInfo: Pointer; const ABounds: array of Integer): PLuaArrayInfo;
     function  InternalAddSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
     function  InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean = True): Pointer{PLuaMetaType/PLuaInvokable};
-    function  InternalBuildInvokable(const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer; overload;
-    function  InternalBuildInvokable(const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer; overload;
+    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer; overload;
+    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer; overload;
     function  InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
       Address: Pointer; const MethodKind: TLuaMethodKind; const Invokable: __luapointer;
       {Universal} const MinArgsCount: Word = 0; const MaxArgsCount: Word = High(Word)): __luapointer;
@@ -2687,7 +2687,7 @@ begin
   Result := P;
 end;
 
-function IsBooleanTypeInfo(const Value: PTypeInfo): Boolean;
+function IsBooleanType(const Value: PTypeInfo): Boolean;
 var
   Base: PTypeInfo;
   pBase: ^PTypeInfo;
@@ -2734,7 +2734,7 @@ begin
   end;
 end;
 
-function IsReferenceTypeInfo(const Value: PTypeInfo): Boolean;
+function IsReferenceMethodType(const Value: PTypeInfo): Boolean;
 var
   TypeData: PTypeData;
   Table: PIntfMethodTable;
@@ -6651,7 +6651,7 @@ procedure __TLuaRecordInfoRegTypeInfoMethod(const Self: TLuaRecordInfo; const Me
   const Address: Pointer; const TypeInfo: PTypeInfo; const IsStatic: Boolean);
 begin
   Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
-    Self.FLua.InternalBuildInvokable(TypeInfo, RECORD_METHOD_KINDS[IsStatic]));
+    Self.FLua.InternalBuildInvokable(@Self, TypeInfo, RECORD_METHOD_KINDS[IsStatic]));
 end;
 
 procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: Pointer;
@@ -6682,7 +6682,7 @@ procedure __TLuaRecordInfoRegCustomMethod(const Self: TLuaRecordInfo; const Meth
   const IsStatic: Boolean; const CallConv: TCallConv);
 begin
   Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
-    Self.FLua.InternalBuildInvokable(Params, ResultType, RECORD_METHOD_KINDS[IsStatic], CallConv));
+    Self.FLua.InternalBuildInvokable(@Self, Params, ResultType, RECORD_METHOD_KINDS[IsStatic], CallConv));
 end;
 
 procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: Pointer;
@@ -6801,7 +6801,11 @@ end;
 
 { TLuaClassInfo }
 
-function TLuaClassInfo.VmtOffset(const Proc: Pointer): NativeInt;
+function TLuaClassInfo.VmtOffset(const Proc: Pointer; const StandardProcs: Boolean): NativeInt;
+const
+  FIRST_VMT: array[Boolean] of NativeInt = (
+    {$ifdef FPC}vmtToString + SizeOf(Pointer){$else .DELPHI}0{$endif},
+    {$ifdef FPC}vmtMethodStart{$else .DELPHI}vmtParent + SizeOf(Pointer){$endif});
 var
   VMT, Top: NativeUInt;
   Start, Finish, Value: NativeUInt;
@@ -6813,7 +6817,6 @@ begin
     Finish := VMT;
     Inc(Start, {$ifdef FPC}vmtClassName{$else .DELPHI}(vmtSelfPtr + SizeOf(Pointer)){$endif});
     Inc(Finish, {$ifdef FPC}vmtMsgStrPtr{$else .DELPHI}vmtClassName{$endif});
-    {$ifdef FPC}Inc(NativeInt(VMT), (vmtToString + SizeOf(Pointer)));{$endif}
 
     Top := High(NativeUInt);
     repeat
@@ -6824,6 +6827,7 @@ begin
 
     Top := NativeUInt(NativeInt(Top) and -SizeOf(Pointer));
     Start := VMT;
+    Inc(NativeInt(VMT), FIRST_VMT[StandardProcs]);
     Dec(VMT, SizeOf(Pointer));
     repeat
       Inc(VMT, SizeOf(Pointer));
@@ -6908,7 +6912,7 @@ type
     stAnsiChar, stWideChar, stPAnsiChar, stPWideChar);
 
   TLuaClosureKind = (ckGlobal, ckClassStatic, ckInstance, ckClassInstance,
-    ckConstructor, ckInstanceConstructor, ckDestructor, ckMethod, ckReference {Operator?});
+    ckConstructor, ckDestructor, ckMethod, ckReference {Operator?});
 
   TLuaClosureMode = (cmInternal, cmUniversal, cmInvokable);
 
@@ -7002,7 +7006,7 @@ begin
     F.Kind := pkString;
     F.StringType := stPAnsiChar;
   end;
-  if (IsBooleanTypeInfo(Value)) then
+  if (IsBooleanType(Value)) then
   begin
     F.Kind := pkBoolean;
     case (GetTypeData(Value).OrdType) of
@@ -7095,7 +7099,7 @@ begin
     tkInterface:
     begin
       {$ifdef EXTENDEDRTTI}
-      if (IsReferenceTypeInfo(Value)) then
+      if (IsReferenceMethodType(Value)) then
       begin
         F.Kind := pkClosure;
         F.ClosureKind := ckReference;
@@ -8101,7 +8105,7 @@ const
   VALUE_NOT_DEFINED = -1;
 
 type
-  TLuaResultKind = (rkNone, rkRegister, rkHFASingle, rkHFADouble, rkBuffer, rkManagedBuffer, rkUserData);
+  TLuaResultMode = (rmNone, rmRegister, rmHFASingle, rmHFADouble, rmBuffer, rmManagedBuffer, rmUserData);
   TLuaStackCleaner = (scCaller, scInvokable, scInvokableEx);
 
   PLuaInvokable = ^TLuaInvokable;
@@ -8109,7 +8113,7 @@ type
   public
     MethodKind: TLuaMethodKind;
     CallConv: TCallConv;
-    ResultKind: TLuaResultKind;
+    ResultMode: TLuaResultMode;
     StackCleaner: TLuaStackCleaner;
     StackDataSize: Integer;
     TotalDataSize: Integer;
@@ -8670,9 +8674,9 @@ begin
 
     ParamBlock.OutX := ParamBlock.RegX[0];
     ParamBlock.OutQ := ParamBlock.RegQ[0];
-    if (Self.ResultKind in [rkHFASingle, rkHFADouble]) then
+    if (Self.ResultMode in [rmHFASingle, rmHFADouble]) then
     begin
-      if (Self.ResultKind = rkHFASingle) then
+      if (Self.ResultMode = rmHFASingle) then
       begin
         ParamBlock.OutHFA.Singles[0] := ParamBlock.RegQ[0].LL;
         ParamBlock.OutHFA.Singles[1] := ParamBlock.RegQ[1].LL;
@@ -8704,7 +8708,8 @@ type
     FBuffer: TLuaBuffer;
     FAdvanced: TLuaBuffer;
 
-    function NewInvokable(const MethodKind: TLuaMethodKind; const CallConv: TCallConv; const ResultType: PTypeInfo): PLuaInvokable;
+    function NewInvokable(const MetaType: PLuaMetaType; const MethodKind: TLuaMethodKind;
+      const CallConv: TCallConv; const ResultType: PTypeInfo): PLuaInvokable;
     function InternalAddName(const Name: LuaString): NativeInt;
     function InternalAddParam(const Name: PShortString; const TypeInfo: Pointer;
       const PointerDepth: Integer; const ParamFlags: TParamFlags): PLuaInvokableParam; overload;
@@ -8713,15 +8718,15 @@ type
     function InternalBuildDone: __luapointer;
   public
     procedure Clear;
-    function BuildMethod(const AMethod: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildMethod(const MetaType: PLuaMetaType; const AMethod: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$ifdef EXTENDEDRTTI}
-    function BuildProcedureSignature(const ASignature: PProcedureSignature; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
-    function BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
-    function BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildProcedureSignature(const MetaType: PLuaMetaType; const ASignature: PProcedureSignature; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildProcedure(const MetaType: PLuaMetaType; const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildReferenceMethod(const MetaType: PLuaMetaType; const AReference: PTypeInfo; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
     {$endif}
-    function BuildIntfMethod(const AMethodEntry: PIntfMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
-    function BuildClassMethod(const AMethodEntry: PClassMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff); const SkipSelf: Boolean = True): __luapointer;
-    function BuildCustom(const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
+    function BuildIntfMethod(const MetaType: PLuaMetaType; const AMethodEntry: PIntfMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff)): __luapointer;
+    function BuildClassMethod(const MetaType: PLuaMetaType; const AMethodEntry: PClassMethodEntry; MethodKind: TLuaMethodKind = TLuaMethodKind($ff); const SkipSelf: Boolean = True): __luapointer;
+    function BuildCustom(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
       const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
   end;
 
@@ -8752,8 +8757,11 @@ begin
   FAdvanced.Clear;
 end;
 
-function TLuaInvokableBuilder.NewInvokable(const MethodKind: TLuaMethodKind;
-  const CallConv: TCallConv; const ResultType: PTypeInfo): PLuaInvokable;
+function TLuaInvokableBuilder.NewInvokable(const MetaType: PLuaMetaType;
+  const MethodKind: TLuaMethodKind; const CallConv: TCallConv;
+  const ResultType: PTypeInfo): PLuaInvokable;
+const
+  CONSTRUCTOR_KINDS: array[Boolean] of TLuaParamKind = (pkRecord, pkObject);
 begin
   FBuffer.Size := 0;
   FAdvanced.Size := 0;
@@ -8769,6 +8777,11 @@ begin
   Result.Result.DataValue := VALUE_NOT_DEFINED;
   Result.Result.InsuranceValue := VALUE_NOT_DEFINED;
 
+  if (MethodKind = mkConstructor) then
+  begin
+    Result.Result.F.Kind := CONSTRUCTOR_KINDS[(MetaType.F.Kind = mtClass)];
+    Result.Result.F.MetaType := MetaType;
+  end else
   if (Assigned(ResultType)) then
   begin
     Result.Result.InternalSetTypeInfo(FLua, ResultType, True);
@@ -9098,13 +9111,13 @@ const
   MASK_BUFFERED = 1 shl 30;
   NATIVE_SHIFT = {$ifdef LARGEINT}3{$else}2{$endif};
 type
-  TResultMode = (rmNone, rmRegister, rmRefFirst, rmRefLast);
-  TSelfMode = (smNone, smFirst, smSecond, smLast);
+  TResultArgMode = (ramNone, ramRegister, ramRefFirst, ramRefLast);
+  TSelfArgMode = (samNone, samFirst, samSecond, samLast);
 var
   i: Integer;
   IsStatic, IsConstructor, IsBackwardArg: Boolean;
-  ResultMode: TResultMode;
-  SelfMode: TSelfMode;
+  ResultArgMode: TResultArgMode;
+  SelfArgMode: TSelfArgMode;
   Param: ^TLuaInvokableParam;
   RegGen, RegExt: Integer;
   TempParam: TLuaInvokableParam;
@@ -9369,9 +9382,9 @@ var
     Param := @Invokable.Result;
     Param.Name := Pointer(@PARAMNAME_RESULT);
 
-    if (ResultMode = rmRegister) then
+    if (ResultArgMode = ramRegister) then
     begin
-      Invokable.ResultKind := rkRegister;
+      Invokable.ResultMode := rmRegister;
       Ptr :=
         {$if Defined(CPUINTEL)}
           @PParamBlock(nil).OutEAX
@@ -9425,10 +9438,10 @@ var
 
         if (Param.MetaType.HFAElementType = ftSingle) then
         begin
-          Invokable.ResultKind := rkHFASingle;
+          Invokable.ResultMode := rmHFASingle;
         end else
         begin
-          Invokable.ResultKind := rkHFADouble;
+          Invokable.ResultMode := rmHFADouble;
         end;
       end;
       {$endif}
@@ -9453,12 +9466,12 @@ var
       pkRecord, pkArray, pkSet, pkClosure]) then
     begin
       // user data
-      Invokable.ResultKind := rkUserData;
+      Invokable.ResultMode := rmUserData;
     end else
     begin
       // buffer
       Param.PointerDepth := 1;
-      Invokable.ResultKind := rkBuffer;
+      Invokable.ResultMode := rmBuffer;
       PutBuffer(Param.DataValue, Param.Size);
 
       // is managed
@@ -9466,9 +9479,9 @@ var
         pkString:
         begin
           if (Param.F.StringType in [stAnsiString, stWideString, stUnicodeString]) then
-            Invokable.ResultKind := rkManagedBuffer;
+            Invokable.ResultMode := rmManagedBuffer;
         end;
-        pkVariant: Invokable.ResultKind := rkManagedBuffer;
+        pkVariant: Invokable.ResultMode := rmManagedBuffer;
       end;
     end;
   end;
@@ -9507,15 +9520,15 @@ begin
   IsConstructor := (Invokable.MethodKind = mkConstructor);
   IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}True{$endif};
 
-  // result mode
-  ResultMode := rmNone;
+  // result argument mode
+  ResultArgMode := ramNone;
   Param := @Invokable.Result;
   if (Param.F.Kind <> pkUnknown) then
   begin
-    ResultMode := rmRegister;
+    ResultArgMode := ramRegister;
     if (UseResultRef(Param^, Invokable.CallConv, IsConstructor)) then
     begin
-      ResultMode := rmRefLast;
+      ResultArgMode := ramRefLast;
 
       {$if not Defined(CPUX86)}
       if (Invokable.CallConv <> ccSafeCall) then
@@ -9526,23 +9539,23 @@ begin
     end;
   end;
 
-  // self mode
-  SelfMode := smNone;
+  // self argument mode
+  SelfArgMode := samNone;
   if (not IsStatic) then
   begin
     {$ifdef CPUX86}
     if (Invokable.CallConv = ccPascal) then
     begin
-      SelfMode := smLast;
+      SelfArgMode := samLast;
     end else
     {$endif}
     begin
-      SelfMode := smFirst;
+      SelfArgMode := samFirst;
 
       {$if Defined(CPUARM)}
-      if (ResultMode = rmRefFirst) then
+      if (ResultArgMode = ramRefFirst) then
       begin
-        SelfMode := smSecond;
+        SelfArgMode := samSecond;
       end;
       {$ifend}
     end;
@@ -9561,21 +9574,21 @@ begin
   {$endif}
 
   // self, first result
-  if (SelfMode = smFirst) then PutSelf;
-  if (ResultMode = rmRefFirst) then PutResult;  
-  if (SelfMode = smSecond) then PutSelf;
+  if (SelfArgMode = samFirst) then PutSelf;
+  if (ResultArgMode = ramRefFirst) then PutResult;
+  if (SelfArgMode = samSecond) then PutSelf;
 
   // constructor flag
-  if (IsConstructor) then
+  if (IsConstructor) and (Invokable.Result.Kind = pkClass) then
   begin
-    TempParam.InternalSetTypeInfo(TypeInfo(Boolean), nil, False);
+    TempParam.InternalSetTypeInfo(nil, TypeInfo(Boolean), False);
     Param := @TempParam;
     PutArg;
     Invokable.ConstructorFlag := TempParam.DataValue;
   end;
 
   // arguments
-  Param := @Invokable.Params[Ord(SelfMode = smLast)];
+  Param := @Invokable.Params[Ord(SelfArgMode = samLast)];
   for i := 0 to Integer(Invokable.MaxParamCount) - 1 do
   begin
     PutArg;
@@ -9590,9 +9603,9 @@ begin
   end;
 
   // last result/self
-  if (ResultMode = rmRefLast) then PutResult;
-  if (SelfMode = smLast) then PutSelf;
-  if (ResultMode = rmRegister) then PutResult;
+  if (ResultArgMode = ramRefLast) then PutResult;
+  if (SelfArgMode = samLast) then PutSelf;
+  if (ResultArgMode = ramRegister) then PutResult;
 
   // total buffer (stack) size
   // calculate real offsets
@@ -9610,7 +9623,7 @@ begin
 
     Inc(Param);
   end;
-  if (ResultMode in [rmRefFirst, rmRefLast]) then
+  if (ResultArgMode in [ramRefFirst, ramRefLast]) then
   begin
     Param := @Invokable.Result;
     ApplyOffset;
@@ -9687,7 +9700,7 @@ begin
     Inc(Param);
   end;
   Param := @Invokable.Result;
-  if (Invokable.ResultKind in [rkBuffer, rkManagedBuffer]) or (IsParamHFAManaged) then
+  if (Invokable.ResultMode in [rmBuffer, rmManagedBuffer]) or (IsParamHFAManaged) then
   begin
     PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
     Inc(Invokable.InitialCount);
@@ -9709,7 +9722,7 @@ begin
     Inc(Param);
   end;
   Param := @Invokable.Result;
-  if (Invokable.ResultKind = rkManagedBuffer) or (IsParamHFAManaged) then
+  if (Invokable.ResultMode = rmManagedBuffer) or (IsParamHFAManaged) then
   begin
     PInteger(FAdvanced.Alloc(SizeOf(Integer)))^ := NativeInt(Param) - NativeInt(Invokable);
     Inc(Invokable.FinalCount);
@@ -9761,7 +9774,8 @@ begin
   end;
 end;
 
-function TLuaInvokableBuilder.BuildMethod(const AMethod: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+function TLuaInvokableBuilder.BuildMethod(const MetaType: PLuaMetaType; const AMethod: PTypeInfo;
+  MethodKind: TLuaMethodKind): __luapointer;
 type
   TTypeRefs = array[0..0] of PPTypeInfo;
 
@@ -9830,7 +9844,7 @@ begin
   MethodInfo.ParamTypeRefs := Pointer(Ptr);
 
   // initialization
-  if (not Assigned(NewInvokable(MethodKind, MethodInfo.CC, MethodInfo.ResultTypeInfo))) then
+  if (not Assigned(NewInvokable(MetaType, MethodKind, MethodInfo.CC, MethodInfo.ResultTypeInfo))) then
     Exit;
 
   // parameters
@@ -9847,8 +9861,8 @@ begin
 end;
 
 {$ifdef EXTENDEDRTTI}
-function TLuaInvokableBuilder.BuildProcedureSignature(const ASignature: PProcedureSignature;
-  MethodKind: TLuaMethodKind): __luapointer;
+function TLuaInvokableBuilder.BuildProcedureSignature(const MetaType: PLuaMetaType;
+  const ASignature: PProcedureSignature; MethodKind: TLuaMethodKind): __luapointer;
 var
   i: Integer;
   CallConv: TCallConv;
@@ -9871,7 +9885,7 @@ begin
   end;
   CallConv := ASignature.CC;
   ResultType := GetTypeInfo(ASignature.ResultType);
-  if (not Assigned(NewInvokable(MethodKind, CallConv, ResultType))) then
+  if (not Assigned(NewInvokable(MetaType, MethodKind, CallConv, ResultType))) then
     Exit;
 
   // parameters
@@ -9890,12 +9904,14 @@ begin
   Result := InternalBuildDone;
 end;
 
-function TLuaInvokableBuilder.BuildProcedure(const AProcedure: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+function TLuaInvokableBuilder.BuildProcedure(const MetaType: PLuaMetaType; const AProcedure: PTypeInfo;
+  MethodKind: TLuaMethodKind): __luapointer;
 begin
-  Result := BuildProcedureSignature(GetTypeData(AProcedure).ProcSig, MethodKind);
+  Result := BuildProcedureSignature(MetaType, GetTypeData(AProcedure).ProcSig, MethodKind);
 end;
 
-function TLuaInvokableBuilder.BuildReference(const AReference: PTypeInfo; MethodKind: TLuaMethodKind): __luapointer;
+function TLuaInvokableBuilder.BuildReferenceMethod(const MetaType: PLuaMetaType; const AReference: PTypeInfo;
+  MethodKind: TLuaMethodKind): __luapointer;
 var
   TypeData: PTypeData;
   Table: PIntfMethodTable;
@@ -9905,11 +9921,11 @@ begin
   Table := GetTail(TypeData.IntfUnit);
   MethodEntry := Pointer(NativeUInt(Table) + SizeOf(TIntfMethodTable));
 
-  Result := BuildIntfMethod(MethodEntry, MethodKind);
+  Result := BuildIntfMethod(MetaType, MethodEntry, MethodKind);
 end;
 {$endif}
 
-function TLuaInvokableBuilder.BuildIntfMethod(const AMethodEntry: PIntfMethodEntry;
+function TLuaInvokableBuilder.BuildIntfMethod(const MetaType: PLuaMetaType; const AMethodEntry: PIntfMethodEntry;
   MethodKind: TLuaMethodKind): __luapointer;
 type
   TMethodInfo = record
@@ -9975,7 +9991,7 @@ begin
     end;
   end;
 
-  if (not Assigned(NewInvokable(MethodKind, MethodInfo.CC, MethodInfo.ResultTypeInfo))) then
+  if (not Assigned(NewInvokable(MetaType, MethodKind, MethodInfo.CC, MethodInfo.ResultTypeInfo))) then
     Exit;
 
   // parameters
@@ -9994,8 +10010,9 @@ begin
   Result := InternalBuildDone;
 end;
 
-function TLuaInvokableBuilder.BuildClassMethod(const AMethodEntry: PClassMethodEntry;
-  MethodKind: TLuaMethodKind; const SkipSelf: Boolean): __luapointer;
+function TLuaInvokableBuilder.BuildClassMethod(const MetaType: PLuaMetaType;
+  const AMethodEntry: PClassMethodEntry; MethodKind: TLuaMethodKind;
+  const SkipSelf: Boolean): __luapointer;
 type
   PClassMethodParam = ^TClassMethodParam;
   TClassMethodParam = packed record
@@ -10029,7 +10046,7 @@ begin
   Inc(Ptr);
   ResultType := GetTypeInfo(PPointer(Ptr)^);
   Inc(Ptr, SizeOf(Pointer));
-  if (not Assigned(NewInvokable(MethodKind, CallConv, ResultType))) then
+  if (not Assigned(NewInvokable(MetaType, MethodKind, CallConv, ResultType))) then
     Exit;
 
   // parameters
@@ -10056,13 +10073,13 @@ begin
   Result := InternalBuildDone;
 end;
 
-function TLuaInvokableBuilder.BuildCustom(const Params: array of TLuaProcParam;
+function TLuaInvokableBuilder.BuildCustom(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam;
   const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
 var
   i: Integer;
 begin
   Result := LUA_POINTER_INVALID;
-  if (not Assigned(NewInvokable(MethodKind, CallConv, ResultType))) then
+  if (not Assigned(NewInvokable(MetaType, MethodKind, CallConv, ResultType))) then
     Exit;
 
   for i := Low(Params) to High(Params) do
@@ -15984,7 +16001,7 @@ type
 const
   CLOSURE_KINDS: array[TLuaClosureKind] of string = (
     'global method', 'static method', 'method', 'class method',
-    'constructor', 'constructor', 'destructor', 'method', 'reference'
+    'constructor', 'destructor', 'method', 'reference'
   );
 var
   Closure: PLuaClosure;
@@ -16390,6 +16407,7 @@ var
   FieldEx: PClassFieldEx;
   MethodEx: PExtendedClassMethodEntry;
   MethodKind: TLuaMethodKind;
+  VmtOffset: NativeInt;
   {$endif}
 
   procedure AddPropInfo;
@@ -16593,9 +16611,14 @@ begin
           MethodKind := MethodEx.DefaultMethodKind;
           if (not AddUniversalMethod(MethodEx.Entry, MethodKind)) then
           begin
-            Lua.unpack_lua_string(ItemName, MethodEx.Entry.Name);
-            Lua.InternalAddMethod(ClassInfo, ItemName, MethodEx.Entry.Address, MethodKind,
-              TLuaInvokableBuilder(Lua.FInvokableBuilder).BuildClassMethod(MethodEx.Entry, MethodKind, MethodEx.IsHasSelf));
+            VmtOffset := ClassInfo.VmtOffset(MethodEx.Entry.Address, True);
+            if (VmtOffset = -1) or (VmtOffset > {$ifdef FPC}vmtToString{$else .DELPHI}vmtDestroy{$endif}) then
+            begin
+              Lua.unpack_lua_string(ItemName, MethodEx.Entry.Name);
+              Lua.InternalAddMethod(ClassInfo, ItemName, MethodEx.Entry.Address, MethodKind,
+                TLuaInvokableBuilder(Lua.FInvokableBuilder).BuildClassMethod(
+                  ClassInfo, MethodEx.Entry, MethodKind, MethodEx.IsHasSelf));
+            end;
           end;
         end;
       end;
@@ -16745,7 +16768,9 @@ end;
 
 function TLua.InternalAddRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
 begin
-  Result := nil{ToDo};
+  // ToDo
+  unpack_lua_string(FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
+  Result := InternalAddRecordEx(FStringBuffer.Lua, TypeInfo, True);
 end;
 
 // TypeInfo can be the following:
@@ -16925,9 +16950,12 @@ begin
       mvPublic, mvPublished:
       begin
         MethodKind := METHOD_KINDS[Method.Flags and 3];
-        unpack_lua_string(ItemName, Method.Name);
-        InternalAddMethod(Result, ItemName, Method.Address, MethodKind,
-          TLuaInvokableBuilder(FInvokableBuilder).BuildProcedureSignature(Pointer(Ptr), MethodKind));
+        if (MethodKind <> mkOperator) then
+        begin
+          unpack_lua_string(ItemName, Method.Name);
+          InternalAddMethod(Result, ItemName, Method.Address, MethodKind,
+            TLuaInvokableBuilder(FInvokableBuilder).BuildProcedureSignature(Result, Pointer(Ptr), MethodKind));
+        end;
       end;
     end;
 
@@ -17011,7 +17039,7 @@ begin
   for i := 1 to Count do
   begin
     MethodEntry := Pointer(Ptr);
-    InvokablePtr := TLuaInvokableBuilder(FInvokableBuilder).BuildIntfMethod(MethodEntry);
+    InvokablePtr := TLuaInvokableBuilder(FInvokableBuilder).BuildIntfMethod(Result, MethodEntry);
     LuaItemName := TLuaNames(FNames).Add(PShortString(@MethodEntry.Name)^);
     Ptr := GetTail(MethodEntry.Name);
 
@@ -17294,7 +17322,7 @@ begin
       {$endif}
       end;
 
-      if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanTypeInfo(ItemTypeInfo)) then
+      if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanType(ItemTypeInfo)) then
       begin
         InternalAutoRegister(ItemTypeInfo);
       end;
@@ -17321,7 +17349,7 @@ begin
   if (NativeUInt(TypeInfo) <= $FFFF) then
     raise ELua.Create('EnumTypeInfo not defined') at Self.FReturnAddress;
 
-  if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanTypeInfo(TypeInfo)) then
+  if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanType(TypeInfo)) then
   begin
     Self.unpack_lua_string(Self.FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
     GetTypeKindName(Self.FStringBuffer.Default, TypeInfo.Kind);
@@ -17368,14 +17396,14 @@ begin
   case TypeInfo.Kind of
     tkEnumeration:
     begin
-      if (not IsBooleanTypeInfo(TypeInfo)) then
+      if (not IsBooleanType(TypeInfo)) then
         __TLuaRegEnum(Self, TypeInfo);
     end;
     //? tkVariant:
     tkMethod{$ifdef EXTENDEDRTTI}, tkProcedure{$endif}:
     begin
     invokable:
-      Ptr := InternalBuildInvokable(TypeInfo, TLuaMethodKind($ff));
+      Ptr := InternalBuildInvokable(nil, TypeInfo, TLuaMethodKind($ff));
     end;
     tkSet, tkClass, tkArray, tkRecord{$ifdef FPC}, tkObject{$endif},
     tkInterface, tkDynArray{$ifdef EXTENDEDRTTI}, tkClassRef{$endif}:
@@ -17430,7 +17458,7 @@ begin
         end;
         tkInterface:
         begin
-          if IsReferenceTypeInfo(TypeInfo) then goto invokable;
+          if IsReferenceMethodType(TypeInfo) then goto invokable;
           Ptr := InternalAddInterface(TypeInfo).Ptr;
         end;
       end;
@@ -17443,7 +17471,8 @@ begin
     Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
 end;
 
-function TLua.InternalBuildInvokable(const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer;
+function TLua.InternalBuildInvokable(const MetaType: PLuaMetaType; const TypeInfo: PTypeInfo;
+  const MethodKind: TLuaMethodKind): __luapointer;
 var
   Builder: ^TLuaInvokableBuilder;
 begin
@@ -17454,29 +17483,29 @@ begin
   case TypeInfo.Kind of
     tkMethod:
     begin
-      Result := Builder.BuildMethod(TypeInfo, MethodKind);
+      Result := Builder.BuildMethod(MetaType, TypeInfo, MethodKind);
     end;  
     {$ifdef EXTENDEDRTTI}
     tkProcedure:
     begin
-      Result := Builder.BuildProcedure(TypeInfo, MethodKind);
+      Result := Builder.BuildProcedure(MetaType, TypeInfo, MethodKind);
     end;
     tkInterface:
     begin
-      if (IsReferenceTypeInfo(TypeInfo)) then
-        Result := Builder.BuildReference(TypeInfo, MethodKind);
+      if (IsReferenceMethodType(TypeInfo)) then
+        Result := Builder.BuildReferenceMethod(MetaType, TypeInfo, MethodKind);
     end;
     {$endif}
   end;
 end;
 
-function TLua.InternalBuildInvokable(const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
-  const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
+function TLua.InternalBuildInvokable(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam;
+  const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
 var
   Builder: ^TLuaInvokableBuilder;
 begin
   Builder := @TLuaInvokableBuilder(FInvokableBuilder);
-  Result := Builder.BuildCustom(Params, ResultType, MethodKind, CallConv);
+  Result := Builder.BuildCustom(MetaType, Params, ResultType, MethodKind, CallConv);
 end;
 
 function TLua.InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
@@ -17497,7 +17526,7 @@ begin
   if (NativeUInt(Address) <= $FFFF) then
     raise ELua.Create('Method address not defined') at FReturnAddress;
 
-  if (Invokable <> LUA_POINTER_INVALID) and
+  if (Invokable = LUA_POINTER_INVALID) and
     ((MinArgsCount > MaxArgsCount) or (MaxArgsCount > 20)) then
     raise ELua.CreateFmt('Non-available argument count range: %d..%d', [MinArgsCount, MaxArgsCount]) at FReturnAddress;
 
@@ -17508,7 +17537,7 @@ begin
 
   if Assigned(MetaType) and (MetaType.F.Kind = mtClass) then
   begin
-    VmtOffset := PLuaClassInfo(MetaType).VmtOffset(Address);
+    VmtOffset := PLuaClassInfo(MetaType).VmtOffset(Address, False);
     if (VmtOffset >= 0) then
     begin
       Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
@@ -18479,9 +18508,9 @@ begin
       end;
     else
     invalid_argument:
-      stack_force_unicode_string(FStringBuffer.Lua, i);
+      stack_force_unicode_string(FStringBuffer.Unicode, i);
       Error('Failure %s%s: invalid argument %d (%s)', [SetInfo.Name, METHOD_NAMES[Method],
-        i, FStringBuffer.Lua]);
+        i, FStringBuffer.Unicode]);
       Ret := False;
     end;
 
@@ -19614,7 +19643,7 @@ const
     {mkStatic}ckGlobal,
     {mkInstance}ckInstance,
     {mkClass}ckClassInstance,
-    {mkConstructor}ckInstanceConstructor,
+    {mkConstructor}ckConstructor,
     {mkDestructor}ckDestructor,
     {mkOperator}High(TLuaClosureKind)
   );
@@ -21260,8 +21289,8 @@ var
 
   procedure ErrorParameter(const MetaType: PLuaMetaType; const Description: string);
   begin
-    stack_force_unicode_string(FStringBuffer.Lua, 1);
-    Error('Failure %s.Assign(%s): %s.', [MetaType.Name, FStringBuffer.Lua, Description]);
+    stack_force_unicode_string(FStringBuffer.Unicode, 1);
+    Error('Failure %s.Assign(%s): %s.', [MetaType.Name, FStringBuffer.Unicode, Description]);
   end;
 begin
   LuaType := lua_type(Handle, 1);
@@ -21416,6 +21445,8 @@ var
   Param: PLuaInvokableParam;
   LuaType: Integer;
   Ptr: Pointer;
+  UserData: PLuaUserData;
+  Instance: Pointer;
 begin
   Closure := PLuaClosure(AClosure);
   Invokable := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Closure.Invokable);
@@ -21423,10 +21454,9 @@ begin
 
   case Closure.Kind of
     ckGlobal: ;
-    ckConstructor,
-    ckInstanceConstructor:
+    ckConstructor:
     begin
-      PBoolean(InvokableData + Invokable.ConstructorFlag)^ := (Closure.Kind = ckInstanceConstructor);
+      PByte(InvokableData + Invokable.ConstructorFlag)^ := $01;
       goto fill_instance;
     end;
   else
@@ -21439,7 +21469,13 @@ begin
   begin
     LuaType := lua_type(Handle, i);
     if (LuaType = LUA_TNONE) then {ToDo: default params}Break;
-    
+
+    if (LuaType = LUA_TNIL) then
+    begin
+      // ToDo
+
+    end else
+
        {.$message 'здесь'}
     {if () then
     begin
@@ -21461,36 +21497,31 @@ begin
   end;
 
   // function/procedure invoke
-  if (Invokable.ResultKind <> rkNone) then
+  if (Invokable.ResultMode <> rmNone) then
   begin
-    // ToDo optional prepare result user data
-    if (Invokable.ResultKind = rkUserData) then
+    // optional prepare result user data
+    if (Invokable.ResultMode = rmUserData) then
     begin
+      UserData := push_userdata(Invokable.Result.MetaType, nil, True);
+      Instance := UserData.Instance;
       case Invokable.Result.F.Kind of
+        {$ifdef AUTOREFCOUNT}
+        pkObject,
+        {$endif}
         pkInterface:
         begin
-
-        end;
-        pkRecord:
-        begin
-
-        end;
-        pkArray:
-        begin
-
-        end;
-        pkSet:
-        begin
-
+          Instance := @UserData.Instance;
         end;
       end;
+
+      PPointer(InvokableData + Invokable.Result.Value)^ := Instance;
     end;
 
     // invoke
     Invokable.Invoke(Closure.Address, Pointer(InvokableData));
 
     // optional get value
-    if (Invokable.ResultKind <> rkUserData) then
+    if (Invokable.ResultMode <> rmUserData) then
       Invokable.Result.GetValue(Pointer(InvokableData + Invokable.Result.DataValue)^, Self, 0);
   end else
   begin
@@ -21499,7 +21530,7 @@ begin
   end;
 
   // done
-  Result := Byte(Invokable.ResultKind <> rkNone);
+  Result := Byte(Invokable.ResultMode <> rmNone);
 end;
 
             (*
@@ -21810,7 +21841,7 @@ procedure __TLuaRegRTIIProc(const Lua: TLua; const ProcName: LuaString;
   const Address: Pointer; const TypeInfo: PTypeInfo);
 begin
   Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
-    Lua.InternalBuildInvokable(TypeInfo, mkStatic));
+    Lua.InternalBuildInvokable(nil, TypeInfo, mkStatic));
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Address: Pointer; const TypeInfo: PTypeInfo);
@@ -21837,7 +21868,7 @@ procedure __TLuaRegCustomProc(const Lua: TLua; const ProcName: LuaString; const 
   const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const CallConv: TCallConv);
 begin
   Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
-    Lua.InternalBuildInvokable(Params, ResultType, mkStatic, CallConv));
+    Lua.InternalBuildInvokable(nil, Params, ResultType, mkStatic, CallConv));
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Address: Pointer;
@@ -21893,9 +21924,12 @@ end;
 procedure __TLuaRegRTIIClassMethod(const Lua: TLua; const AClass: TClass;
   const MethodName: LuaString; const Address: Pointer; const TypeInfo: PTypeInfo;
   const MethodKind: TLuaMethodKind);
+var
+  ClassInfo: PLuaClassInfo;
 begin
-  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
-    Lua.InternalBuildInvokable(TypeInfo, MethodKind));
+  ClassInfo := Lua.InternalAddClass(AClass, False);
+  Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind,
+    Lua.InternalBuildInvokable(ClassInfo, TypeInfo, MethodKind));
 end;
 
 procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; const Address: Pointer;
@@ -21922,9 +21956,12 @@ end;
 procedure __TLuaRegCustomClassMethod(const Lua: TLua; const AClass: TClass; const MethodName: LuaString;
   const Address: Pointer; const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
   const MethodKind: TLuaMethodKind; const CallConv: TCallConv);
+var
+  ClassInfo: PLuaClassInfo;
 begin
-  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, Address, MethodKind,
-    Lua.InternalBuildInvokable(Params, ResultType, mkStatic, CallConv));
+  ClassInfo := Lua.InternalAddClass(AClass, False);
+  Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind,
+    Lua.InternalBuildInvokable(ClassInfo, Params, ResultType, mkStatic, CallConv));
 end;
 
 procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; const Address: Pointer;
@@ -22005,7 +22042,7 @@ begin
       GetterProp := icInstance;
       if (Getter <= $FFFF) then goto getter_field_invalid;
       Flags := Flags or NativeUInt(pmStatic);
-      VmtOffset := ClassInfo.VmtOffset(Pointer(Getter));
+      VmtOffset := ClassInfo.VmtOffset(Pointer(Getter), False);
       if (VmtOffset >= 0) then
       begin
         Getter := VmtOffset;
@@ -22051,7 +22088,7 @@ begin
       SetterProp := icInstance;
       if (Setter <= $FFFF) then goto setter_field_invalid;
       Flags := Flags or (NativeUInt(pmStatic) shl PROP_SLOTSETTER_SHIFT);
-      VmtOffset := ClassInfo.VmtOffset(Pointer(Setter));
+      VmtOffset := ClassInfo.VmtOffset(Pointer(Setter), False);
       if (VmtOffset >= 0) then
       begin
         Setter := VmtOffset;

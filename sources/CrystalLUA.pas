@@ -801,6 +801,7 @@ type
     FGlobalEntities: __TLuaDictionary {__luaname, PLuaGlobalEntity};
     FGlobalMetaTable: Integer;
     FFormatWrapper: Integer;
+    FObjectMetaType: PLuaClassInfo;
 
     // standard name spaces
     FStdObjectNameSpace: __TLuaDictionary;
@@ -6560,7 +6561,7 @@ begin
   if (NativeUInt(FieldOffset) > (High(NativeUInt) shr 8)) then
     raise EInvalidFieldOffset(FieldOffset) at FLua.FReturnAddress;
 
-  FLua.InternalAddProperty(@Self, Name, TypeInfo, False, False, FieldOffset, FieldOffset,
+  FLua.InternalAddProperty(@Self, FieldName, TypeInfo, False, False, FieldOffset, FieldOffset,
     FLAGS, Low(Integer));
 end;
 
@@ -6951,6 +6952,7 @@ type
     end;
 
     function InternalSetTypeInfo(const Lua: TLua; const Value: PTypeInfo; const IsWeakObject: Boolean = False): Boolean;
+    function InternalSetPointerType(const Lua: TLua; const Value: PTypeInfo): Integer;
     function GetSize: Integer;
   public
     property TypeInfo: PTypeInfo read F.TypeInfo;
@@ -6975,6 +6977,10 @@ type
 
 function TLuaCustomParam.InternalSetTypeInfo(const Lua: TLua; const Value: PTypeInfo;
   const IsWeakObject: Boolean): Boolean;
+const
+  META_TYPE_KINDS: array[TLuaMetaKind] of TLuaParamKind = (
+    pkObject{mtClass}, pkInterface{mtInterface}, pkRecord{mtRecord},
+    pkArray{mtArray}, pkSet{mtSet});
 begin
   F.TypeInfo := Value;
   F.FlagsEx := 0;
@@ -7005,7 +7011,12 @@ begin
   begin
     F.Kind := pkString;
     F.StringType := stPAnsiChar;
-  end;
+  end else
+  if (PLuaMetaType(Value).F.Marker = LUA_METATYPE_MARKER) then
+  begin
+    F.MetaType := PLuaMetaType(Value);
+    F.Kind := META_TYPE_KINDS[PLuaMetaType(Value).F.Kind];
+  end else
   if (IsBooleanType(Value)) then
   begin
     F.Kind := pkBoolean;
@@ -7158,6 +7169,44 @@ begin
     GetTypeKindName(Lua.FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
   end;
 end;
+
+function TLuaCustomParam.InternalSetPointerType(const Lua: TLua; const Value: PTypeInfo): Integer;
+{$ifNdef EXTENDEDRTTI}
+begin
+  Result := 0;
+  if (Value = TypeInfoPointer) then
+    Exit;
+end;
+{$else .EXTENDEDRTTI}
+var
+  LValue: PTypeInfo;
+  TypeData: PTypeData;
+begin
+  Result := 0;
+  if (Value = TypeInfoPointer) then
+    Exit;
+
+  LValue := Value;
+  repeat
+    if (not Assigned(LValue)) or (LValue.Kind <> tkPointer) then
+      Break;
+
+    Inc(Result);
+    TypeData := GetTypeData(LValue);
+    LValue := GetTypeInfo(TypeData.RefType);
+  until (False);
+
+  if (not Assigned(LValue)) then
+  begin
+    Dec(Result);
+    F.Kind := pkPointer;
+    F.TypeInfo := System.TypeInfo(Pointer);
+  end else
+  begin
+    InternalSetTypeInfo(Lua, LValue);
+  end;
+end;
+{$endif}
 
 function TLuaCustomParam.GetSize: Integer;
 begin
@@ -7812,11 +7861,11 @@ done:
 end;
 
 const
-  PARAM_POINTERDEPTH_MASK = (1 shl 3 - 1);
-  PARAM_MAX_POINTERDEPTH = PARAM_POINTERDEPTH_MASK - 1;
+  PARAM_TOTALPOINTERDEPTH_MASK = (1 shl 3 - 1);
+  PARAM_MAX_TOTALPOINTERDEPTH = PARAM_TOTALPOINTERDEPTH_MASK - 1;
   PARAM_REFERENCE_MODE = 1 shl 3;
   PARAM_ARRAY_MODE = 1 shl 4;
-  PARAM_ADDRESS_MODE = 1 shl 5;
+  PARAM_POINTER_MODE = 1 shl 5;
   PARAM_INSURANCE_MODE = 1 shl 6;
   PARAM_ARMPARTIAL_MODE = 1 shl 7;
 
@@ -7825,25 +7874,25 @@ type
   private
     {
       Flags:
-      RefCount: Byte:3;
+      TotalPointerDepth: Byte:3;
       IsReference: Boolean:1;
       IsArray: Boolean:1;
-      IsAddress: Boolean:1;
+      IsPointer: Boolean:1;
       IsInsurance: Boolean:1;
-      IsARMPartial: Byte:1;
+      IsARMPartial: Boolean:1;
     }
     function GetIsReference: Boolean;
     procedure SetIsReference(const AValue: Boolean);
     function GetIsArray: Boolean;
     procedure SetIsArray(const AValue: Boolean);
-    function GetIsAddress: Boolean;
-    procedure SetIsAddress(const AValue: Boolean);
+    function GetIsPointer: Boolean;
+    procedure SetIsPointer(const AValue: Boolean);
     function GetIsInsurance: Boolean;
     procedure SetIsInsurance(const AValue: Boolean);
     function GetIsARMPartial: Boolean;
     procedure SetIsARMPartial(const AValue: Boolean);
-    function GetPointerDepth: Byte;
-    procedure SetPointerDepth(const AValue: Byte);
+    function GetTotalPointerDepth: Byte;
+    procedure SetTotalPointerDepth(const AValue: Byte);
   public
     Name: PShortString;
     Value: Integer;
@@ -7852,10 +7901,10 @@ type
 
     property IsReference: Boolean read GetIsReference write SetIsReference;
     property IsArray: Boolean read GetIsArray write SetIsArray;
-    property IsAddress: Boolean read GetIsAddress write SetIsAddress;
+    property IsPointer: Boolean read GetIsPointer write SetIsPointer;
     property IsInsurance: Boolean read GetIsInsurance write SetIsInsurance;
     property IsARMPartial: Boolean read GetIsARMPartial write SetIsARMPartial;
-    property PointerDepth: Byte read GetPointerDepth write SetPointerDepth;
+    property TotalPointerDepth: Byte read GetTotalPointerDepth write SetTotalPointerDepth;
   end;
   PLuaInvokableParam = ^TLuaInvokableParam;
   TLuaInvokableParams = array[0..0] of TLuaInvokableParam;
@@ -7893,19 +7942,19 @@ begin
   end;
 end;
 
-function TLuaInvokableParam.GetIsAddress: Boolean;
+function TLuaInvokableParam.GetIsPointer: Boolean;
 begin
-  Result := (F.FlagsEx and PARAM_ADDRESS_MODE <> 0);
+  Result := (F.FlagsEx and PARAM_POINTER_MODE <> 0);
 end;
 
-procedure TLuaInvokableParam.SetIsAddress(const AValue: Boolean);
+procedure TLuaInvokableParam.SetIsPointer(const AValue: Boolean);
 begin
   if (AValue) then
   begin
-    F.FlagsEx := F.FlagsEx or PARAM_ADDRESS_MODE;
+    F.FlagsEx := F.FlagsEx or PARAM_POINTER_MODE;
   end else
   begin
-    F.FlagsEx := F.FlagsEx and (not PARAM_ADDRESS_MODE);
+    F.FlagsEx := F.FlagsEx and (not PARAM_POINTER_MODE);
   end;
 end;
 
@@ -7941,19 +7990,19 @@ begin
   end;
 end;
 
-function TLuaInvokableParam.GetPointerDepth: Byte;
+function TLuaInvokableParam.GetTotalPointerDepth: Byte;
 begin
-  Result := F.FlagsEx and PARAM_POINTERDEPTH_MASK;
+  Result := F.FlagsEx and PARAM_TOTALPOINTERDEPTH_MASK;
 end;
 
-procedure TLuaInvokableParam.SetPointerDepth(const AValue: Byte);
+procedure TLuaInvokableParam.SetTotalPointerDepth(const AValue: Byte);
 begin
-  if (AValue >= PARAM_MAX_POINTERDEPTH) then
+  if (AValue >= PARAM_MAX_TOTALPOINTERDEPTH) then
   begin
-    F.FlagsEx := (F.FlagsEx and (not PARAM_POINTERDEPTH_MASK)) + PARAM_MAX_POINTERDEPTH;
+    F.FlagsEx := (F.FlagsEx and (not PARAM_TOTALPOINTERDEPTH_MASK)) + PARAM_MAX_TOTALPOINTERDEPTH;
   end else
   begin
-    F.FlagsEx := (F.FlagsEx and (not PARAM_POINTERDEPTH_MASK)) + AValue;
+    F.FlagsEx := (F.FlagsEx and (not PARAM_TOTALPOINTERDEPTH_MASK)) + AValue;
   end;
 end;
 
@@ -8167,7 +8216,7 @@ end;
 
 procedure TLuaInvokable.Initialize(const ParamBlock: PParamBlock);
 var
-  i, PointerDepth, FlagsEx: Integer;
+  i, TotalPointerDepth, FlagsEx: Integer;
   InitialPtr: PInteger;
   Param: PLuaInvokableParam;
   Ptr: Pointer;
@@ -8181,7 +8230,7 @@ begin
 
     PNativeInt(Ptr)^ := 0;
     FlagsEx := Param.F.FlagsEx;
-    if (FlagsEx and (PARAM_INSURANCE_MODE or PARAM_POINTERDEPTH_MASK) <> 0) then
+    if (FlagsEx and (PARAM_INSURANCE_MODE or PARAM_TOTALPOINTERDEPTH_MASK) <> 0) then
     begin
       // insurance
       if (FlagsEx and PARAM_INSURANCE_MODE <> 0) then
@@ -8191,15 +8240,15 @@ begin
       end;
 
       // references
-      PointerDepth := FlagsEx and PARAM_POINTERDEPTH_MASK;
-      if (PointerDepth <> 0) then
+      TotalPointerDepth := FlagsEx and PARAM_TOTALPOINTERDEPTH_MASK;
+      if (TotalPointerDepth <> 0) then
       begin
-        if (PointerDepth <> 1) then
+        if (TotalPointerDepth <> 1) then
         repeat
           Dec(NativeInt(Ptr), SizeOf(Pointer));
           PNativeInt(Ptr)^ := NativeInt(Ptr) + SizeOf(Pointer);
-          Dec(PointerDepth);
-        until (PointerDepth = 1);
+          Dec(TotalPointerDepth);
+        until (TotalPointerDepth = 1);
 
         PPointer(NativeInt(ParamBlock) + Param.Value)^ := Ptr;
       end;
@@ -8760,8 +8809,6 @@ end;
 function TLuaInvokableBuilder.NewInvokable(const MetaType: PLuaMetaType;
   const MethodKind: TLuaMethodKind; const CallConv: TCallConv;
   const ResultType: PTypeInfo): PLuaInvokable;
-const
-  CONSTRUCTOR_KINDS: array[Boolean] of TLuaParamKind = (pkRecord, pkObject);
 begin
   FBuffer.Size := 0;
   FAdvanced.Size := 0;
@@ -8779,8 +8826,15 @@ begin
 
   if (MethodKind = mkConstructor) then
   begin
-    Result.Result.F.Kind := CONSTRUCTOR_KINDS[(MetaType.F.Kind = mtClass)];
-    Result.Result.F.MetaType := MetaType;
+    if (MetaType.F.Kind = mtClass) then
+    begin
+      Result.Result.F.Kind := pkObject;
+      Result.Result.F.MetaType := FLua.FObjectMetaType;
+    end else
+    begin
+      Result.Result.F.Kind := pkRecord;
+      Result.Result.F.MetaType := MetaType;
+    end;
   end else
   if (Assigned(ResultType)) then
   begin
@@ -8883,6 +8937,7 @@ function TLuaInvokableBuilder.InternalAddParam(const Name: PShortString; const T
   const PointerDepth: Integer; const ParamFlags: TParamFlags): PLuaInvokableParam;
 var
   CustomParam: TLuaCustomParam;
+  TotalPointerDepth: Integer;
   HighArray: PLuaInvokableParam;
 
   {$if (not Defined(CPUX64)) or (not Defined(MSWINDOWS))}
@@ -8906,6 +8961,12 @@ begin
     Exit;
   end;
 
+  TotalPointerDepth := PointerDepth;
+  if (CustomParam.F.Kind = pkPointer) then
+  begin
+    Inc(TotalPointerDepth, CustomParam.InternalSetPointerType(FLua, TypeInfo));
+  end;
+
   Result := FBuffer.Alloc(SizeOf(TLuaInvokableParam));
   Inc(PLuaInvokable(FBuffer.FBytes).MaxParamCount);
 
@@ -8916,18 +8977,11 @@ begin
   Result.InsuranceValue := VALUE_NOT_DEFINED;
 
   Result.IsArray := (pfArray in ParamFlags);
-  Result.IsAddress := (pfAddress in ParamFlags); // ?
-  Result.IsReference := ([pfVar, pfReference, pfOut] * ParamFlags <> []) and (not Result.IsAddress);
-  if (PointerDepth <> 0) then
-  begin
-    if (Result.IsAddress) then
-    begin
-      // error ToDo
-      Result := nil;
-      Exit;
-    end;
-  end else
-  if (not (Result.IsArray or Result.IsAddress or Result.IsReference)) then
+  Result.IsReference := ([pfVar, pfReference, pfOut] * ParamFlags <> []);
+  Result.IsPointer := (TotalPointerDepth <> 0) or (Result.F.Kind = pkPointer) or
+    ((Result.F.Kind = pkString) and (Result.F.StringType in [stPAnsiChar, stPWideChar]));
+
+  if (not (Result.IsArray or Result.IsReference or Result.IsPointer)) then
   begin
     case Result.F.Kind of
       pkVariant:
@@ -9022,7 +9076,7 @@ begin
   Result.IsInsurance := Result.IsArray or
    ((Result.F.Kind = pkString) and (Result.F.StringType in [stPAnsiChar, stPWideChar]));
 
-  Result.PointerDepth := PointerDepth + Ord(Result.IsReference);
+  Result.TotalPointerDepth := TotalPointerDepth + Ord(Result.IsReference);
   if (Result.IsArray) then
   begin
     HighArray := FBuffer.Alloc(SizeOf(TLuaInvokableParam));
@@ -9216,23 +9270,23 @@ var
     end;
 
     // references: pointer + buffered data
-    if (Param.PointerDepth <> 0) then
+    if (Param.TotalPointerDepth <> 0) then
     begin
       Param.DataValue := PutPtr(Param.Value);
 
-      if (Param.PointerDepth > 1) then
+      if (Param.TotalPointerDepth > 1) then
       begin
-        PutBuffer(Param.DataValue, (Param.PointerDepth - 1) * SizeOf(Pointer));
-        Inc(Param.DataValue, (Param.PointerDepth - 1) * SizeOf(Pointer));
+        PutBuffer(Param.DataValue, (Param.TotalPointerDepth - 1) * SizeOf(Pointer));
+        Inc(Param.DataValue, (Param.TotalPointerDepth - 1) * SizeOf(Pointer));
       end;
 
       case Param.F.Kind of
         pkInterface, pkRecord, pkArray, pkSet, pkClosure:
         begin
-          if (Param.PointerDepth > 1) then
+          if (Param.TotalPointerDepth > 1) then
             Dec(Param.DataValue, SizeOf(Pointer));
 
-          Param.PointerDepth := Param.PointerDepth - 1;
+          Param.TotalPointerDepth := Param.TotalPointerDepth - 1;
         end;
       else
         PutBuffer(Param.DataValue, Size);
@@ -9470,7 +9524,7 @@ var
     end else
     begin
       // buffer
-      Param.PointerDepth := 1;
+      Param.TotalPointerDepth := 1;
       Invokable.ResultMode := rmBuffer;
       PutBuffer(Param.DataValue, Param.Size);
 
@@ -9516,7 +9570,8 @@ var
   end;
 begin
   // flags
-  IsStatic := (Invokable.MethodKind = mkStatic);
+  IsStatic := (Invokable.MethodKind = mkStatic) or
+    ((Invokable.Result.Kind <> pkClass) and (Invokable.MethodKind = mkConstructor));
   IsConstructor := (Invokable.MethodKind = mkConstructor);
   IsBackwardArg := {$ifdef CPUX86}(Invokable.CallConv in [ccCdecl, ccStdCall, ccSafeCall]){$else}True{$endif};
 
@@ -9669,7 +9724,7 @@ var
 
   function IsParamInitial: Boolean;
   begin
-    Result := (Param.PointerDepth <> 0) or (Param.IsInsurance) or (IsParamFinal);
+    Result := (Param.TotalPointerDepth <> 0) or (Param.IsInsurance) or (IsParamFinal);
   end;
 begin
   // value, data value, insurance, registers, stack
@@ -10938,6 +10993,9 @@ begin
   FillStandardNameSpace(FStdRecordNameSpace, []);
   FillStandardNameSpace(FStdArrayNameSpace, [STD_LENGTH, STD_RESIZE, STD_LOW, STD_HIGH, STD_INCLUDE]);
   FillStandardNameSpace(FStdSetNameSpace, [STD_LOW, STD_HIGH, STD_INCLUDE, STD_EXCLUDE, STD_CONTAINS]);
+
+  // basic classes meta tpe
+  FObjectMetaType := InternalAddClass(TObject, True);
 
   // managed closures
   FClosureMetaTable := InternalNewMetaTable;
@@ -21436,15 +21494,17 @@ end;
 
 function TLua.InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
 label
-  fill_instance, invalid_argument;
+  fill_instance, type_pointer, type_userdata, type_standard, invalid_argument;
+const
+  META_TYPE_INSTANCE_KINDS = [pkObject, pkWeakObject, pkInterface, pkRecord, pkArray, pkSet];
 var
   i: Integer;
   Closure: PLuaClosure;
   Invokable: PLuaInvokable;
   InvokableData: NativeInt;
   Param: PLuaInvokableParam;
-  LuaType: Integer;
-  Ptr: Pointer;
+  LuaType, Flags: Integer;
+  Ptr, Value: Pointer;
   UserData: PLuaUserData;
   Instance: Pointer;
 begin
@@ -21456,7 +21516,10 @@ begin
     ckGlobal: ;
     ckConstructor:
     begin
-      PByte(InvokableData + Invokable.ConstructorFlag)^ := $01;
+      if (Invokable.ConstructorFlag <> VALUE_NOT_DEFINED) then
+      begin
+        PByte(InvokableData + Invokable.ConstructorFlag)^ := $01;
+      end;
       goto fill_instance;
     end;
   else
@@ -21468,28 +21531,121 @@ begin
   for i := 1 to Integer(Invokable.MaxParamCount) do
   begin
     LuaType := lua_type(Handle, i);
-    if (LuaType = LUA_TNONE) then {ToDo: default params}Break;
-
-    if (LuaType = LUA_TNIL) then
-    begin
-      // ToDo
-
-    end else
-
-       {.$message 'здесь'}
-    {if () then
-    begin
-
-    end else }
-    begin
-      Ptr := Pointer(InvokableData + Param.DataValue);
-      if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
+    Flags := Param.Flags;
+    case LuaType of
+      LUA_TNONE:
       begin
-      invalid_argument:
-        unpack_lua_string(FStringBuffer.Lua, Closure.Name);
-        unpack_lua_string(FStringBuffer.LuaReserved, Param.Name^);
-        Self.Error('Invalid %s.%s argument value: "%s" (%s)',
-          [FStringBuffer.Lua, FStringBuffer.LuaReserved, FStringBuffer.Unicode, FStringBuffer.Default]);
+        {ToDo: default params}Break;
+      end;
+      LUA_TNIL:
+      begin
+        // nil
+        Value := nil;
+        if (Flags and PARAM_POINTER_MODE <> 0) then goto type_pointer;
+
+        if (Flags and PARAM_ARRAY_MODE <> 0) then
+        begin
+          PPointer(InvokableData + Param.DataValue)^ := nil;
+          Inc(Param);
+          PInteger(InvokableData + Param.DataValue)^ := -1;
+        end else
+        if (Param.F.Kind in META_TYPE_INSTANCE_KINDS) then
+        begin
+          lua_remove(Handle, i);
+          UserData := push_userdata(Param.F.MetaType, nil, True);
+          lua_insert(Handle, i);
+          goto type_userdata;
+        end else
+        begin
+          Ptr := Pointer(InvokableData + Param.DataValue);
+          if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
+            goto invalid_argument;
+        end;
+      end;
+      LUA_TLIGHTUSERDATA:
+      begin
+        // pointer
+        if (Flags and PARAM_POINTER_MODE = 0) then goto invalid_argument;
+        Value := lua_touserdata(Handle, i);
+      type_pointer:
+        if (Flags and PARAM_ARRAY_MODE <> 0) then goto invalid_argument;
+        if (Flags and PARAM_REFERENCE_MODE <> 0) then
+        begin
+          PPointer(PPointer(InvokableData + Param.Value)^)^ := Value;
+        end else
+        begin
+          PPointer(InvokableData + Param.Value)^ := Value;
+        end;
+      end;
+      LUA_TTABLE:
+      begin
+        // array
+        if (Assigned(InternalTableToMetaType(i))) then goto type_standard;
+        if (Flags and PARAM_ARRAY_MODE = 0) then goto invalid_argument;
+
+        {ToDo Initialize Insurance array by table}
+      end;
+      LUA_TUSERDATA:
+      begin
+        // meta type instance
+        if (Flags and PARAM_ARRAY_MODE <> 0) then goto invalid_argument;
+        if (not (Param.F.Kind in META_TYPE_INSTANCE_KINDS)) then goto invalid_argument;
+        UserData := lua_touserdata(Handle, i);
+        if (not Assigned(UserData)) and (not Assigned(UserData.Instance)) then goto invalid_argument;
+      type_userdata:
+
+        {ToDo MetaType check}
+
+        {$ifdef CPUARM}
+        if (Flags and PARAM_ARMPARTIAL_MODE <> 0) then
+        begin
+          Invokable.FillARMPartialData(Param, UserData.Instance, Pointer(InvokableData));
+        end else
+        {$endif}
+        if (Flags and PARAM_TOTALPOINTERDEPTH_MASK <> 0) then
+        begin
+          PPointer(InvokableData + Param.DataValue)^ := UserData.Instance;
+        end else
+        begin
+          System.Move(UserData.Instance^, PPointer(InvokableData + Param.DataValue)^, Param.MetaType.Size);
+        end;
+      end;
+    else
+    type_standard:
+      if (Flags and (PARAM_POINTER_MODE or PARAM_ARMPARTIAL_MODE) <> 0) then goto invalid_argument;
+      if (Flags and PARAM_INSURANCE_MODE <> 0) then
+      begin
+        if (Flags and PARAM_ARRAY_MODE <> 0) then
+        begin
+          if (Param.F.Kind <> pkArray) then goto invalid_argument;
+
+          {ToDo MetaType check}
+
+        end else
+        begin
+          // PAnsiChar, PWideChar
+          Ptr := Pointer(InvokableData + Param.InsuranceValue);
+          if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
+            goto invalid_argument;
+
+          Value := PPointer(InvokableData + Param.InsuranceValue)^;
+          if (Value = nil) then Value := @NULL_CHAR;
+          PPointer(InvokableData + Param.DataValue)^ := Value;
+        end;
+      end else
+      begin
+        if (Param.F.Kind in META_TYPE_INSTANCE_KINDS) then
+          goto invalid_argument;
+
+        Ptr := Pointer(InvokableData + Param.DataValue);
+        if (not Param.SetValue(Ptr^, Self, i, LuaType)) then
+        begin
+        invalid_argument:
+          unpack_lua_string(FStringBuffer.Lua, Closure.Name);
+          unpack_lua_string(FStringBuffer.LuaReserved, Param.Name^);
+          Self.Error('Invalid %s.%s argument value: "%s" (%s)',
+            [FStringBuffer.Lua, FStringBuffer.LuaReserved, FStringBuffer.Unicode, FStringBuffer.Default]);
+        end;
       end;
     end;
 

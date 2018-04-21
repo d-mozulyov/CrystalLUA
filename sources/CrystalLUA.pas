@@ -704,6 +704,8 @@ type
   TLuaPropPtr = (ppAuto, ppField, ppProc, ppClassField, ppClassProc);
   PLuaPropPtr = ^TLuaPropPtr;
 
+  TLuaOnRegisterError = function(const Path, Error: LuaString; const CallDepth: Integer; const Critical: Boolean): Boolean of object;
+
 { TLua class
   Script and registered types/functions manager }
 
@@ -739,7 +741,6 @@ type
       LuaReserved: LuaString;
       Default: string;
     end;
-    FReturnAddress: Pointer;
     FTempBuffer: packed record
       V: Variant;
       Intf: IInterface;
@@ -866,25 +867,26 @@ type
     function  InternalAddGlobal(const AKind: Byte{TLuaGlobalKind}; const Name: __luaname): Pointer{PLuaGlobalEntity};
     function  InternalAddMetaType(const Kind: TLuaMetaKind; const Name: LuaString; const TypeInfo: Pointer;
       const InstanceSize: Integer; const AdditionalSize: NativeInt = 0): PLuaMetaType;
-    function  InternalAddClass(const AClass: TClass; const UseRtti: Boolean): PLuaClassInfo;
+    function  InternalAddClass(const AClass: TClass; const UseRtti: Boolean; const Critical: Boolean): PLuaClassInfo;
     function  InternalGetClassInfo(const AClass: TClass): PLuaClassInfo;
-    function  InternalAddRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
-    function  InternalAddRecordEx(const Name: LuaString; const TypeInfo: Pointer; const UseRtti: Boolean): PLuaRecordInfo;
-    function  InternalAddInterface(const TypeInfo: PTypeInfo): PLuaInterfaceInfo;
-    function  InternalAddArray(const TypeInfo: PTypeInfo): PLuaArrayInfo;
-    function  InternalAddArrayEx(const Identifier, ItemTypeInfo: Pointer; const ABounds: array of Integer): PLuaArrayInfo;
-    function  InternalAddSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
-    function  InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean = True): Pointer{PLuaMetaType/PLuaInvokable};
-    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind): __luapointer; overload;
-    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer; overload;
+    function  InternalAddRecord(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaRecordInfo;
+    function  InternalAddRecordEx(const Name: LuaString; const TypeInfo: Pointer; const UseRtti: Boolean; const Critical: Boolean): PLuaRecordInfo;
+    function  InternalAddInterface(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaInterfaceInfo;
+    function  InternalAddArray(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaArrayInfo;
+    function  InternalAddArrayEx(const Identifier, ItemTypeInfo: Pointer; const ABounds: array of Integer; const Critical: Boolean): PLuaArrayInfo;
+    function  InternalAddSet(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaSetInfo;
+    procedure InternalAddEnum(const TypeInfo: PTypeInfo; const Critical: Boolean);
+    function  InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean = True; const Critical: Boolean = False): Pointer{PLuaMetaType/PLuaInvokable};
+    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const TypeInfo: PTypeInfo; const MethodKind: TLuaMethodKind; const Critical: Boolean): __luapointer; overload;
+    function  InternalBuildInvokable(const MetaType: PLuaMetaType; const Name: LuaString; const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv; const Critical: Boolean): __luapointer; overload;
     function  InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
-      Address: Pointer; const MethodKind: TLuaMethodKind; const Invokable: __luapointer;
+      Address: Pointer; const MethodKind: TLuaMethodKind; const Invokable: __luapointer; const Critical: Boolean;
       {Universal} const MinArgsCount: Word = 0; const MaxArgsCount: Word = High(Word)): __luapointer;
     procedure InternalReplaceChildNameSpace(const ParentMetaItem: Pointer{PLuaDictionaryItem};
       const Name: __luaname; const LastValue, Value: __luapointer; const IsDefaultProp: Boolean);
     function  InternalAddProperty(const MetaType: PLuaMetaType; const Name: LuaString;
       const TypeInfo: Pointer; const IsDefault, IsAutoRegister: Boolean; const Getter, Setter, Flags: NativeUInt;
-      const IndexParams: Integer): __luapointer;
+      const IndexParams: Integer; const Critical: Boolean): __luapointer;
   private
     // script callbacks helpers
     function __print: Integer;
@@ -930,9 +932,26 @@ type
     function UniversalCallback(const AClosure: Pointer{PLuaClosure}; const ArgsCount: Integer): Integer;
     function InvokableCallback(const AClosure: Pointer{PLuaClosure}; const AInvokableData: Pointer): Integer;
   private
+    // errors
+    FReturnAddress: Pointer;
+    FFrames: Pointer{PLuaFrame};
+    FPrintRegisterError: Boolean;
+    FOnRegisterError: TLuaOnRegisterError;
+
+    procedure FrameEnter(var Frame{: TLuaFrame}; const Name: PShortString; const Critical: Boolean);
+    procedure FrameEnterParentCritical(var Frame{: TLuaFrame}; const Name: PShortString);
+    procedure FrameLeave;
+    procedure FrameRename(const Name: PShortString); overload;
+    procedure FrameRename(var NameBuffer: ShortString; const Name: LuaString); overload;
+    procedure InternalError(const Text: LuaString);
+    procedure InternalErrorFmt(const FmtStr: LuaString; const Args: array of const);
+    procedure RegisterError(const Text: LuaString);
+    procedure RegisterErrorFmt(const FmtStr: LuaString; const Args: array of const);
+    procedure RegisterErrorTypeExists(const Name: LuaString);
+  private
     // scripts and units routine
     FOnPreprocessScript: TLuaOnPreprocessScript;
-    FScriptStack: array[1 - 1{Call buffer}..16] of TLuaResultBuffer;
+    FScriptStack: array[1 - 1..16] of TLuaResultBuffer;
     FScriptStackIndex: NativeUInt;
     FArgs: TLuaArgs;
     FArgsCount: Integer;
@@ -941,8 +960,6 @@ type
  //   FReferences: TLuaReferenceDynArray; // список ссылок (LUA_REGISTRYINDEX)  *)
     FUnitCount: Integer;
     FUnits: array of TLuaUnit;
-    procedure InternalError(const Text: LuaString);
-    procedure InternalErrorFmt(const FmtStr: LuaString; const Args: array of const);
     procedure CheckScriptError(const ErrCode: Integer; AUnit: TLuaUnit = nil);
     function BeginScriptStack(const ReturnAddress: Pointer): Pointer;
     procedure EndScriptStack(const ReturnAddress: Pointer);
@@ -961,8 +978,7 @@ type
     procedure GarbageCollection;
    (* procedure SaveNameSpace(const FileName: string); dynamic;
     function CreateReference(const global_name: string=''): TLuaReference;
-    class function GetProcAddress(const ProcName: pchar; const throw_exception: boolean = false): pointer; // низкий уровень. адрес функции lua.dll
-                         *)
+    class function GetProcAddress(const ProcName: pchar; const throw_exception: boolean = false): pointer; // низкий уровень. адрес функции lua.dll *)
 
     // errors
     procedure Error(const Text: LuaString); overload;
@@ -1031,6 +1047,8 @@ type
     property Handle: Pointer read FHandle;
     property Args: TLuaArgs read FArgs;
     property ArgsCount: Integer read FArgsCount;
+    property PrintRegisterError: Boolean read FPrintRegisterError write FPrintRegisterError;
+    property OnRegisterError: TLuaOnRegisterError read FOnRegisterError write FOnRegisterError;
 
     // script units
     property OnPreprocessScript: TLuaOnPreprocessScript read FOnPreprocessScript write FOnPreprocessScript;
@@ -1175,11 +1193,6 @@ begin
   inherited CreateFmt(e_Custom, System.LoadResString(ResStringRec), Args);
 end;
 {$endif}
-
-function ETypeRegistered(const Name: LuaString): ELua;
-begin
-  Result := ELua.CreateFmt('Type "%s" is already registered', [Name]);
-end;
 
 function EInvalidFieldOffset(const Value: NativeInt): ELua;
 begin
@@ -3696,6 +3709,13 @@ const
   LUA_POINTER_INVALID = __luapointer(-1);
 
 type
+  PLuaFrame = ^TLuaFrame;
+  TLuaFrame = record
+    Parent: PLuaFrame;
+    Name: PShortString;
+    Critical: Boolean;
+  end;
+
   TLuaStack = object
   private
     FItems: TIntegerDynArray;
@@ -6562,7 +6582,7 @@ begin
     raise EInvalidFieldOffset(FieldOffset) at FLua.FReturnAddress;
 
   FLua.InternalAddProperty(@Self, FieldName, TypeInfo, False, False, FieldOffset, FieldOffset,
-    FLAGS, Low(Integer));
+    FLAGS, Low(Integer), True);
 end;
 
 procedure TLuaRecordInfo.RegField(const FieldName: LuaString; const FieldOffset: Integer;
@@ -6570,6 +6590,7 @@ procedure TLuaRecordInfo.RegField(const FieldName: LuaString; const FieldOffset:
 {$ifNdef CPUINTEL}
 begin
   FLua.FReturnAddress := ReturnAddress;
+  FLua.FFrames := nil;
   InternalRegField(FieldName, FieldOffset, TypeInfo);
 end;
 {$else}
@@ -6578,11 +6599,13 @@ asm
   mov ebp, [EAX].TLuaRecordInfo.FLua
   push [esp + 4]
   pop [EBP].TLua.FReturnAddress
+  mov [EBP].TLua.FFrames, 0
   pop ebp
   {$else .CPUX64} .NOFRAME
   mov rax, [RCX].TLuaRecordInfo.FLua
   push [rsp]
   pop [RAX].TLua.FReturnAddress
+  mov [RAX].TLua.FFrames, 0
   movsxd r8, r8d
   {$endif}
   jmp TLuaRecordInfo.InternalRegField
@@ -6594,6 +6617,7 @@ procedure TLuaRecordInfo.RegField(const FieldName: LuaString; const FieldPointer
 {$ifNdef CPUINTEL}
 begin
   FLua.FReturnAddress := ReturnAddress;
+  FLua.FFrames := nil;
   InternalRegField(FieldName, NativeInt(FieldPointer) - NativeInt(RecordInstance), TypeInfo);
 end;
 {$else}
@@ -6603,12 +6627,14 @@ asm
   mov ebp, [EAX].TLuaRecordInfo.FLua
   push [esp + 4]
   pop [EBP].TLua.FReturnAddress
+  mov [EBP].TLua.FFrames, 0
   pop ebp
   {$else .CPUX64} .NOFRAME
   sub r8, RecordInstance
   mov rax, [RCX].TLuaRecordInfo.FLua
   push [rsp]
   pop [RAX].TLua.FReturnAddress
+  mov [RAX].TLua.FFrames, 0
   movsxd r8, r8d
   {$endif}
   jmp TLuaRecordInfo.InternalRegField
@@ -6622,7 +6648,7 @@ procedure __TLuaRecordInfoRegUniversalMethod(const Self: TLuaRecordInfo; const M
   const Method: TLuaMethodCallback; const MinArgsCount, MaxArgsCount: Word; const IsStatic: Boolean);
 begin
   Self.FLua.InternalAddMethod(@Self, MethodName, @Method, RECORD_METHOD_KINDS[IsStatic],
-    LUA_POINTER_INVALID, MinArgsCount, MaxArgsCount);
+    LUA_POINTER_INVALID, True, MinArgsCount, MaxArgsCount);
 end;
 
 procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Callback: TLuaMethodCallback;
@@ -6630,6 +6656,7 @@ procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Callback: 
 {$ifNdef CPUINTEL}
 begin
   FLua.FReturnAddress := ReturnAddress;
+  FLua.FFrames := nil;
   __TLuaRecordInfoRegUniversalMethod(Self, MethodName, Callback, MinArgsCount, MaxArgsCount, IsStatic);
 end;
 {$else}
@@ -6638,11 +6665,13 @@ asm
   mov ebp, [EAX].TLuaRecordInfo.FLua
   push [esp + 4]
   pop [EBP].TLua.FReturnAddress
+  mov [EBP].TLua.FFrames, 0
   pop ebp
   {$else .CPUX64} .NOFRAME
   mov rax, [RCX].TLuaRecordInfo.FLua
   push [rsp]
   pop [RAX].TLua.FReturnAddress
+  mov [RAX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRecordInfoRegUniversalMethod
 end;
@@ -6650,9 +6679,14 @@ end;
 
 procedure __TLuaRecordInfoRegTypeInfoMethod(const Self: TLuaRecordInfo; const MethodName: LuaString;
   const Address: Pointer; const TypeInfo: PTypeInfo; const IsStatic: Boolean);
+var
+  Invokable: __luapointer;
 begin
-  Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
-    Self.FLua.InternalBuildInvokable(@Self, TypeInfo, RECORD_METHOD_KINDS[IsStatic]));
+  Invokable := Self.FLua.InternalBuildInvokable(@Self, TypeInfo, RECORD_METHOD_KINDS[IsStatic], True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic], Invokable, True);
+  end;
 end;
 
 procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: Pointer;
@@ -6660,6 +6694,7 @@ procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: P
 {$ifNdef CPUINTEL}
 begin
   FLua.FReturnAddress := ReturnAddress;
+  FLua.FFrames := nil;
   __TLuaRecordInfoRegTypeInfoMethod(Self, MethodName, Address, TypeInfo, IsStatic);
 end;
 {$else}
@@ -6668,11 +6703,13 @@ asm
   mov ebp, [EAX].TLuaRecordInfo.FLua
   push [esp + 4]
   pop [EBP].TLua.FReturnAddress
+  mov [EBP].TLua.FFrames, 0
   pop ebp
   {$else .CPUX64} .NOFRAME
   mov rax, [RCX].TLuaRecordInfo.FLua
   push [rsp]
   pop [RAX].TLua.FReturnAddress
+  mov [RAX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRecordInfoRegUniversalMethod
 end;
@@ -6681,9 +6718,14 @@ end;
 procedure __TLuaRecordInfoRegCustomMethod(const Self: TLuaRecordInfo; const MethodName: LuaString;
   const Address: Pointer; const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
   const IsStatic: Boolean; const CallConv: TCallConv);
+var
+  Invokable: __luapointer;
 begin
-  Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic],
-    Self.FLua.InternalBuildInvokable(@Self, Params, ResultType, RECORD_METHOD_KINDS[IsStatic], CallConv));
+  Invokable := Self.FLua.InternalBuildInvokable(@Self, MethodName, Params, ResultType, RECORD_METHOD_KINDS[IsStatic], CallConv, True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Self.FLua.InternalAddMethod(@Self, MethodName, Address, RECORD_METHOD_KINDS[IsStatic], Invokable, True);
+  end;
 end;
 
 procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: Pointer;
@@ -6692,6 +6734,7 @@ procedure TLuaRecordInfo.RegMethod(const MethodName: LuaString; const Address: P
 {$ifNdef CPUINTEL}
 begin
   FLua.FReturnAddress := ReturnAddress;
+  FLua.FFrames := nil;
   __TLuaRecordInfoRegCustomMethod(Self, MethodName, Address, Params, ResultType, IsStatic, CallConv);
 end;
 {$else}
@@ -6700,11 +6743,13 @@ asm
   mov ebp, [EAX].TLuaRecordInfo.FLua
   push [esp + 4]
   pop [EBP].TLua.FReturnAddress
+  mov [EBP].TLua.FFrames, 0
   pop ebp
   {$else .CPUX64} .NOFRAME
   mov rax, [RCX].TLuaRecordInfo.FLua
   push [rsp]
   pop [RAX].TLua.FReturnAddress
+  mov [RAX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRecordInfoRegCustomMethod
 end;
@@ -9636,7 +9681,7 @@ begin
   // constructor flag
   if (IsConstructor) and (Invokable.Result.Kind = pkClass) then
   begin
-    TempParam.InternalSetTypeInfo(nil, TypeInfo(Boolean), False);
+    TempParam.InternalSetTypeInfo(nil, TypeInfo(ShortInt), False);
     Param := @TempParam;
     PutArg;
     Invokable.ConstructorFlag := TempParam.DataValue;
@@ -10995,7 +11040,7 @@ begin
   FillStandardNameSpace(FStdSetNameSpace, [STD_LOW, STD_HIGH, STD_INCLUDE, STD_EXCLUDE, STD_CONTAINS]);
 
   // basic classes meta tpe
-  FObjectMetaType := InternalAddClass(TObject, True);
+  FObjectMetaType := InternalAddClass(TObject, True, True);
 
   // managed closures
   FClosureMetaTable := InternalNewMetaTable;
@@ -13828,6 +13873,7 @@ procedure TLua.GarbageCollection;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaGarbageCollection(Self);
 end;
 {$else}
@@ -13835,13 +13881,152 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaGarbageCollection
 end;
 {$endif}
+
+procedure TLua.FrameEnter(var Frame{: TLuaFrame}; const Name: PShortString; const Critical: Boolean);
+var
+  LFrame: PLuaFrame;
+begin
+  LFrame := Pointer(@Frame);
+  LFrame.Parent := FFrames;
+  LFrame.Name := Name;
+  LFrame.Critical := Critical;
+
+  FFrames := LFrame;
+end;
+
+procedure TLua.FrameEnterParentCritical(var Frame{: TLuaFrame}; const Name: PShortString);
+begin
+  FrameEnter(Frame, Name, (Assigned(FFrames) and PLuaFrame(FFrames).Critical));
+end;
+
+procedure TLua.FrameLeave;
+var
+  LFrame: PLuaFrame;
+begin
+  LFrame := FFrames;
+  FFrames := LFrame.Parent;
+end;
+
+procedure TLua.FrameRename(const Name: PShortString);
+var
+  LFrame: PLuaFrame;
+begin
+  LFrame := FFrames;
+  LFrame.Name := Name;
+end;
+
+procedure TLua.FrameRename(var NameBuffer: ShortString; const Name: LuaString);
+var
+  Length, Size, Count: Integer;
+  Buffer: ^TLuaBuffer;
+  {$if Defined(LUA_ANSI) and Defined(INTERNALCODEPAGE)}
+  CodePage: Word;
+  {$ifend}
+begin
+  Length := System.Length(Name);
+  Buffer := Pointer(@FInternalBuffer);
+  Buffer.Size := 0;
+
+  Count := 0;
+  if (Length <> 0) then
+  begin
+    {$ifdef LUA_ANSI}
+      Size := Length + 3;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      {$ifdef INTERNALCODEPAGE}
+      CodePage := PWord(NativeInt(Name) - ASTR_OFFSET_CODEPAGE)^;
+      if (CodePage = CODEPAGE_UTF8) then
+      begin
+        System.Move(Pointer(Name)^, Pointer(Buffer.FBytes)^, Length);
+        Count := Length;
+      end else
+      {$endif}
+      begin
+        Count := AnsiFromAnsi(Pointer(Buffer.FBytes), 0, Pointer(Name),
+          {$ifdef INTERNALCODEPAGE}CodePage{$else}0{$endif}, Length);
+      end;
+   {$else .LUA_UNICODE}
+      Size := Length * 3 + 1;
+      if (Buffer.Capacity < Size) then Buffer.Alloc(Size);
+      Count := Utf8FromUnicode(Pointer(Buffer.FBytes), Pointer(Name), Length);
+   {$endif}
+  end;
+
+  FillShortString(NameBuffer, Pointer(Buffer.FBytes), Count, High(Byte));
+  FrameRename(Pointer(@NameBuffer));
+end;
+
+procedure TLua.RegisterError(const Text: LuaString);
+var
+  Count: Integer;
+  LFrame: PLuaFrame;
+  Critical: Boolean;
+  Path: LuaString;
+  Mode: Integer;
+begin
+  Count := 0;
+  LFrame := FFrames;
+  Critical := LFrame.Critical;
+  while (Assigned(LFrame)) do
+  begin
+    if (Count = 0) then
+    begin
+      unpack_lua_string(Path, LFrame.Name^);
+    end else
+    begin
+      unpack_lua_string(FStringBuffer.Lua, LFrame.Name^);
+      FStringBuffer.Lua := FStringBuffer.Lua + ' - ';
+      FStringBuffer.Lua := FStringBuffer.Lua + Path;
+      Path := FStringBuffer.Lua;
+    end;
+
+    Inc(Count);
+    LFrame := LFrame.Parent;
+  end;
+
+  if (Assigned(FOnRegisterError)) then
+  begin
+    Mode := Ord(not FOnRegisterError(Path, Text, Count, Critical)) shl 1;
+  end else
+  begin
+    Mode := (Ord(Critical) shl 1) + Ord(FPrintRegisterError and System.IsConsole);
+  end;
+
+  if (Mode <> 0) then
+  begin
+    if (Pointer(Path) <> nil) then Path := Path + ': ';
+    Path := Path + Text;
+
+    if (Mode and 1 <> 0) then
+    begin
+      Writeln(Path);
+    end;
+
+    if (Mode and 2 <> 0) then
+    begin
+      InternalError(Path);
+    end;
+  end;
+end;
+
+procedure TLua.RegisterErrorFmt(const FmtStr: LuaString; const Args: array of const);
+begin
+  RegisterError(LuaString({$ifdef UNICODE}Format{$else}WideFormat{$endif}(UnicodeString(FmtStr), Args)));
+end;
+
+procedure TLua.RegisterErrorTypeExists(const Name: LuaString);
+begin
+  RegisterErrorFmt('type "%s" is already registered', [Name]);
+end;
 
 procedure TLua.InternalError(const Text: LuaString);
 const
@@ -13883,6 +14068,7 @@ procedure TLua.Error(const Text: LuaString);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   InternalError(Text);
 end;
 {$else}
@@ -13890,9 +14076,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalError
 end;
@@ -13902,6 +14090,7 @@ procedure TLua.Error(const FmtStr: LuaString; const Args: array of const);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   InternalErrorFmt(FmtStr, Args);
 end;
 {$else}
@@ -13910,9 +14099,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalErrorFmt
 end;
@@ -14341,6 +14532,7 @@ function TLua.GetVariable(const Name: LuaString): Variant;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaGetVariable(Self, Name, Result);
 end;
 {$else}
@@ -14348,9 +14540,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaGetVariable
 end;
@@ -14373,6 +14567,7 @@ procedure TLua.SetVariable(const Name: LuaString; const Value: Variant);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaSetVariable(Self, Name, Value);
 end;
 {$else}
@@ -14380,9 +14575,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaSetVariable
 end;
@@ -14405,6 +14602,7 @@ function TLua.GetVariableEx(const Name: LuaString): TLuaArg;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaGetVariableEx(Self, Name, Result);
 end;
 {$else}
@@ -14412,9 +14610,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaGetVariableEx
 end;
@@ -14437,6 +14637,7 @@ procedure TLua.SetVariableEx(const Name: LuaString; const Value: TLuaArg);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaSetVariableEx(Self, Name, Value);
 end;
 {$else}
@@ -14444,9 +14645,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaSetVariableEx
 end;
@@ -14575,6 +14778,7 @@ function TLua.GetTableVariable(const Table, Name: LuaString): Variant;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaGetTableVariable(NativeInt(Self) or Ord(True), Table, Name, @Result);
 end;
 {$else}
@@ -14583,10 +14787,12 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   or eax, 1
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   or rcx, 1
   {$endif}
   jmp __TLuaGetTableVariable
@@ -14597,6 +14803,7 @@ function TLua.GetTableVariableEx(const Table, Name: LuaString): TLuaArg;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaGetTableVariable(NativeInt(Self) or Ord(False), Table, Name, @Result);
 end;
 {$else}
@@ -14605,9 +14812,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaGetTableVariable
 end;
@@ -14655,6 +14864,7 @@ procedure TLua.SetTableVariable(const Table, Name: LuaString; const Value: Varia
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaSetTableVariable(NativeInt(Self) or Ord(True), Table, Name, @Value);
 end;
 {$else}
@@ -14663,10 +14873,12 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   or eax, 1
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   or rcx, 1
   {$endif}
   jmp __TLuaSetTableVariable
@@ -14677,6 +14889,7 @@ procedure TLua.SetTableVariableEx(const Table, Name: LuaString; const Value: TLu
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaSetTableVariable(NativeInt(Self) or Ord(False), Table, Name, @Value);
 end;
 {$else}
@@ -14685,9 +14898,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaSetTableVariable
 end;
@@ -15594,6 +15809,7 @@ procedure TLua.RunScript(const Script: LuaString);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRunScript(Self, Script);
 end;
 {$else}
@@ -15601,9 +15817,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRunScript
 end;
@@ -15665,6 +15883,7 @@ procedure TLua.LoadScript(const FileName: string);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaLoadFileScript(Self, FileName);
 end;
 {$else}
@@ -15672,9 +15891,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaLoadFileScript
 end;
@@ -15701,6 +15922,7 @@ procedure TLua.LoadScript(const Buffer: Pointer; const BufferSize: Integer;
 {$ifdef RETURNADDRESS}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaLoadBufferScript(Self, Buffer, BufferSize, BOM, UnitName);
 end;
 {$else}
@@ -15709,9 +15931,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaLoadBufferScript
 end;
@@ -15739,6 +15963,7 @@ procedure TLua.LoadScript(const Stream: TStream; const UnitName: LuaString; cons
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaLoadStreamScript(Self, Stream, UnitName, ASize);
 end;
 {$else}
@@ -15747,9 +15972,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaLoadStreamScript
 end;
@@ -15779,6 +16006,7 @@ procedure TLua.LoadScript(const Stream: KOL.PStream; const UnitName: LuaString; 
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaLoadKOLStreamScript(Self, Stream, UnitName, ASize);
 end;
 {$else}
@@ -15787,9 +16015,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaLoadKOLStreamScript
 end;
@@ -15845,6 +16075,7 @@ procedure TLua.LoadScript(const Instance: THandle; const Name, ResType: PChar;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaLoadResourceScript(Self, Instance, Name, ResType, UnitName);
 end;
 {$else}
@@ -15853,9 +16084,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaLoadResourceScript
 end;
@@ -16466,6 +16699,8 @@ var
   MethodEx: PExtendedClassMethodEntry;
   MethodKind: TLuaMethodKind;
   VmtOffset: NativeInt;
+  ChildFrame: TLuaFrame;
+  Invokable: __luapointer;
   {$endif}
 
   procedure AddPropInfo;
@@ -16516,7 +16751,7 @@ var
     end;
 
     Lua.InternalAddProperty(ClassInfo, ItemName, PropInfo.PropType{$ifNdef FPC}^{$endif},
-      False, True, Getter, Setter, Flags, PropInfo.Index);
+      False, True, Getter, Setter, Flags, PropInfo.Index, False);
   end;
 
   function AddUniversalMethod(const Method: PClassMethodEntry; const MethodKind: TLuaMethodKind): Boolean;
@@ -16535,7 +16770,7 @@ var
       System.Move(Method.NameChars[4], Buffer[1], NameLength);
       Lua.unpack_lua_string(ItemName, Buffer);
 
-      Lua.InternalAddMethod(ClassInfo, ItemName, Method.Address, MethodKind, LUA_POINTER_INVALID);
+      Lua.InternalAddMethod(ClassInfo, ItemName, Method.Address, MethodKind, LUA_POINTER_INVALID, False);
     end;
   end;
 begin
@@ -16565,7 +16800,7 @@ begin
       Lua.InternalAddProperty(ClassInfo, ItemName,
         FieldTable.Classes.Values[Field.TypeIndex].ClassInfo, False, False,
         Field.Offset, Field.Offset, Ord(pmField) + Ord(pmField) shl PROP_SLOTSETTER_SHIFT,
-        Low(Integer));
+        Low(Integer), False);
 
       Ptr := GetTail(Field.Name);
     end;
@@ -16589,7 +16824,7 @@ begin
           Lua.unpack_lua_string(ItemName, FieldEx.Name);
           Lua.InternalAddProperty(ClassInfo, ItemName, GetTypeInfo(FieldEx.TypeRef), False, False,
             FieldEx.Offset, FieldEx.Offset, Ord(pmField) + Ord(pmField) shl PROP_SLOTSETTER_SHIFT,
-            Low(Integer));
+            Low(Integer), False);
         end;
       end;
 
@@ -16672,10 +16907,19 @@ begin
             VmtOffset := ClassInfo.VmtOffset(MethodEx.Entry.Address, True);
             if (VmtOffset = -1) or (VmtOffset > {$ifdef FPC}vmtToString{$else .DELPHI}vmtDestroy{$endif}) then
             begin
-              Lua.unpack_lua_string(ItemName, MethodEx.Entry.Name);
-              Lua.InternalAddMethod(ClassInfo, ItemName, MethodEx.Entry.Address, MethodKind,
-                TLuaInvokableBuilder(Lua.FInvokableBuilder).BuildClassMethod(
-                  ClassInfo, MethodEx.Entry, MethodKind, MethodEx.IsHasSelf));
+              Lua.FrameEnter(ChildFrame, PShortString(@MethodEx.Entry.Name), False);
+              try
+                Invokable := TLuaInvokableBuilder(Lua.FInvokableBuilder).BuildClassMethod(
+                  ClassInfo, MethodEx.Entry, MethodKind, MethodEx.IsHasSelf);
+              finally
+                Lua.FrameLeave;
+              end;
+
+              if (Invokable <> LUA_POINTER_INVALID) then
+              begin
+                Lua.unpack_lua_string(ItemName, MethodEx.Entry.Name);
+                Lua.InternalAddMethod(ClassInfo, ItemName, MethodEx.Entry.Address, MethodKind, Invokable, False);
+              end;
             end;
           end;
         end;
@@ -16691,7 +16935,10 @@ end;
 // UseRtti means to register all published properties
 // in registrator-Class case:
 // addition sub-registered class using published registrator-Class methods, fields and properties
-function TLua.InternalAddClass(const AClass: TClass; const UseRtti: Boolean): PLuaClassInfo;
+function TLua.InternalAddClass(const AClass: TClass; const UseRtti: Boolean;
+  const Critical: Boolean): PLuaClassInfo;
+const
+  STR_CLASS: array[0..5] of Byte = (5, Ord('C'), Ord('l'), Ord('a'), Ord('s'), Ord('s'));
 var
   i: Integer;
   ClassName: LuaString;
@@ -16700,107 +16947,128 @@ var
   ClassPtr: __luapointer;
   ClassInfo, Parent: PLuaClassInfo;
   Item: PLuaDictionaryItem;
+  Frame: TLuaFrame;
 begin
-  if (NativeUInt(AClass) <= $FFFF) then
-    raise ELua.Create('AClass not defined') at FReturnAddress;
-
-  // find exists
-  ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(AClass));
-  if (ClassPtr <> LUA_POINTER_INVALID) and (not UseRtti) then
-  begin
-    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
-    if (Result.F.Kind <> mtClass) then
+  Result := nil;
+  FrameEnter(Frame, PShortString(@STR_CLASS), Critical);
+  try
+    if (NativeUInt(AClass) <= $FFFF) then
     begin
-      ClassName := Result.Name;
-      raise ELua.CreateFmt('Invalid AClass parameter (%s)', [ClassName]) at FReturnAddress;
+      RegisterError('parameter not defined');
+      Exit;
     end;
-    Exit;
-  end;
 
-  // registrator, class, class name
-  ClassValue := AClass;
-  ClassRegistrator := nil;
-  repeat
-    ClassName := LuaString(ClassValue.ClassName);
-    if (Length(ClassName) > 3) and (ClassName[1] = 'l') and
-      (ClassName[2] = 'u') and (ClassName[3] = 'a') then
+    // find exists
+    ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(AClass));
+    if (ClassPtr <> LUA_POINTER_INVALID) and (not UseRtti) then
     begin
-      if (ClassRegistrator = nil) then ClassRegistrator := AClass;
-      ClassChild := ClassValue;
-      ClassValue := ClassValue.ClassParent;
-      if (ClassValue = nil) then
-        raise ELua.Create('ClassRegistrator is defined, but real class not found') at FReturnAddress;
+      Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
+      if (Result.F.Kind <> mtClass) then
+      begin
+        ClassName := Result.Name;
+        RegisterErrorFmt('invalid class "%s" parameter', [ClassName]);
+      end;
+      Exit;
+    end;
 
-      if (ClassValue.InstanceSize <> ClassChild.InstanceSize) then
-        raise ELua.CreateFmt('Class registrator "%s" can''t have own fields', [ClassChild.ClassName]) at FReturnAddress;
+    // registrator, class, class name
+    ClassValue := AClass;
+    ClassRegistrator := nil;
+    FrameRename(PShortString(PPointer(NativeInt(ClassValue) + vmtClassName)^));
+    repeat
+      ClassName := LuaString(ClassValue.ClassName);
+      if (Length(ClassName) > 3) and (ClassName[1] = 'l') and
+        (ClassName[2] = 'u') and (ClassName[3] = 'a') then
+      begin
+        if (ClassRegistrator = nil) then ClassRegistrator := AClass;
+        ClassChild := ClassValue;
+        ClassValue := ClassValue.ClassParent;
+        if (ClassValue = nil) then
+        begin
+          RegisterError('ClassRegistrator is defined, but real class not found');
+          Exit;
+        end;
+
+        if (ClassValue.InstanceSize <> ClassChild.InstanceSize) then
+        begin
+          ClassName := LuaString(ClassChild.ClassName);
+          RegisterErrorFmt('Class registrator "%s" can''t have own fields', [ClassName]);
+          Exit;
+        end;
+      end else
+      begin
+        Break;
+      end;
+    until (False);
+
+    // existing or new class
+    if (ClassValue <> AClass) then
+    begin
+      ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(ClassValue));
+    end;
+    if (ClassPtr <> LUA_POINTER_INVALID) then
+    begin
+      ClassInfo := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
     end else
     begin
-      Break;
-    end;
-  until (False);
-
-  // existing or new class
-  if (ClassValue <> AClass) then
-  begin
-    ClassPtr := TLuaDictionary(FMetaTypes).FindValue(Pointer(ClassValue));
-  end;
-  if (ClassPtr <> LUA_POINTER_INVALID) then
-  begin
-    ClassInfo := TLuaMemoryHeap(FMemoryHeap).Unpack(ClassPtr);
-  end else
-  begin
-    // check existing name (type)
-    LuaClassName := TLuaNames(FNames).Add(ClassName);
-    if (TLuaDictionary(FMetaTypes).Find(LuaClassName) <> nil) then
-      raise ETypeRegistered(ClassName) at FReturnAddress;
-
-    // globals, metatypes dictionary, metatable
-    ClassInfo := Pointer(InternalAddMetaType(mtClass, ClassName, Pointer(ClassValue), SizeOf(Pointer)));
-
-    // register parents, inherits name space
-    if (ClassValue.ClassParent = nil) then
-    begin
-      // TObject: default name space
-      TLuaDictionary(ClassInfo.FNameSpace).Assign(TLuaDictionary(FStdObjectNameSpace));
-      ClassInfo.Parent := LUA_POINTER_INVALID;
-      ClassInfo.DefaultProperty := LUA_POINTER_INVALID;
-     end else
-    begin
-      Parent := InternalAddClass(AClass.ClassParent, UseRtti);
-      TLuaDictionary(ClassInfo.FNameSpace).Assign(TLuaDictionary(Parent.FNameSpace));
-      Item := Pointer(TLuaDictionary(ClassInfo.FNameSpace).FItems);
-      for i := 1 to TLuaDictionary(ClassInfo.FNameSpace).Count do
+      // check existing name (type)
+      LuaClassName := TLuaNames(FNames).Add(ClassName);
+      if (TLuaDictionary(FMetaTypes).Find(LuaClassName) <> nil) then
       begin
-        if (Item.Value > 0) then
-          Item.Value := Item.Value or NAMESPACE_FLAG_INHERITED;
-
-        Inc(Item);
+        RegisterErrorTypeExists(ClassName);
+        Exit;
       end;
 
-      ClassInfo.Parent := Parent.Ptr;
-      ClassInfo.DefaultProperty := Parent.DefaultProperty;
-      ClassInfo.CFunctionCreate := Parent.CFunctionCreate;
-      ClassInfo.CFunctionFree := Parent.CFunctionFree;
-      ClassInfo.AssignCallback := Parent.AssignCallback;
-      ClassInfo.CreateCallback := Parent.CreateCallback;
-      ClassInfo.CreateCallbackArgsCount := Parent.CreateCallbackArgsCount;
+      // globals, metatypes dictionary, metatable
+      ClassInfo := Pointer(InternalAddMetaType(mtClass, ClassName, Pointer(ClassValue), SizeOf(Pointer)));
+
+      // register parents, inherits name space
+      if (ClassValue.ClassParent = nil) then
+      begin
+        // TObject: default name space
+        TLuaDictionary(ClassInfo.FNameSpace).Assign(TLuaDictionary(FStdObjectNameSpace));
+        ClassInfo.Parent := LUA_POINTER_INVALID;
+        ClassInfo.DefaultProperty := LUA_POINTER_INVALID;
+       end else
+      begin
+        Parent := InternalAddClass(AClass.ClassParent, UseRtti, Critical);
+        TLuaDictionary(ClassInfo.FNameSpace).Assign(TLuaDictionary(Parent.FNameSpace));
+        Item := Pointer(TLuaDictionary(ClassInfo.FNameSpace).FItems);
+        for i := 1 to TLuaDictionary(ClassInfo.FNameSpace).Count do
+        begin
+          if (Item.Value > 0) then
+            Item.Value := Item.Value or NAMESPACE_FLAG_INHERITED;
+
+          Inc(Item);
+        end;
+
+        ClassInfo.Parent := Parent.Ptr;
+        ClassInfo.DefaultProperty := Parent.DefaultProperty;
+        ClassInfo.CFunctionCreate := Parent.CFunctionCreate;
+        ClassInfo.CFunctionFree := Parent.CFunctionFree;
+        ClassInfo.AssignCallback := Parent.AssignCallback;
+        ClassInfo.CreateCallback := Parent.CreateCallback;
+        ClassInfo.CreateCallbackArgsCount := Parent.CreateCallbackArgsCount;
+      end;
     end;
-  end;
 
-  // class rtti
-  if (ClassInfo.Parent <> LUA_POINTER_INVALID) and (UseRtti) then
-  begin
-    __AddClassRtti(Self, ClassInfo, ClassValue, True);
-  end;
+    // class rtti
+    if (ClassInfo.Parent <> LUA_POINTER_INVALID) and (UseRtti) then
+    begin
+      __AddClassRtti(Self, ClassInfo, ClassValue, True);
+    end;
 
-  // class registrators
-  if (ClassRegistrator <> nil) then
-  begin
-    __AddClassRtti(Self, ClassInfo, ClassRegistrator, UseRtti);
-  end;
+    // class registrators
+    if (ClassRegistrator <> nil) then
+    begin
+      __AddClassRtti(Self, ClassInfo, ClassRegistrator, UseRtti);
+    end;
 
-  // result
-  Result := ClassInfo;
+    // result
+    Result := ClassInfo;
+  finally
+    FrameLeave;
+  end;
 end;
 
 function TLua.InternalGetClassInfo(const AClass: TClass): PLuaClassInfo;
@@ -16816,7 +17084,7 @@ begin
       Exit;
     end else
     begin
-      Result := InternalAddClass(AClass, False);
+      Result := InternalAddClass(AClass, False, False);
     end;
   end else
   begin
@@ -16824,11 +17092,22 @@ begin
   end;
 end;
 
-function TLua.InternalAddRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
+function TLua.InternalAddRecord(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaRecordInfo;
+const
+  STR_RECORD: array[0..6] of Byte = (6, Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'));
+//var
+//  Frame: TLuaFrame;
+var
+  Name: LuaString;
 begin
-  // ToDo
-  unpack_lua_string(FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
-  Result := InternalAddRecordEx(FStringBuffer.Lua, TypeInfo, True);
+// FrameEnter(Frame, PShortString(@STR_RECORD));
+//  try
+    // ToDo
+    unpack_lua_string(Name, PShortString(@TypeInfo.Name)^);
+    Result := InternalAddRecordEx(Name, TypeInfo, True, Critical);
+//  finally
+//    FrameLeave;
+//  end;
 end;
 
 // TypeInfo can be the following:
@@ -16836,7 +17115,9 @@ end;
 //  - TypeInfo(Dynamic array of record type)
 //  - Pointer(SizeOf(record))
 function TLua.InternalAddRecordEx(const Name: LuaString; const TypeInfo: Pointer;
-  const UseRtti: Boolean): PLuaRecordInfo;
+  const UseRtti: Boolean; const Critical: Boolean): PLuaRecordInfo;
+const
+  STR_RECORD: array[0..6] of Byte = (6, Ord('R'), Ord('e'), Ord('c'), Ord('o'), Ord('r'), Ord('d'));
 {$ifdef EXTENDEDRTTI}
 type
   PRecordTypeField = ^TRecordTypeField;
@@ -16865,175 +17146,225 @@ var
   Ptr: PByte;
   Count, i, j: Integer;
   ItemName: LuaString;
+  ItemTypeInfo: PTypeInfo;
   Field: PRecordTypeField;
   Method: PRecordTypeMethod;
   MethodKind: TLuaMethodKind;
+  NameBuffer: ShortString;
+  ChildFrame: TLuaFrame;
+  Invokable: __luapointer;
   {$endif}
+  Frame: TLuaFrame;
 begin
-  if (not IsValidIdent(Name)) then
-    raise ELua.CreateFmt('Non-supported record type name ("%s")', [Name]) at FReturnAddress;
-
-  if (TypeInfo = nil) then
-    raise ELua.CreateFmt('TypeInfo of record "%s" not defined', [Name]) at FReturnAddress;
-
-  RecordTypeInfo := nil;
-  if (NativeUInt(TypeInfo) <= $FFFF) then
-  begin
-    RecordSize := NativeInt(TypeInfo);
-  end else
-  begin
-    TypeData := GetTypeData(TypeInfo);
-
-    // record or dynamic array
-    if (PTypeInfo(TypeInfo).Kind in RECORD_TYPES) then
+  Result := nil;
+  FrameEnter(Frame, PShortString(@STR_RECORD), Critical);
+  try  
+    if (not IsValidIdent(Name)) then
     begin
-      RecordSize := TypeData.elSize;
-      RecordTypeInfo := TypeInfo;
-    end else
-    if (PTypeInfo(TypeInfo).Kind = tkDynArray) then
-    begin
-      RecordSize := TypeData.elSize;
-
-      if (TypeData.elType <> nil) then
-      begin
-        RecordTypeInfo := TypeData.elType^;
-        if (RecordTypeInfo <> nil) and (not (RecordTypeInfo.Kind in RECORD_TYPES)) then
-        begin
-          unpack_lua_string(FStringBuffer.Lua, PShortString(@RecordTypeInfo.Name)^);
-          GetTypeKindName(FStringBuffer.Default, RecordTypeInfo.Kind);
-          raise ELua.CreateFmt('Sub dynamic type "%s" is not record type (%s)',
-            [FStringBuffer.Lua, FStringBuffer.Default]) at FReturnAddress;
-        end;
-      end;
-    end else
-    begin
-      GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
-      raise ELua.CreateFmt('Type "%s" is not record or subdynamic type (%s)',
-        [Name, FStringBuffer.Default]) at FReturnAddress;
+      RegisterErrorFmt('non-supported name ("%s")', [Name]);
+      Exit;
     end;
-  end;
 
-  // find existing, name item
-  if (Assigned(RecordTypeInfo)) then
-  begin
-    unpack_lua_string(FStringBuffer.Lua, PShortString(@RecordTypeInfo.Name)^);
+    if (TypeInfo = nil) then
+    begin
+      RegisterErrorFmt('TypeInfo of record "%s" not defined', [Name]);
+      Exit;
+    end;
 
-    if (FStringBuffer.Lua <> Name) then
-      raise ELua.CreateFmt('Mismatch of names: TypeInfo "%s" and "%s" as parameter "Name"',
-        [FStringBuffer.Lua, Name]) at FReturnAddress;
+    RecordTypeInfo := nil;
+    if (NativeUInt(TypeInfo) <= $FFFF) then
+    begin
+      RecordSize := NativeInt(TypeInfo);
+    end else
+    begin
+      TypeData := GetTypeData(TypeInfo);
 
-    RecordPtr := TLuaDictionary(FMetaTypes).FindValue(RecordTypeInfo);
-  end else
-  begin
-    RecordPtr := LUA_POINTER_INVALID;
-  end;
-  LuaName := TLuaNames(FNames).Add(Name);
-  if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
+      // record or dynamic array
+      if (PTypeInfo(TypeInfo).Kind in RECORD_TYPES) then
+      begin
+        RecordSize := TypeData.elSize;
+        RecordTypeInfo := TypeInfo;
+      end else
+      if (PTypeInfo(TypeInfo).Kind = tkDynArray) then
+      begin
+        RecordSize := TypeData.elSize;
 
-  if (RecordPtr <> LUA_POINTER_INVALID) then
-  begin
-    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(RecordPtr);
+        if (TypeData.elType <> nil) then
+        begin
+          RecordTypeInfo := TypeData.elType^;
+          if (RecordTypeInfo <> nil) and (not (RecordTypeInfo.Kind in RECORD_TYPES)) then
+          begin
+            unpack_lua_string(FStringBuffer.Lua, PShortString(@RecordTypeInfo.Name)^);
+            GetTypeKindName(FStringBuffer.Default, RecordTypeInfo.Kind);
+            RegisterErrorFmt('sub dynamic type "%s" is not record type (%s)',
+              [FStringBuffer.Lua, FStringBuffer.Default]);
+            Exit;
+          end;
+        end;
+      end else
+      begin
+        GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
+        RegisterErrorFmt('type "%s" is not record or subdynamic type (%s)',
+          [Name, FStringBuffer.Default]);
+        Exit;
+      end;
+    end;
 
-    if (Result.Kind <> mtRecord) then
-      raise ETypeRegistered(Name) at FReturnAddress;
-
-    if (Result.Size <> RecordSize) then
-      raise ELua.CreateFmt('Size of %s (%d) differs from the previous value (%d)', [Name, RecordSize, Result.Size])
-        at FReturnAddress;
-
+    // find existing, name item
     if (Assigned(RecordTypeInfo)) then
     begin
-      if (Result.F.TypeInfo = nil) then
+      unpack_lua_string(FStringBuffer.Lua, PShortString(@RecordTypeInfo.Name)^);
+
+      if (FStringBuffer.Lua <> Name) then
       begin
-        Result.F.TypeInfo := RecordTypeInfo;
-        Result.FillManagedValue;
-        Result.FillHFAValue;
-        TLuaDictionary(FMetaTypes).Add(RecordTypeInfo, RecordPtr);
-      end else
-      if (Result.F.TypeInfo <> RecordTypeInfo) then
-      begin
-        raise ELua.CreateFmt('TypeInfo of "%s" differs from the previous value', [Name]) at FReturnAddress;
+        RegisterErrorFmt('mismatch of names TypeInfo "%s" and "%s" as parameter "Name"',
+          [FStringBuffer.Lua, Name]);
+        Exit;
       end;
+
+      RecordPtr := TLuaDictionary(FMetaTypes).FindValue(RecordTypeInfo);
+    end else
+    begin
+      RecordPtr := LUA_POINTER_INVALID;
     end;
-  end else
-  begin
-    Result := Pointer(InternalAddMetaType(mtRecord, Name, RecordTypeInfo, RecordSize));
-    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdRecordNameSpace));
-  end;
+    LuaName := TLuaNames(FNames).Add(Name);
+    if (RecordPtr = LUA_POINTER_INVALID) then RecordPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
 
-  if (not UseRtti) or (not Assigned(RecordTypeInfo)) then
-    Exit;
+    if (RecordPtr <> LUA_POINTER_INVALID) then
+    begin
+      Result := TLuaMemoryHeap(FMemoryHeap).Unpack(RecordPtr);
 
-  {$ifdef EXTENDEDRTTI}
-  // skip managed (anonymous) fields
-  Ptr := Pointer(@GetTypeData(RecordTypeInfo).ManagedFldCount);
-  Count := PInteger(Ptr)^;
-  Inc(Ptr, SizeOf(Integer));
-  Inc(Ptr, Count * SizeOf(TAnonymousFieldInfo));
-
-  // skip "ops"
-  Count := Ptr^;
-  Inc(Ptr);
-  Inc(Ptr, Count * SizeOf(Pointer));
-
-  // fields
-  Count := PInteger(Ptr)^;
-  Inc(Ptr, SizeOf(Integer));
-  for i := 1 to Count do
-  begin
-    Field := Pointer(Ptr);
-
-    case TMemberVisibility(Field.Flags and 3) of
-      mvPublic, mvPublished:
+      if (Result.Kind <> mtRecord) then
       begin
-        unpack_lua_string(ItemName, Field.Name);
-        Result.InternalRegField(ItemName, Field.Header.Offset, GetTypeInfo(Field.Header.TypeInfo));
+        RegisterErrorTypeExists(Name);
+        Exit;
       end;
-    end;
 
-    Ptr := GetTail(Field.Name);
-    Ptr := SkipAttributes(Ptr);
-  end;
-
-  // methods
-  Ptr := SkipAttributes(Ptr);
-  Count := PWord(Ptr)^;
-  Inc(Ptr, SizeOf(Word));
-  for i := 1 to Count do
-  begin
-    Method := Pointer(Ptr);
-    Ptr := GetTail(Method.Name);
-
-    case TMemberVisibility((Method.Flags shr 2) and 3) of
-      mvPublic, mvPublished:
+      if (Result.Size <> RecordSize) then
       begin
-        MethodKind := METHOD_KINDS[Method.Flags and 3];
-        if (MethodKind <> mkOperator) then
+        RegisterErrorFmt('size of %s (%d) differs from the previous value (%d)',
+          [Name, RecordSize, Result.Size]);
+        Exit;
+      end;
+
+      if (Assigned(RecordTypeInfo)) then
+      begin
+        if (Result.F.TypeInfo = nil) then
         begin
-          unpack_lua_string(ItemName, Method.Name);
-          InternalAddMethod(Result, ItemName, Method.Address, MethodKind,
-            TLuaInvokableBuilder(FInvokableBuilder).BuildProcedureSignature(Result, Pointer(Ptr), MethodKind));
+          Result.F.TypeInfo := RecordTypeInfo;
+          Result.FillManagedValue;
+          Result.FillHFAValue;
+          TLuaDictionary(FMetaTypes).Add(RecordTypeInfo, RecordPtr);
+        end else
+        if (Result.F.TypeInfo <> RecordTypeInfo) then
+        begin
+          RegisterErrorFmt('TypeInfo of "%s" differs from the previous value', [Name]);
+          Exit;
         end;
       end;
-    end;
-
-    // skip parameters
-    Ptr := @PProcedureSignature(Ptr).ParamCount;
-    j := Ptr^;
-    Inc(Ptr);
-    while (j <> 0) do       
+    end else
     begin
-      Ptr := GetTail(PProcedureParam(Ptr).Name);
-      Ptr := SkipAttributes(Ptr);
-      Dec(j);
+      Result := Pointer(InternalAddMetaType(mtRecord, Name, RecordTypeInfo, RecordSize));
+      TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdRecordNameSpace));
     end;
 
+    if (not UseRtti) or (not Assigned(RecordTypeInfo)) then
+      Exit;
+
+    {$ifdef EXTENDEDRTTI}
+    // name
+    FrameRename(NameBuffer, Name);
+
+    // skip managed (anonymous) fields
+    Ptr := Pointer(@GetTypeData(RecordTypeInfo).ManagedFldCount);
+    Count := PInteger(Ptr)^;
+    Inc(Ptr, SizeOf(Integer));
+    Inc(Ptr, Count * SizeOf(TAnonymousFieldInfo));
+
+    // skip "ops"
+    Count := Ptr^;
+    Inc(Ptr);
+    Inc(Ptr, Count * SizeOf(Pointer));
+
+    // fields
+    Count := PInteger(Ptr)^;
+    Inc(Ptr, SizeOf(Integer));
+    for i := 1 to Count do
+    begin
+      Field := Pointer(Ptr);
+
+      case TMemberVisibility(Field.Flags and 3) of
+        mvPublic, mvPublished:
+        begin
+          ItemTypeInfo := GetTypeInfo(Field.Header.TypeInfo); // ToDo
+
+          if (Assigned(ItemTypeInfo)) then
+          begin
+            unpack_lua_string(ItemName, Field.Name);
+            InternalAddProperty(Result, ItemName, TypeInfo, False, False, Field.Header.Offset, Field.Header.Offset,
+              1{Ord(pmField)} + 1{Ord(pmField)} shl 3{PROP_SLOTSETTER_SHIFT}, Low(Integer), False);
+          end;
+        end;
+      end;
+
+      Ptr := GetTail(Field.Name);
+      Ptr := SkipAttributes(Ptr);
+    end;
+
+    // methods
     Ptr := SkipAttributes(Ptr);
+    Count := PWord(Ptr)^;
+    Inc(Ptr, SizeOf(Word));
+    for i := 1 to Count do
+    begin
+      Method := Pointer(Ptr);
+      Ptr := GetTail(Method.Name);
+
+      case TMemberVisibility((Method.Flags shr 2) and 3) of
+        mvPublic, mvPublished:
+        begin
+          MethodKind := METHOD_KINDS[Method.Flags and 3];
+          if (MethodKind <> mkOperator) then
+          begin
+            FrameEnter(ChildFrame, PShortString(@Method.Name), False);
+            try
+              Invokable := TLuaInvokableBuilder(FInvokableBuilder).BuildProcedureSignature(Result, Pointer(Ptr), MethodKind);
+            finally
+              FrameLeave;
+            end;
+
+            if (Invokable <> LUA_POINTER_INVALID) then
+            begin
+              unpack_lua_string(ItemName, Method.Name);
+              InternalAddMethod(Result, ItemName, Method.Address, MethodKind, Invokable, False);
+            end;
+          end;
+        end;
+      end;
+
+      // skip parameters
+      Ptr := @PProcedureSignature(Ptr).ParamCount;
+      j := Ptr^;
+      Inc(Ptr);
+      while (j <> 0) do       
+      begin
+        Ptr := GetTail(PProcedureParam(Ptr).Name);
+        Ptr := SkipAttributes(Ptr);
+        Dec(j);
+      end;
+
+      Ptr := SkipAttributes(Ptr);
+    end;
+    {$endif}
+  finally
+    FrameLeave;
   end;
-  {$endif}
 end;
 
-function TLua.InternalAddInterface(const TypeInfo: PTypeInfo): PLuaInterfaceInfo;
+function TLua.InternalAddInterface(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaInterfaceInfo;
+const
+  STR_INTERFACE: array[0..9] of Byte = (9, Ord('I'), Ord('n'), Ord('t'), Ord('e'),
+    Ord('r'), Ord('f'), Ord('a'), Ord('c'), Ord('e'));
 var
   Ptr: PByte;
   IsFunc: Boolean;
@@ -17047,112 +17378,156 @@ var
   Item: PLuaDictionaryItem;
   Method: ^TLuaMethod;
   VmtOffset: NativeInt;
+  Frame: TLuaFrame;
+  ChildFrame: TLuaFrame;
 begin
-  // try to find
-  MetaTypePtr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
-  if (MetaTypePtr <> LUA_POINTER_INVALID) then
-  begin
-    Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MetaTypePtr);
-    Exit;
-  end;
-
-  // parent
-  Parent := nil;
-  ParentTypeInfo := GetTypeInfo(GetTypeData(TypeInfo).IntfParent);
-  if (Assigned(ParentTypeInfo)) then
-    Parent := InternalAddInterface(ParentTypeInfo);
-
-  // name, check existing
-  unpack_lua_string(ItemName, PShortString(@TypeInfo.Name)^);
-  LuaItemName := TLuaNames(FNames).Add(ItemName);
-  if (TLuaDictionary(FMetaTypes).Find(LuaItemName) <> nil) then
-  begin
-    Result := Parent;
-    Exit;
-  end;
-
-  // global metatype, inherits name space, base VMT offset
-  Result := Pointer(InternalAddMetaType(mtInterface, ItemName, TypeInfo, SizeOf(Pointer)));
-  Result.Parent := LUA_POINTER_INVALID;
-  if (Assigned(Parent)) then
-  begin
-    Result.Count := Parent.Count;
-    Result.Parent := Parent.Ptr;
-    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(Parent.FNameSpace));
-    VmtOffset := Parent.Count * SizeOf(Pointer);
-  end else
-  begin
-    TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdInterfaceNameSpace));
-    VmtOffset := 0;
-  end;
-
-  // method table
-  Ptr := GetTail(GetTypeData(TypeInfo).IntfUnit);
-  Inc(Result.Count, PWord(Ptr)^);
-  Inc(Ptr, SizeOf(Word));
-  Count := PWord(Ptr)^;
-  Inc(Ptr, SizeOf(Word));
-  if (Count = 0) or (Count = $ffff) then
-    Exit;
-  for i := 1 to Count do
-  begin
-    MethodEntry := Pointer(Ptr);
-    InvokablePtr := TLuaInvokableBuilder(FInvokableBuilder).BuildIntfMethod(Result, MethodEntry);
-    LuaItemName := TLuaNames(FNames).Add(PShortString(@MethodEntry.Name)^);
-    Ptr := GetTail(MethodEntry.Name);
-
-    // InternalAddMethod
-    Item := TLuaDictionary(Result.FNameSpace).InternalFind(LuaItemName, True);
-    if (Item.Value <> LUA_POINTER_INVALID) then
+  Result := nil;
+  FrameEnter(Frame, PShortString(@STR_INTERFACE), Critical);
+  try
+    // check type info
+    if (TypeInfo = nil) then
     begin
-      Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Item.Value);
-      Method.Invokable := InvokablePtr;
+      RegisterError('TypeInfo not defined');
+      Exit;
+    end;
+    if (TypeInfo.Kind <> tkInterface) or (IsReferenceMethodType(TypeInfo)) then
+    begin
+      unpack_lua_string(FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
+      GetTypeKindName(FStringBuffer.Default, TypeInfo.Kind);
+      RegisterErrorFmt('type "%s" is not interface type (%s)',
+        [FStringBuffer.Lua, FStringBuffer.Default]);
+      Exit;
+    end;
+
+    // try to find
+    MetaTypePtr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
+    if (MetaTypePtr <> LUA_POINTER_INVALID) then
+    begin
+      Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MetaTypePtr);
+      Exit;
+    end;
+
+    // name
+    FrameRename(PShortString(@TypeInfo.Name));
+
+    // parent
+    Parent := nil;
+    ParentTypeInfo := GetTypeInfo(GetTypeData(TypeInfo).IntfParent);
+    if (Assigned(ParentTypeInfo)) then
+      Parent := InternalAddInterface(ParentTypeInfo, Critical);
+
+    // name, check existing
+    unpack_lua_string(ItemName, PShortString(@TypeInfo.Name)^);
+    LuaItemName := TLuaNames(FNames).Add(ItemName);
+    if (TLuaDictionary(FMetaTypes).Find(LuaItemName) <> nil) then
+    begin
+      Result := Parent;
+      Exit;
+    end;
+
+    // global metatype, inherits name space, base VMT offset
+    Result := Pointer(InternalAddMetaType(mtInterface, ItemName, TypeInfo, SizeOf(Pointer)));
+    Result.Parent := LUA_POINTER_INVALID;
+    if (Assigned(Parent)) then
+    begin
+      Result.Count := Parent.Count;
+      Result.Parent := Parent.Ptr;
+      TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(Parent.FNameSpace));
+      VmtOffset := Parent.Count * SizeOf(Pointer);
     end else
     begin
-      MethodPtr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
-      Item.Value := MethodPtr or NAMESPACE_FLAG_PROC;
-      Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MethodPtr);
+      TLuaDictionary(Result.FNameSpace).Assign(TLuaDictionary(FStdInterfaceNameSpace));
+      VmtOffset := 0;
+    end;
 
-      Method.Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
-      Method.MethodKind := mkInstance;
-      Method.InvokableMode := True;
-      Method.Invokable := InvokablePtr;
+    // method table
+    Ptr := GetTail(GetTypeData(TypeInfo).IntfUnit);
+    Inc(Result.Count, PWord(Ptr)^);
+    Inc(Ptr, SizeOf(Word));
+    Count := PWord(Ptr)^;
+    Inc(Ptr, SizeOf(Word));
+    if (Count = 0) or (Count = $ffff) then
+      Exit;
+    for i := 1 to Count do
+    begin
+      MethodEntry := Pointer(Ptr);
+      FrameEnter(ChildFrame, PShortString(@MethodEntry.Name), False);
+      try
+        InvokablePtr := TLuaInvokableBuilder(FInvokableBuilder).BuildIntfMethod(Result, MethodEntry);
+      finally
+        FrameLeave;
+      end;
+
+      // InternalAddMethod
+      if (InvokablePtr <> LUA_POINTER_INVALID) then
+      begin
+        LuaItemName := TLuaNames(FNames).Add(PShortString(@MethodEntry.Name)^);
+        Item := TLuaDictionary(Result.FNameSpace).InternalFind(LuaItemName, True);
+        if (Item.Value <> LUA_POINTER_INVALID) then
+        begin
+          Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Item.Value);
+          Method.Invokable := InvokablePtr;
+        end else
+        begin
+          MethodPtr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
+          Item.Value := MethodPtr or NAMESPACE_FLAG_PROC;
+          Method := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(MethodPtr);
+
+          Method.Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
+          Method.MethodKind := mkInstance;
+          Method.InvokableMode := True;
+          Method.Invokable := InvokablePtr;
+        end;
+      end;
+
+      // skip method
       Inc(VmtOffset, SizeOf(Pointer));
-    end;
-
-    // skip method
-    IsFunc := (Ptr^ = 1);
-    Inc(Ptr);
-    Inc(Ptr);
-    j := Ptr^;
-    Inc(Ptr);
-    while (j <> 0) do
-    begin
+      Ptr := GetTail(MethodEntry.Name);
+      IsFunc := (Ptr^ = 1);
       Inc(Ptr);
-      Ptr := GetTail(Ptr^);
-      Ptr := GetTail(Ptr^);
-      Inc(Ptr, SizeOf(Pointer));
-      Ptr := SkipAttributes(Ptr);
+      Inc(Ptr);
+      j := Ptr^;
+      Inc(Ptr);
+      while (j <> 0) do
+      begin
+        Inc(Ptr);
+        Ptr := GetTail(Ptr^);
+        Ptr := GetTail(Ptr^);
+        Inc(Ptr, SizeOf(Pointer));
+        Ptr := SkipAttributes(Ptr);
 
-      Dec(j);
+        Dec(j);
+      end;
+      if (IsFunc) then
+      begin
+        Ptr := GetTail(Ptr^);
+        Inc(Ptr, SizeOf(Pointer));
+      end;
+      Ptr := SkipAttributes(Ptr);
     end;
-    if (IsFunc) then
-    begin
-      Ptr := GetTail(Ptr^);
-      Inc(Ptr, SizeOf(Pointer));
-    end;
-    Ptr := SkipAttributes(Ptr);
+  finally
+    FrameLeave;
   end;
 end;
 
-function TLua.InternalAddArray(const TypeInfo: PTypeInfo): PLuaArrayInfo;
-begin
-  Result := nil{ToDo};
+function TLua.InternalAddArray(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaArrayInfo;
+const
+  STR_ARRAY: array[0..5] of Byte = (5, Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'));
+var
+  Frame: TLuaFrame;
+begin  
+  FrameEnter(Frame, PShortString(@STR_ARRAY), Critical);
+  try  
+    Result := nil{ToDo};
+  finally
+    FrameLeave;
+  end;
 end;
 
 function TLua.InternalAddArrayEx(const Identifier, ItemTypeInfo: Pointer;
-  const ABounds: array of Integer): PLuaArrayInfo;
+  const ABounds: array of Integer; const Critical: Boolean): PLuaArrayInfo;
 const
+  STR_ARRAY: array[0..5] of Byte = (5, Ord('A'), Ord('r'), Ord('r'), Ord('a'), Ord('y'));
   STATIC_DYNAMIC: array[boolean] of string = ('static', 'dynamic');
 var
   ArrayTypeInfo, BufTypeInfo: PTypeInfo;
@@ -17163,169 +17538,197 @@ var
   ItemSize, Dimention, i, Count: Integer;
   elType: PPTypeInfo;
   AdvancedSize: NativeInt;
+  Frame: TLuaFrame;
+  NameBuffer: ShortString;
 begin
-  // identifier: name or typeinfo
-  begin
-    if (NativeUInt(Identifier) <= $FFFF) then
-      raise ELua.Create('Array identifier not defined') at FReturnAddress;
-    try
-      if (TTypeKind(Identifier^) in [tkArray, tkDynArray]) then
+  Result := nil;
+  FrameEnter(Frame, PShortString(@STR_ARRAY), Critical);
+  try
+    // identifier: name or typeinfo
+    begin
+      if (NativeUInt(Identifier) <= $FFFF) then
       begin
-        ArrayTypeInfo := PTypeInfo(Identifier);
-        unpack_lua_string(FStringBuffer.Lua, PShortString(@ArrayTypeInfo.Name)^);
-      end else
-      begin
-        FStringBuffer.Lua := PLuaChar(Identifier);
-        ArrayTypeInfo := nil;
+        RegisterError('array identifier not defined');
+        Exit;
       end;
-    except
-      raise ELua.Create('Array identifier is invalid') at FReturnAddress;
-    end;
-    if (not IsValidIdent(FStringBuffer.Lua)) then
-      raise ELua.CreateFmt('Non-supported array type name ("%s")', [FStringBuffer.Lua]) at FReturnAddress;
-  end;
-
-  // static/dynamic
-  IsDynamic := Assigned(ArrayTypeInfo) and (ArrayTypeInfo.Kind = tkDynArray);
-  if (IsDynamic <> (Length(ABounds) = 0)) then
-  begin
-    if (IsDynamic) then
-    begin
-      raise ELua.CreateFmt('Dynamic array "%s" has no bounds', [FStringBuffer.Lua]) at FReturnAddress;
-    end else
-    begin
-      raise ELua.CreateFmt('Array information of "%s" not defined', [FStringBuffer.Lua]) at FReturnAddress;
-    end;
-  end;
-
-  // item: typeinfo, size
-  // ToDo
-  begin
-    ItemSize := 100500;
-    (*if (itemtypeinfo = nil) then
-    ELua.Assert('"%s" registering... The typeinfo of %s array item not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);
-    PropertyInfo.Base := GetLuaPropertyBase(Self, '', Name, ptypeinfo(itemtypeinfo), CodeAddr);
-    itemtypeinfo := PropertyInfo.Base.Information;
-    FItemSize := GetLuaItemSize(PropertyInfo.Base);
-    if (FItemSize = 0) then ELua.Assert('"%s" registering... The size of %s array item not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);*)
-  end;
-
-  // Dimention, Bounds
-  if (IsDynamic) then
-  begin
-    BufTypeInfo := ArrayTypeInfo;
-    Dimention := 0;
-    while (BufTypeInfo <> nil) do
-    begin
-      Inc(Dimention);
-      TypeData := GetTypeData(BufTypeInfo);
-      elType := TypeData.elType;
-
-      if (elType = nil) then
-      begin
-        if (ItemSize = TypeData.elSize) then Break;
-      end else
-      begin
-        BufTypeInfo := elType^;
-        if (BufTypeInfo = ItemTypeInfo) then Break;
-
-        if (BufTypeInfo.Kind = tkDynArray) then
+      try
+        if (TTypeKind(Identifier^) in [tkArray, tkDynArray]) then
         begin
-          //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
-          Continue;
+          ArrayTypeInfo := PTypeInfo(Identifier);
+          unpack_lua_string(FStringBuffer.Lua, PShortString(@ArrayTypeInfo.Name)^);
         end else
-        if (BufTypeInfo.Kind = tkArray) then
         begin
-          //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) or
-          //ToDo    (PLuaArrayInfo(ItemTypeInfo).FSize = GetTypeData(BufTypeInfo).elSize) then Break;
-        end else
-        if (BufTypeInfo.Kind in RECORD_TYPES) then
-        begin
-          //ToDo if (PLuaRecordInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
+          FStringBuffer.Lua := PLuaChar(Identifier);
+          ArrayTypeInfo := nil;
         end;
+      except
+        RegisterError('array identifier is invalid');
+        Exit;
       end;
-
-      raise ELua.CreateFmt('Incorrect ItemTypeInfo of dynamic array "%s"',
-        [FStringBuffer.Lua]) at FReturnAddress;
+      if (not IsValidIdent(FStringBuffer.Lua)) then
+      begin
+        RegisterErrorFmt('non-supported array type name ("%s")', [FStringBuffer.Lua]);
+        Exit;
+      end;
+      FrameRename(NameBuffer, FStringBuffer.Lua);
     end;
-  end else
-  begin
-    Dimention := Length(ABounds);
-    if (Dimention and 1 = 1) then
-      raise ELua.CreateFmt('"%s" registering... Bounds size should be even. %d is an incorrect size',
-      [FStringBuffer.Lua, Dimention]) at FReturnAddress;
-    Dimention := Dimention shr 1;
 
-    for i := 0 to Dimention-1 do
-    if (ABounds[i * 2] > ABounds[i * 2 + 1]) then
-      raise ELua.CreateFmt('"%s" registering... Incorrect bounds: "%d..%d"',
-      [FStringBuffer.Lua, ABounds[i * 2], ABounds[i * 2 + 1]]) at FReturnAddress;
-  end;
-
-  // find
-  ArrayPtr := LUA_POINTER_INVALID;
-  if (Assigned(ArrayTypeInfo)) then ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(ArrayTypeInfo);
-  if (ArrayPtr = LUA_POINTER_INVALID) then
-  begin
-    LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
-    ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
-    if (ArrayPtr = LUA_POINTER_INVALID) then
+    // static/dynamic
+    IsDynamic := Assigned(ArrayTypeInfo) and (ArrayTypeInfo.Kind = tkDynArray);
+    if (IsDynamic <> (Length(ABounds) = 0)) then
     begin
-      AdvancedSize := Length(ABounds) * SizeOf(Integer);
-      Inc(AdvancedSize, (Dimention - 1) * SizeOf(NativeInt));
-      Result := Pointer(InternalAddMetaType(mtArray, FStringBuffer.Lua, ArrayTypeInfo, 0{fill later}, AdvancedSize));
-      Result.FNameSpace := FStdRecordNameSpace;
-
-      Result.FIsDynamic := IsDynamic;
-      Result.FDimention := Dimention;
-      Result.FItemSize := ItemSize;
-
       if (IsDynamic) then
       begin
-        BufTypeInfo := ArrayTypeInfo;
-        PTypeInfo(Result.FMultiplies[0]) := BufTypeInfo;
-        for i := 1 to Dimention - 1 do
-        begin
-          BufTypeInfo := GetTypeData(BufTypeInfo).elType^;
-          PTypeInfo(Result.FMultiplies[i]) := BufTypeInfo;
-        end;
-
-        Result.F.Size := SizeOf(Pointer);
-        Result.FFinalTypeInfo := ArrayTypeInfo;
-        Result.FFinalItemsCount := 1;
+        RegisterErrorFmt('dynamic array "%s" has no bounds', [FStringBuffer.Lua]);
+        Exit;
       end else
       begin
-        Result.FMultiplies[Dimention - 1] := ItemSize;
-        for i := Dimention - 2 downto 0 do
+        RegisterErrorFmt('array information of "%s" not defined', [FStringBuffer.Lua]);
+        Exit;
+      end;
+    end;
+
+    // item: typeinfo, size
+    // ToDo
+    begin
+      ItemSize := 100500;
+      (*if (itemtypeinfo = nil) then
+      ELua.Assert('"%s" registering... The typeinfo of %s array item not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);
+      PropertyInfo.Base := GetLuaPropertyBase(Self, '', Name, ptypeinfo(itemtypeinfo), CodeAddr);
+      itemtypeinfo := PropertyInfo.Base.Information;
+      FItemSize := GetLuaItemSize(PropertyInfo.Base);
+      if (FItemSize = 0) then ELua.Assert('"%s" registering... The size of %s array item not defined', [Name, STATIC_DYNAMIC[IsDynamic]], CodeAddr);*)
+    end;
+
+    // Dimention, Bounds
+    if (IsDynamic) then
+    begin
+      BufTypeInfo := ArrayTypeInfo;
+      Dimention := 0;
+      while (BufTypeInfo <> nil) do
+      begin
+        Inc(Dimention);
+        TypeData := GetTypeData(BufTypeInfo);
+        elType := TypeData.elType;
+
+        if (elType = nil) then
         begin
-          Count := (ABounds[(i + 1) * 2 + 1] - ABounds[(i + 1) * 2]) + 1;
-          Result.FMultiplies[i] := Result.FMultiplies[i + 1] * Count;
+          if (ItemSize = TypeData.elSize) then Break;
+        end else
+        begin
+          BufTypeInfo := elType^;
+          if (BufTypeInfo = ItemTypeInfo) then Break;
+
+          if (BufTypeInfo.Kind = tkDynArray) then
+          begin
+            //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
+            Continue;
+          end else
+          if (BufTypeInfo.Kind = tkArray) then
+          begin
+            //ToDo if (PLuaArrayInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) or
+            //ToDo    (PLuaArrayInfo(ItemTypeInfo).FSize = GetTypeData(BufTypeInfo).elSize) then Break;
+          end else
+          if (BufTypeInfo.Kind in RECORD_TYPES) then
+          begin
+            //ToDo if (PLuaRecordInfo(ItemTypeInfo).FTypeInfo = BufTypeInfo) then Break;
+          end;
         end;
 
-        Result.FBounds := Pointer(@Result.FMultiplies[Dimention]);
-        System.Move(ABounds[0], Result.FBounds^, Length(ABounds) * SizeOf(Integer));
+        RegisterErrorFmt('incorrect ItemTypeInfo of dynamic array "%s"', [FStringBuffer.Lua]);
+        Exit;
+      end;
+    end else
+    begin
+      Dimention := Length(ABounds);
+      if (Dimention and 1 = 1) then
+      begin
+        RegisterErrorFmt('"%s" registering... bounds size should be even. %d is an incorrect size',
+          [FStringBuffer.Lua, Dimention]);
+        Exit;
+      end;
+      Dimention := Dimention shr 1;
 
-        Result.F.Size := Result.FMultiplies[0];
-        Result.FFinalTypeInfo := ItemTypeInfo{ToDo ???};
-        Result.FFinalItemsCount := Result.F.Size div ItemSize;
+      for i := 0 to Dimention-1 do
+      if (ABounds[i * 2] > ABounds[i * 2 + 1]) then
+      begin
+        RegisterErrorFmt('"%s" registering... incorrect bounds: "%d..%d"',
+          [FStringBuffer.Lua, ABounds[i * 2], ABounds[i * 2 + 1]]);
+        Exit;
+      end;
+    end;
+
+    // find
+    ArrayPtr := LUA_POINTER_INVALID;
+    if (Assigned(ArrayTypeInfo)) then ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(ArrayTypeInfo);
+    if (ArrayPtr = LUA_POINTER_INVALID) then
+    begin
+      LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
+      ArrayPtr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
+      if (ArrayPtr = LUA_POINTER_INVALID) then
+      begin
+        AdvancedSize := Length(ABounds) * SizeOf(Integer);
+        Inc(AdvancedSize, (Dimention - 1) * SizeOf(NativeInt));
+        Result := Pointer(InternalAddMetaType(mtArray, FStringBuffer.Lua, ArrayTypeInfo, 0{fill later}, AdvancedSize));
+        Result.FNameSpace := FStdRecordNameSpace;
+
+        Result.FIsDynamic := IsDynamic;
+        Result.FDimention := Dimention;
+        Result.FItemSize := ItemSize;
+
+        if (IsDynamic) then
+        begin
+          BufTypeInfo := ArrayTypeInfo;
+          PTypeInfo(Result.FMultiplies[0]) := BufTypeInfo;
+          for i := 1 to Dimention - 1 do
+          begin
+            BufTypeInfo := GetTypeData(BufTypeInfo).elType^;
+            PTypeInfo(Result.FMultiplies[i]) := BufTypeInfo;
+          end;
+
+          Result.F.Size := SizeOf(Pointer);
+          Result.FFinalTypeInfo := ArrayTypeInfo;
+          Result.FFinalItemsCount := 1;
+        end else
+        begin
+          Result.FMultiplies[Dimention - 1] := ItemSize;
+          for i := Dimention - 2 downto 0 do
+          begin
+            Count := (ABounds[(i + 1) * 2 + 1] - ABounds[(i + 1) * 2]) + 1;
+            Result.FMultiplies[i] := Result.FMultiplies[i + 1] * Count;
+          end;
+
+          Result.FBounds := Pointer(@Result.FMultiplies[Dimention]);
+          System.Move(ABounds[0], Result.FBounds^, Length(ABounds) * SizeOf(Integer));
+
+          Result.F.Size := Result.FMultiplies[0];
+          Result.FFinalTypeInfo := ItemTypeInfo{ToDo ???};
+          Result.FFinalItemsCount := Result.F.Size div ItemSize;
+        end;
+      end else
+      begin
+        Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
+        if (Result.Kind <> mtArray) {ToDo or (Result.Low <> Low) or (Result.High <> High)} then
+        begin
+          RegisterErrorTypeExists(FStringBuffer.Lua);
+          Exit;
+        end;
+
+        if (Assigned(ArrayTypeInfo)) then
+          TLuaDictionary(FMetaTypes).Add(ArrayTypeInfo, ArrayPtr);
       end;
     end else
     begin
       Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
-      if (Result.Kind <> mtArray) {ToDo or (Result.Low <> Low) or (Result.High <> High)} then
-        raise ETypeRegistered(FStringBuffer.Lua) at FReturnAddress;
-
-      if (Assigned(ArrayTypeInfo)) then
-        TLuaDictionary(FMetaTypes).Add(ArrayTypeInfo, ArrayPtr);
     end;
-  end else
-  begin
-    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(ArrayPtr);
+  finally
+    FrameLeave;
   end;
 end;
 
-function TLua.InternalAddSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
+function TLua.InternalAddSet(const TypeInfo: PTypeInfo; const Critical: Boolean): PLuaSetInfo;
 const
+  STR_SET: array[0..3] of Byte = (3, Ord('S'), Ord('e'), Ord('t'));
   MASK_3 = $FF shl 3;
 var
   Ptr: __luapointer;
@@ -17333,242 +17736,298 @@ var
   TypeData: PTypeData;
   Low, High: Integer;
   LuaName: __luaname;
+  Frame: TLuaFrame;
 begin
-  if (NativeUInt(TypeInfo) <= $FFFF) then
-    raise ELua.Create('TypeInfo of set not defined') at FReturnAddress;
+  Result := nil;
+  FrameEnter(Frame, PShortString(@STR_SET), Critical);
+  try
+    if (NativeUInt(TypeInfo) <= $FFFF) then
+    begin
+      RegisterError('TypeInfo of set not defined');
+      Exit;
+    end;
 
-  if (PTypeInfo(TypeInfo).Kind <> tkSet) then
-  begin
-    GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
-    raise ELua.CreateFmt('TypeInfo of set is not correct: TypeKind = %s',
-      [FStringBuffer.Default]) at FReturnAddress;
-  end;
+    if (PTypeInfo(TypeInfo).Kind <> tkSet) then
+    begin
+      GetTypeKindName(FStringBuffer.Default, PTypeInfo(TypeInfo).Kind);
+      RegisterErrorFmt('TypeInfo of set is invalid: TypeKind = %s', [FStringBuffer.Default]);
+      Exit;
+    end;
 
-  Ptr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
-  if (Ptr = LUA_POINTER_INVALID) then
-  begin
-    ItemTypeInfo := GetTypeData(TypeInfo).CompType{$ifNdef FPC}^{$endif};
-    TypeData := GetTypeData(ItemTypeInfo);
-    Low := TypeData.MinValue;
-    High := TypeData.MaxValue;
-
-    unpack_lua_string(FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
-    LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
-    Ptr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
+    Ptr := TLuaDictionary(FMetaTypes).FindValue(TypeInfo);
     if (Ptr = LUA_POINTER_INVALID) then
     begin
-      Result := Pointer(InternalAddMetaType(mtSet, FStringBuffer.Lua, TypeInfo, 0{fill later}));
-      Result.FNameSpace := FStdSetNameSpace;
+      ItemTypeInfo := GetTypeData(TypeInfo).CompType{$ifNdef FPC}^{$endif};
+      TypeData := GetTypeData(ItemTypeInfo);
+      Low := TypeData.MinValue;
+      High := TypeData.MaxValue;
 
-      Result.FItemTypeInfo := ItemTypeInfo;
-      Result.FLow := Low;
-      Result.FHigh := High;
-      with Result^ do
+      unpack_lua_string(FStringBuffer.Lua, PShortString(@PTypeInfo(TypeInfo).Name)^);
+      LuaName := TLuaNames(FNames).Add(FStringBuffer.Lua);
+      Ptr := TLuaDictionary(FMetaTypes).FindValue(LuaName);
+      if (Ptr = LUA_POINTER_INVALID) then
       begin
-      {$ifdef FPC}
-        if (FHigh > 31) then F.Size := 32 else F.Size := 4;
-        FRealSize := F.Size;
-        FCorrection := 0;
-        FAndMasks := $0000FFFF;
-      {$else}
-        F.Size := (((FHigh + 7 + 1) and MASK_3) - (FLow and MASK_3))shr 3;
-        FRealSize := F.Size;
-        if (F.Size = 3) then F.Size := 4;
-        FCorrection := (FLow and MASK_3);
-        FAndMasks := Integer(Byte($FF shr (7 - (FHigh and 7)))) +
-                     Integer(Byte($FF shl (FLow - FCorrection))) shl 8;
-      {$endif}
-      end;
+        FrameRename(PShortString(@PTypeInfo(TypeInfo).Name));
+        Result := Pointer(InternalAddMetaType(mtSet, FStringBuffer.Lua, TypeInfo, 0{fill later}));
+        Result.FNameSpace := FStdSetNameSpace;
 
-      if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanType(ItemTypeInfo)) then
+        Result.FItemTypeInfo := ItemTypeInfo;
+        Result.FLow := Low;
+        Result.FHigh := High;
+        with Result^ do
+        begin
+        {$ifdef FPC}
+          if (FHigh > 31) then F.Size := 32 else F.Size := 4;
+          FRealSize := F.Size;
+          FCorrection := 0;
+          FAndMasks := $0000FFFF;
+        {$else}
+          F.Size := (((FHigh + 7 + 1) and MASK_3) - (FLow and MASK_3))shr 3;
+          FRealSize := F.Size;
+          if (F.Size = 3) then F.Size := 4;
+          FCorrection := (FLow and MASK_3);
+          FAndMasks := Integer(Byte($FF shr (7 - (FHigh and 7)))) +
+                       Integer(Byte($FF shl (FLow - FCorrection))) shl 8;
+        {$endif}
+        end;
+
+        if (ItemTypeInfo.Kind = tkEnumeration) and (not IsBooleanType(ItemTypeInfo)) then
+        begin
+          InternalAutoRegister(ItemTypeInfo);
+        end;
+      end else
       begin
-        InternalAutoRegister(ItemTypeInfo);
+        Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+        if (Result.Kind <> mtSet) or (Result.Low <> Low) or (Result.High <> High) then
+        begin
+          RegisterErrorTypeExists(FStringBuffer.Lua);
+          Exit;
+        end;
+
+        TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
       end;
     end else
     begin
       Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
-      if (Result.Kind <> mtSet) or (Result.Low <> Low) or (Result.High <> High) then
-        raise ETypeRegistered(FStringBuffer.Lua) at FReturnAddress;
-
-      TLuaDictionary(FMetaTypes).Add(TypeInfo, Ptr);
     end;
-  end else
-  begin
-    Result := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+  finally
+    FrameLeave;
   end;
 end;
 
-procedure __TLuaRegEnum(const Self: TLua; const TypeInfo: PTypeInfo);
+procedure TLua.InternalAddEnum(const TypeInfo: PTypeInfo; const Critical: Boolean);
+const
+  STR_ENUMERATION: array[0..11] of Byte = (11, Ord('E'), Ord('n'), Ord('u'), Ord('m'),
+    Ord('e'), Ord('r'), Ord('a'), Ord('t'), Ord('i'), Ord('o'), Ord('n'));
 var
   i, VMin, VMax, Ref: Integer;
   Ptr: PByte;
   LuaName: __luaname;
-begin
-  if (NativeUInt(TypeInfo) <= $FFFF) then
-    raise ELua.Create('EnumTypeInfo not defined') at Self.FReturnAddress;
-
-  if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanType(TypeInfo)) then
-  begin
-    Self.unpack_lua_string(Self.FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
-    GetTypeKindName(Self.FStringBuffer.Default, TypeInfo.Kind);
-    raise ELua.CreateFmt('Type "%s" (kind: %s) is not enumeration',
-      [Self.FStringBuffer.Lua, Self.FStringBuffer.Default]) at Self.FReturnAddress;
-  end;
-
-  // check fake (enumeration) storage
-  if (Assigned(TLuaDictionary(Self.FGlobalEntities).InternalFind(TypeInfo, False))) then
-    Exit;
-
-  // each enumeration value
-  with GetTypeData(TypeInfo)^ do
-  begin
-    VMin := MinValue;
-    VMax := MaxValue;
-    Ptr := Pointer(@GetTypeData(BaseType^)^.NameList);
-
-    for i := VMin to VMax do
+  Frame: TLuaFrame;
+begin  
+  Self.FrameEnter(Frame, PShortString(@STR_ENUMERATION), Critical);
+  try  
+    if (NativeUInt(TypeInfo) <= $FFFF) then
     begin
-      LuaName := TLuaNames(Self.FNames).Add(PShortString(Ptr)^);
-      Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName)).Ref;
-      lua_pushinteger(Self.Handle, i);
-      Self.global_fill_value(Ref);
-
-      Ptr := GetTail(Ptr^);
+      Self.RegisterError('TypeInfo not defined');
+      Exit;
     end;
-  end;
 
-  // fake (enumeration) storage
-  TLuaDictionary(Self.FGlobalEntities).Add(TypeInfo, LUA_POINTER_INVALID);
+    if (TypeInfo.Kind <> tkEnumeration) or (IsBooleanType(TypeInfo)) then
+    begin
+      Self.unpack_lua_string(Self.FStringBuffer.Lua, PShortString(@TypeInfo.Name)^);
+      GetTypeKindName(Self.FStringBuffer.Default, TypeInfo.Kind);
+      Self.RegisterErrorFmt('type "%s" (kind: %s) is not enumeration',
+        [Self.FStringBuffer.Lua, Self.FStringBuffer.Default]);
+      Exit;
+    end;
+
+    // check fake (enumeration) storage
+    if (Assigned(TLuaDictionary(Self.FGlobalEntities).InternalFind(TypeInfo, False))) then
+      Exit;
+
+    // frame
+    Self.FrameRename(PShortString(@TypeInfo.Name));
+
+    // each enumeration value
+    with GetTypeData(TypeInfo)^ do
+    begin
+      VMin := MinValue;
+      VMax := MaxValue;
+      Ptr := Pointer(@GetTypeData(BaseType^)^.NameList);
+
+      for i := VMin to VMax do
+      begin
+        LuaName := TLuaNames(Self.FNames).Add(PShortString(Ptr)^);
+        Ref := PLuaGlobalEntity(Self.InternalAddGlobal(Ord(gkConst), LuaName)).Ref;
+        lua_pushinteger(Self.Handle, i);
+        Self.global_fill_value(Ref);
+
+        Ptr := GetTail(Ptr^);
+      end;
+    end;
+
+    // fake (enumeration) storage
+    TLuaDictionary(Self.FGlobalEntities).Add(TypeInfo, LUA_POINTER_INVALID);
+  finally
+    Self.FrameLeave;
+  end;
 end;
 
-function TLua.InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean): Pointer{PLuaMetaType/PLuaInvokable};
+function TLua.InternalAutoRegister(const TypeInfo: PTypeInfo; const UseRtti: Boolean;
+  const Critical: Boolean): Pointer{PLuaMetaType/PLuaInvokable};
 label
   invokable;
 var
   Ptr: __luapointer;
   ClassType: TClass;
   MetaTypes: ^TLuaDictionary;
+//  Frame: TLuaFrame;
 begin
-  Ptr := LUA_POINTER_INVALID;
+//  FrameEnter(Frame, PShortString(@));
+//  try
+    Ptr := LUA_POINTER_INVALID;
 
-  case TypeInfo.Kind of
-    tkEnumeration:
-    begin
-      if (not IsBooleanType(TypeInfo)) then
-        __TLuaRegEnum(Self, TypeInfo);
-    end;
-    //? tkVariant:
-    tkMethod{$ifdef EXTENDEDRTTI}, tkProcedure{$endif}:
-    begin
-    invokable:
-      Ptr := InternalBuildInvokable(nil, TypeInfo, TLuaMethodKind($ff));
-    end;
-    tkSet, tkClass, tkArray, tkRecord{$ifdef FPC}, tkObject{$endif},
-    tkInterface, tkDynArray{$ifdef EXTENDEDRTTI}, tkClassRef{$endif}:
-    begin
-      MetaTypes := @TLuaDictionary(FMetaTypes);
-      Ptr := MetaTypes.FindValue(TypeInfo);
+    case TypeInfo.Kind of
+      tkEnumeration:
+      begin
+        if (not IsBooleanType(TypeInfo)) then
+          InternalAddEnum(TypeInfo, Critical);
+      end;
+      //? tkVariant:
+      tkMethod{$ifdef EXTENDEDRTTI}, tkProcedure{$endif}:
+      begin
+      invokable:
+        // ToDo?
+        Ptr := InternalBuildInvokable(nil, TypeInfo, TLuaMethodKind($ff), Critical);
+      end;
+      tkSet, tkClass, tkArray, tkRecord{$ifdef FPC}, tkObject{$endif},
+      tkInterface, tkDynArray{$ifdef EXTENDEDRTTI}, tkClassRef{$endif}:
+      begin
+        MetaTypes := @TLuaDictionary(FMetaTypes);
+        Ptr := MetaTypes.FindValue(TypeInfo);
 
-      if (Ptr = LUA_POINTER_INVALID) then
-      case TypeInfo.Kind of
-        tkClass:
-        begin
-          ClassType := GetTypeData(TypeInfo).ClassType;
-          Ptr := MetaTypes.FindValue(Pointer(ClassType));
-          if (Ptr = LUA_POINTER_INVALID) then
+        if (Ptr = LUA_POINTER_INVALID) then
+        case TypeInfo.Kind of
+          tkClass:
           begin
-            Ptr := InternalAddClass(ClassType, UseRtti).Ptr;
-          end else
+            ClassType := GetTypeData(TypeInfo).ClassType;
+            Ptr := MetaTypes.FindValue(Pointer(ClassType));
+            if (Ptr = LUA_POINTER_INVALID) then
+            begin
+              Ptr := InternalAddClass(ClassType, UseRtti, Critical).Ptr;
+            end else
+            begin
+              MetaTypes.Add(TypeInfo, Ptr);
+            end;
+          end;
+          {$ifdef EXTENDEDRTTI}
+          tkClassRef:
           begin
+            ClassType := GetTypeData(GetTypeInfo(GetTypeData(TypeInfo).InstanceType)).ClassType;
+            Ptr := MetaTypes.FindValue(Pointer(ClassType));
+            if (Ptr = LUA_POINTER_INVALID) then
+              Ptr := InternalAddClass(ClassType, UseRtti, Critical).Ptr;
+
             MetaTypes.Add(TypeInfo, Ptr);
           end;
-        end;
-        {$ifdef EXTENDEDRTTI}
-        tkClassRef:
-        begin
-          ClassType := GetTypeData(GetTypeInfo(GetTypeData(TypeInfo).InstanceType)).ClassType;
-          Ptr := MetaTypes.FindValue(Pointer(ClassType));
-          if (Ptr = LUA_POINTER_INVALID) then
-            Ptr := InternalAddClass(ClassType, UseRtti).Ptr;
-
-          MetaTypes.Add(TypeInfo, Ptr);
-        end;
-        {$endif}
-        tkSet:
-        begin
-          // todo
-          Ptr := InternalAddSet(TypeInfo).Ptr;
-        end;
-        tkArray:
-        begin
-          // todo
-          Ptr := InternalAddArray(TypeInfo).Ptr;
-        end;
-        tkDynArray:
-        begin
-          // todo
-          Ptr := InternalAddArray(TypeInfo).Ptr;
-        end;
-        tkRecord{$ifdef FPC}, tkObject{$endif}:
-        begin
-          // todo
-          Ptr := InternalAddRecord(TypeInfo).Ptr;
-        end;
-        tkInterface:
-        begin
-          if IsReferenceMethodType(TypeInfo) then goto invokable;
-          Ptr := InternalAddInterface(TypeInfo).Ptr;
+          {$endif}
+          tkSet:
+          begin
+            // todo
+            Ptr := InternalAddSet(TypeInfo, Critical).Ptr;
+          end;
+          tkArray:
+          begin
+            // todo
+            Ptr := InternalAddArray(TypeInfo, Critical).Ptr;
+          end;
+          tkDynArray:
+          begin
+            // todo
+            Ptr := InternalAddArray(TypeInfo, Critical).Ptr;
+          end;
+          tkRecord{$ifdef FPC}, tkObject{$endif}:
+          begin
+            // todo
+            Ptr := InternalAddRecord(TypeInfo, Critical).Ptr;
+          end;
+          tkInterface:
+          begin
+            if IsReferenceMethodType(TypeInfo) then goto invokable;
+            Ptr := InternalAddInterface(TypeInfo, Critical).Ptr;
+          end;
         end;
       end;
     end;
-  end;
 
-  // done
-  Result := nil;
-  if (Ptr <> LUA_POINTER_INVALID) then
-    Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
+    // done
+    Result := nil;
+    if (Ptr <> LUA_POINTER_INVALID) then
+      Result := {$ifdef SMALLINT}Pointer{$else}TLuaMemoryHeap(FMemoryHeap).Unpack{$endif}(Ptr);
+//  finally
+//    FrameLeave;
+//  end;
 end;
 
 function TLua.InternalBuildInvokable(const MetaType: PLuaMetaType; const TypeInfo: PTypeInfo;
-  const MethodKind: TLuaMethodKind): __luapointer;
+  const MethodKind: TLuaMethodKind; const Critical: Boolean): __luapointer;
 var
   Builder: ^TLuaInvokableBuilder;
+var 
+  Frame: TLuaFrame;
 begin
-  Result := LUA_POINTER_INVALID;
-  Builder := @TLuaInvokableBuilder(FInvokableBuilder);
+  FrameEnter(Frame, PShortString(@TypeInfo.Name), Critical);
+  try 
+    Result := LUA_POINTER_INVALID;
+    Builder := @TLuaInvokableBuilder(FInvokableBuilder);
 
-  if (Assigned(TypeInfo)) then
-  case TypeInfo.Kind of
-    tkMethod:
-    begin
-      Result := Builder.BuildMethod(MetaType, TypeInfo, MethodKind);
-    end;  
-    {$ifdef EXTENDEDRTTI}
-    tkProcedure:
-    begin
-      Result := Builder.BuildProcedure(MetaType, TypeInfo, MethodKind);
+    if (Assigned(TypeInfo)) then
+    case TypeInfo.Kind of
+      tkMethod:
+      begin
+        Result := Builder.BuildMethod(MetaType, TypeInfo, MethodKind);
+      end;  
+      {$ifdef EXTENDEDRTTI}
+      tkProcedure:
+      begin
+        Result := Builder.BuildProcedure(MetaType, TypeInfo, MethodKind);
+      end;
+      tkInterface:
+      begin
+        if (IsReferenceMethodType(TypeInfo)) then
+          Result := Builder.BuildReferenceMethod(MetaType, TypeInfo, MethodKind);
+      end;
+      {$endif}
     end;
-    tkInterface:
-    begin
-      if (IsReferenceMethodType(TypeInfo)) then
-        Result := Builder.BuildReferenceMethod(MetaType, TypeInfo, MethodKind);
-    end;
-    {$endif}
+  finally
+    FrameLeave;
   end;
 end;
 
-function TLua.InternalBuildInvokable(const MetaType: PLuaMetaType; const Params: array of TLuaProcParam;
-  const ResultType: PTypeInfo; const MethodKind: TLuaMethodKind; const CallConv: TCallConv): __luapointer;
+function TLua.InternalBuildInvokable(const MetaType: PLuaMetaType; const Name: LuaString;
+  const Params: array of TLuaProcParam; const ResultType: PTypeInfo;
+  const MethodKind: TLuaMethodKind; const CallConv: TCallConv; const Critical: Boolean): __luapointer;
 var
   Builder: ^TLuaInvokableBuilder;
+  Frame: TLuaFrame;
+  NameBuffer: ShortString;
 begin
-  Builder := @TLuaInvokableBuilder(FInvokableBuilder);
-  Result := Builder.BuildCustom(MetaType, Params, ResultType, MethodKind, CallConv);
+  FrameEnter(Frame, nil, Critical);
+  try
+    FrameRename(NameBuffer, Name);
+    Builder := @TLuaInvokableBuilder(FInvokableBuilder);
+    Result := Builder.BuildCustom(MetaType, Params, ResultType, MethodKind, CallConv);
+  finally
+    FrameLeave;
+  end;
 end;
 
 function TLua.InternalAddMethod(const MetaType: PLuaMetaType; const Name: LuaString;
   Address: Pointer; const MethodKind: TLuaMethodKind; const Invokable: __luapointer;
-  {Universal} const MinArgsCount, MaxArgsCount: Word): __luapointer;
+  const Critical: Boolean; {Universal} const MinArgsCount, MaxArgsCount: Word): __luapointer;
+const
+  STR_METHOD: array[0..6] of Byte = (6, Ord('M'), Ord('e'), Ord('t'), Ord('h'), Ord('o'), Ord('d'));
 label
   new_or_replace, done;
 var
@@ -17580,130 +18039,149 @@ var
   Entity: PLuaGlobalEntity;
   LastPtr, Ptr: __luapointer;
   Proc: ^TLuaMethod;
+  Frame: TLuaFrame;
+  NameBuffer: ShortString;
 begin
-  if (NativeUInt(Address) <= $FFFF) then
-    raise ELua.Create('Method address not defined') at FReturnAddress;
-
-  if (Invokable = LUA_POINTER_INVALID) and
-    ((MinArgsCount > MaxArgsCount) or (MaxArgsCount > 20)) then
-    raise ELua.CreateFmt('Non-available argument count range: %d..%d', [MinArgsCount, MaxArgsCount]) at FReturnAddress;
-
-  // method name
-  if (not IsValidIdent(Name)) then
-    raise ELua.CreateFmt('Non-supported method name ("%s")', [Name]) at FReturnAddress;
-  ProcName := TLuaNames(FNames).Add(Name);
-
-  if Assigned(MetaType) and (MetaType.F.Kind = mtClass) then
-  begin
-    VmtOffset := PLuaClassInfo(MetaType).VmtOffset(Address, False);
-    if (VmtOffset >= 0) then
+  Result := LUA_POINTER_INVALID;
+  FrameEnter(Frame, PShortString(@STR_METHOD), Critical);
+  try  
+    if (NativeUInt(Address) <= $FFFF) then
     begin
-      Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
+      RegisterError('address not defined');
+      Exit;
     end;
-  end;
 
-  // type name
-  if (MetaType = nil) then
-  begin
-    TypeName := @GLOBAL_NAME_SPACE;
-  end else
-  begin
-    TypeName := @MetaType.FName;
-  end;
+    if (Invokable = LUA_POINTER_INVALID) and
+      ((MinArgsCount > MaxArgsCount) or (MaxArgsCount > 20)) then
+    begin
+      RegisterErrorFmt('non-available argument count range: %d..%d', [MinArgsCount, MaxArgsCount]);
+      Exit;
+    end;
 
-(*
-  // конструктор
-  IsConstructor := (AClass <> nil) and (SameStrings(LUA_CONSTRUCTOR, ProcName));
-  if (IsConstructor) then
-  begin
-    if (with_class) then
-    ELua.Assert('Contructor can''t be a class method', CodeAddr);
+    // method name
+    if (not IsValidIdent(Name)) then
+    begin
+      RegisterErrorFmt('non-supported name ("%s")', [Name]);
+      Exit;
+    end;
+    ProcName := TLuaNames(FNames).Add(Name);
+    FrameRename(NameBuffer, Name);
 
-    if IsClass then Index := InternalAddClass(AClass, False, CodeAddr)
-    else Index := internal_class_index(AClass);
+    if Assigned(MetaType) and (MetaType.F.Kind = mtClass) then
+    begin
+      VmtOffset := PLuaClassInfo(MetaType).VmtOffset(Address, False);
+      if (VmtOffset >= 0) then
+      begin
+        Address := Pointer(NativeInt(PROPSLOT_VIRTUAL) or VmtOffset);
+      end;
+    end;
 
-    FillConstructor(Index, Address, ArgsCount);
-    Result := -1;
-    exit;
-  end;
-*)
-
-  // parameters
-  Value.Address := Address;
-  Value.MethodKind := MethodKind;
-  Value.InvokableMode := (Invokable <> LUA_POINTER_INVALID);
-  Value.Invokable := Invokable;
-  if (not Value.InvokableMode) then
-  begin
-    Value.MinArgsCount := MinArgsCount;
-    Value.MinArgsCount := MaxArgsCount;
-  end;
-
-  // find existing/add item
-  Entity := nil;
-  Item := nil;
-  if (MetaType = nil) then
-  begin
-    Entity := InternalAddGlobal(Ord(gkProc), ProcName);
-    LastPtr := Entity.Ptr;
-  end else
-  begin
-    Item := TLuaDictionary(PLuaRecordInfo(MetaType).FNameSpace).InternalFind(ProcName, True);
-    LastPtr := Item.Value;
-  end;
-
-  // fill/update routine
-  //  not found: fill and add childs (replace invalid)
-  //  found inherited: replace to new, replace last value to new
-  if (LastPtr = LUA_POINTER_INVALID) then
-  begin
-  new_or_replace:
-    Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
+    // type name
     if (MetaType = nil) then
     begin
-      Entity.Ptr := Ptr;
+      TypeName := @GLOBAL_NAME_SPACE;
     end else
     begin
-      Item.Value := Ptr or NAMESPACE_FLAG_PROC;
+      TypeName := @MetaType.FName;
     end;
-    Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
-    Proc^ := Value;
 
-    if (Assigned(MetaType) and (MetaType.F.Kind = mtClass)) then
+  (*
+    // конструктор
+    IsConstructor := (AClass <> nil) and (SameStrings(LUA_CONSTRUCTOR, ProcName));
+    if (IsConstructor) then
     begin
-      InternalReplaceChildNameSpace(TLuaDictionary(FMetaTypes).Find(Pointer(MetaType.F.AClass)),
-        ProcName, LastPtr, Ptr or NAMESPACE_FLAG_INHERITED, False);
-    end
-  end else
-  if (LastPtr and NAMESPACE_FLAG_PROC = 0) then
-  begin
-    raise ELua.CreateFmt('Property "%s" is already contained in %s', [Name, TypeName^]) at FReturnAddress;
-  end else
-  begin
-    if (LastPtr and NAMESPACE_FLAG_INHERITED = 0) then
+      if (with_class) then
+      ELua.Assert('Contructor can''t be a class method', CodeAddr);
+
+      if IsClass then Index := InternalAddClass(AClass, False, CodeAddr)
+      else Index := internal_class_index(AClass);
+
+      FillConstructor(Index, Address, ArgsCount);
+      Result := -1;
+      exit;
+    end;
+  *)
+
+    // parameters
+    Value.Address := Address;
+    Value.MethodKind := MethodKind;
+    Value.InvokableMode := (Invokable <> LUA_POINTER_INVALID);
+    Value.Invokable := Invokable;
+    if (not Value.InvokableMode) then
     begin
-      // own method
-      Ptr := LastPtr;
-      Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr and NAMESPACE_FLAGS_CLEAR);
-      Proc^ := Value;
+      Value.MinArgsCount := MinArgsCount;
+      Value.MinArgsCount := MaxArgsCount;
+    end;
+
+    // find existing/add item
+    Entity := nil;
+    Item := nil;
+    if (MetaType = nil) then
+    begin
+      Entity := InternalAddGlobal(Ord(gkProc), ProcName);
+      LastPtr := Entity.Ptr;
     end else
     begin
-      // inherited method: done if not changed
-      Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(LastPtr and NAMESPACE_FLAGS_CLEAR);
-      if (Value.Address = Proc.Address) and (Value.MethodKind = Proc.MethodKind) and
-        (Value.Invokable{ArgsCount} = Proc.Invokable{ArgsCount}) then
+      Item := TLuaDictionary(PLuaRecordInfo(MetaType).FNameSpace).InternalFind(ProcName, True);
+      LastPtr := Item.Value;
+    end;
+
+    // fill/update routine
+    //  not found: fill and add childs (replace invalid)
+    //  found inherited: replace to new, replace last value to new
+    if (LastPtr = LUA_POINTER_INVALID) then
+    begin
+    new_or_replace:
+      Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaMethod));
+      if (MetaType = nil) then
       begin
-        Ptr := LastPtr;
-        goto done;
+        Entity.Ptr := Ptr;
+      end else
+      begin
+        Item.Value := Ptr or NAMESPACE_FLAG_PROC;
       end;
+      Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
+      Proc^ := Value;
 
-      // replace to new allocated method
-      goto new_or_replace;
+      if (Assigned(MetaType) and (MetaType.F.Kind = mtClass)) then
+      begin
+        InternalReplaceChildNameSpace(TLuaDictionary(FMetaTypes).Find(Pointer(MetaType.F.AClass)),
+          ProcName, LastPtr, Ptr or NAMESPACE_FLAG_INHERITED, False);
+      end
+    end else
+    if (LastPtr and NAMESPACE_FLAG_PROC = 0) then
+    begin
+      RegisterErrorFmt('property "%s" is already contained in %s', [Name, TypeName^]);
+      Exit;
+    end else
+    begin
+      if (LastPtr and NAMESPACE_FLAG_INHERITED = 0) then
+      begin
+        // own method
+        Ptr := LastPtr;
+        Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr and NAMESPACE_FLAGS_CLEAR);
+        Proc^ := Value;
+      end else
+      begin
+        // inherited method: done if not changed
+        Proc := TLuaMemoryHeap(FMemoryHeap).Unpack(LastPtr and NAMESPACE_FLAGS_CLEAR);
+        if (Value.Address = Proc.Address) and (Value.MethodKind = Proc.MethodKind) and
+          (Value.Invokable{ArgsCount} = Proc.Invokable{ArgsCount}) then
+        begin
+          Ptr := LastPtr;
+          goto done;
+        end;
+
+        // replace to new allocated method
+        goto new_or_replace;
+      end;
     end;
-  end;
 
-done:
-  Result := Ptr and NAMESPACE_FLAGS_CLEAR;
+  done:
+    Result := Ptr and NAMESPACE_FLAGS_CLEAR;
+  finally
+    FrameLeave;
+  end;
 end;
 
          (*
@@ -17877,7 +18355,10 @@ end;
 
 function TLua.InternalAddProperty(const MetaType: PLuaMetaType; const Name: LuaString;
   const TypeInfo: Pointer; const IsDefault, IsAutoRegister: Boolean; const Getter, Setter, Flags: NativeUInt;
-  const IndexParams: Integer): __luapointer;
+  const IndexParams: Integer; const Critical: Boolean): __luapointer;
+const
+  STR_PROPERTY: array[0..8] of Byte = (8, Ord('P'), Ord('r'), Ord('o'), Ord('p'),
+    Ord('e'), Ord('r'), Ord('t'), Ord('y'));
 label
   new_or_replace, done;
 var
@@ -17890,115 +18371,132 @@ var
   LastPtr, Ptr: __luapointer;
   ReplaceDefault: Boolean;
   Prop: ^TLuaProperty;
+  Frame: TLuaFrame;
 begin
-  // property name
-  PropMode := Ord(MetaType = nil) * 2 +
-    Ord(Assigned(MetaType) and (MetaType.F.Kind = mtRecord) and (Getter = Setter) and
-      (Getter and (1 shl (PROP_SLOTSETTER_SHIFT * 2) - 1) = Ord(pmField) + Ord(pmField) shl PROP_SLOTSETTER_SHIFT));
-  if (not IsValidIdent(Name)) then
-    raise ELua.CreateFmt('Non-supported %s name ("%s")', [PROPERTY_MODES[PropMode], Name]) at FReturnAddress;
-  PropName := TLuaNames(FNames).Add(Name);
+  Result := LUA_POINTER_INVALID;
+  FrameEnter(Frame, PShortString(@STR_PROPERTY), Critical);
+  try  
+    // property name
+    PropMode := Ord(MetaType = nil) * 2 +
+      Ord(Assigned(MetaType) and (MetaType.F.Kind = mtRecord) and (Getter = Setter) and
+        (Getter and (1 shl (PROP_SLOTSETTER_SHIFT * 2) - 1) = Ord(pmField) + Ord(pmField) shl PROP_SLOTSETTER_SHIFT));
+    if (not IsValidIdent(Name)) then
+    begin
+      RegisterErrorFmt('non-supported %s name ("%s")', [PROPERTY_MODES[PropMode], Name]);
+      Exit;
+    end;
+    PropName := TLuaNames(FNames).Add(Name);
 
-  // type name
-  if (MetaType = nil) then
-  begin
-    TypeName := @GLOBAL_NAME_SPACE;
-  end else
-  begin
-    TypeName := @MetaType.FName;
-  end;
-
-  // parameters
-  if (NativeUInt(TypeInfo) <= $FFFF) then
-    raise ELua.CreateFmt('TypeInfo of %s.%s not defined', [TypeName^, Name]) at FReturnAddress;
-  if (not Value.InternalSetTypeInfo(Self, TypeInfo)) then
-    raise ELua.CreateFmt('Unknown type "%s" (%s) for %s.%s porperty',
-      [FStringBuffer.Lua, FStringBuffer.Default, TypeName^, Name]) at FReturnAddress;
-  Value.Getter := Getter;
-  Value.Setter := Setter;
-  Value.Index := IndexParams;
-  Value.Flags := Flags;
-
-  // find existing/add item
-  Entity := nil;
-  Item := nil;
-  if (MetaType = nil) then
-  begin
-    Entity := InternalAddGlobal(Ord(gkVariable), PropName);
-    Entity.ConstMode := (Flags and PROP_CONSTREF_MODE <> 0);
-    LastPtr := Entity.Ptr;
-  end else
-  begin
-    Item := TLuaDictionary(PLuaRecordInfo(MetaType).FNameSpace).InternalFind(PropName, True);
-    LastPtr := Item.Value;
-  end;
-
-  // fill/update routine
-  //  not found: fill and add childs (replace invalid)
-  //  not found and defaut: fill+default and add childs (replace invalid defaults)
-  //  found inherited: replace to new, replace last value to new
-  //  found inherited and default: replace to new, replace last value to new, replace last default to new
-  //  found and set default: (replace last value to new), replace last default to new
-  //  found and not set default: fill
-  if (LastPtr = LUA_POINTER_INVALID) then
-  begin
-  new_or_replace:
-    Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaProperty));
+    // type name
     if (MetaType = nil) then
     begin
-      Entity.Ptr := Ptr;
+      TypeName := @GLOBAL_NAME_SPACE;
     end else
     begin
-      Item.Value := Ptr {or 0};
+      TypeName := @MetaType.FName;
     end;
-    Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
-    Prop^ := Value;
 
-    if (Assigned(MetaType) and (MetaType.F.Kind = mtClass)) then
+    // parameters
+    if (NativeUInt(TypeInfo) <= $FFFF) then
     begin
-      ReplaceDefault := (IsDefault) or (PLuaClassInfo(MetaType).DefaultProperty = LastPtr and NAMESPACE_FLAGS_CLEAR);
-      InternalReplaceChildNameSpace(TLuaDictionary(FMetaTypes).Find(Pointer(MetaType.F.AClass)),
-        PropName, LastPtr, Ptr or NAMESPACE_FLAG_INHERITED, ReplaceDefault);
+      RegisterErrorFmt('TypeInfo of %s.%s not defined', [TypeName^, Name]);
+      Exit;
     end;
-  end else
-  if (LastPtr and NAMESPACE_FLAG_PROC <> 0) then
-  begin
-    raise ELua.CreateFmt('Method "%s" is already contained in %s', [Name, TypeName^]) at FReturnAddress;
-  end else
-  begin
-    if (LastPtr and NAMESPACE_FLAG_INHERITED = 0) then
+    if (not Value.InternalSetTypeInfo(Self, TypeInfo)) then
     begin
-      // own property
-      Ptr := LastPtr;
-      Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr {and NAMESPACE_FLAGS_CLEAR});
+      RegisterErrorFmt('unknown type "%s" (%s) for %s.%s property',
+        [FStringBuffer.Lua, FStringBuffer.Default, TypeName^, Name]);
+      Exit;
+    end;
+    Value.Getter := Getter;
+    Value.Setter := Setter;
+    Value.Index := IndexParams;
+    Value.Flags := Flags;
+
+    // find existing/add item
+    Entity := nil;
+    Item := nil;
+    if (MetaType = nil) then
+    begin
+      Entity := InternalAddGlobal(Ord(gkVariable), PropName);
+      Entity.ConstMode := (Flags and PROP_CONSTREF_MODE <> 0);
+      LastPtr := Entity.Ptr;
+    end else
+    begin
+      Item := TLuaDictionary(PLuaRecordInfo(MetaType).FNameSpace).InternalFind(PropName, True);
+      LastPtr := Item.Value;
+    end;
+
+    // fill/update routine
+    //  not found: fill and add childs (replace invalid)
+    //  not found and defaut: fill+default and add childs (replace invalid defaults)
+    //  found inherited: replace to new, replace last value to new
+    //  found inherited and default: replace to new, replace last value to new, replace last default to new
+    //  found and set default: (replace last value to new), replace last default to new
+    //  found and not set default: fill
+    if (LastPtr = LUA_POINTER_INVALID) then
+    begin
+    new_or_replace:
+      Ptr := TLuaMemoryHeap(FMemoryHeap).Alloc(SizeOf(TLuaProperty));
+      if (MetaType = nil) then
+      begin
+        Entity.Ptr := Ptr;
+      end else
+      begin
+        Item.Value := Ptr {or 0};
+      end;
+      Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr);
       Prop^ := Value;
-      if (IsDefault) and (PLuaClassInfo(MetaType).DefaultProperty <> Ptr) then
+
+      if (Assigned(MetaType) and (MetaType.F.Kind = mtClass)) then
       begin
-        // set default
+        ReplaceDefault := (IsDefault) or (PLuaClassInfo(MetaType).DefaultProperty = LastPtr and NAMESPACE_FLAGS_CLEAR);
         InternalReplaceChildNameSpace(TLuaDictionary(FMetaTypes).Find(Pointer(MetaType.F.AClass)),
-            PropName, Ptr or NAMESPACE_FLAG_INHERITED, Ptr or NAMESPACE_FLAG_INHERITED, True);
+          PropName, LastPtr, Ptr or NAMESPACE_FLAG_INHERITED, ReplaceDefault);
       end;
     end else
+    if (LastPtr and NAMESPACE_FLAG_PROC <> 0) then
     begin
-      // inherited property: done if not changed
-      Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(LastPtr and NAMESPACE_FLAGS_CLEAR);
-      if (Value.TypeInfo = Prop.TypeInfo) and (Value.Getter = Prop.Getter) and
-        (Value.Setter = Prop.Setter) and (Value.Index = Prop.Index) and (Value.FlagsEx = Prop.FlagsEx) then
+      RegisterErrorFmt('method "%s" is already contained in %s', [Name, TypeName^]);
+      Exit;
+    end else
+    begin
+      if (LastPtr and NAMESPACE_FLAG_INHERITED = 0) then
       begin
-        if (not IsDefault) or (PLuaClassInfo(MetaType).DefaultProperty = LastPtr and NAMESPACE_FLAGS_CLEAR) then
+        // own property
+        Ptr := LastPtr;
+        Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(Ptr {and NAMESPACE_FLAGS_CLEAR});
+        Prop^ := Value;
+        if (IsDefault) and (PLuaClassInfo(MetaType).DefaultProperty <> Ptr) then
         begin
-          Ptr := LastPtr;
-          goto done;
+          // set default
+          InternalReplaceChildNameSpace(TLuaDictionary(FMetaTypes).Find(Pointer(MetaType.F.AClass)),
+              PropName, Ptr or NAMESPACE_FLAG_INHERITED, Ptr or NAMESPACE_FLAG_INHERITED, True);
         end;
+      end else
+      begin
+        // inherited property: done if not changed
+        Prop := TLuaMemoryHeap(FMemoryHeap).Unpack(LastPtr and NAMESPACE_FLAGS_CLEAR);
+        if (Value.TypeInfo = Prop.TypeInfo) and (Value.Getter = Prop.Getter) and
+          (Value.Setter = Prop.Setter) and (Value.Index = Prop.Index) and (Value.FlagsEx = Prop.FlagsEx) then
+        begin
+          if (not IsDefault) or (PLuaClassInfo(MetaType).DefaultProperty = LastPtr and NAMESPACE_FLAGS_CLEAR) then
+          begin
+            Ptr := LastPtr;
+            goto done;
+          end;
+        end;
+
+        // replace to new allocated property
+        goto new_or_replace;
       end;
-
-      // replace to new allocated property
-      goto new_or_replace;
     end;
-  end;
 
-done:
-  Result := Ptr {and NAMESPACE_FLAGS_CLEAR};
+  done:
+    Result := Ptr {and NAMESPACE_FLAGS_CLEAR};
+  finally
+    FrameLeave;
+  end;
 end;
 
            (*
@@ -21826,16 +22324,22 @@ procedure TLua.RegClass(const AClass: TClass; const UseRtti: Boolean);
 {$ifNdef CPUINTEL}
 begin
   Self.FReturnAddress := ReturnAddress;
-  Self.InternalAddClass(AClass, UseRtti);
+  Self.FFrames := nil;
+  Self.InternalAddClass(AClass, UseRtti, True);
 end;
 {$else}
 asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
+  push [esp]
+  mov [esp + 4], 1
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
+  mov r9d, 1
   {$endif}
   jmp TLua.InternalAddClass
 end;
@@ -21846,13 +22350,14 @@ var
   i: Integer;
 begin
   for i := 0 to High(AClasses) do
-  Self.InternalAddClass(AClasses[i], UseRtti);
+  Self.InternalAddClass(AClasses[i], UseRtti, True);
 end;
 
 procedure TLua.RegClasses(const AClasses: array of TClass; const UseRtti: Boolean);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegClasses(Self, AClasses, UseRtti);
 end;
 {$else}
@@ -21861,9 +22366,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegClasses
 end;
@@ -21873,6 +22380,7 @@ function TLua.RegRecord(const TypeInfo: PTypeInfo): PLuaRecordInfo;
 {$ifNdef CPUINTEL}
 begin
   Self.FReturnAddress := ReturnAddress;
+  Self.FFrames := nil;
   Result := InternalAddRecord(TypeInfo);
 end;
 {$else}
@@ -21880,9 +22388,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalAddRecord
 end;
@@ -21892,6 +22402,7 @@ function TLua.RegRecord(const Name: LuaString; const TypeInfo: PTypeInfo; const 
 {$ifNdef CPUINTEL}
 begin
   Self.FReturnAddress := ReturnAddress;
+  Self.FFrames := nil;
   Result := InternalAddRecordEx(Name, TypeInfo, UseRtti);
 end;
 {$else}
@@ -21900,9 +22411,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalAddRecordEx
 end;
@@ -21912,6 +22425,7 @@ function TLua.RegArray(const TypeInfo: PTypeInfo): PLuaArrayInfo;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   Result := InternalAddArray(TypeInfo);
 end;
 {$else}
@@ -21919,9 +22433,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalAddArray
 end;
@@ -21931,6 +22447,7 @@ function TLua.RegArray(const Identifier: Pointer; const ItemTypeInfo: PTypeInfo;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   Result := InternalAddArrayEx(Identifier, ItemTypeInfo, ABounds);
 end;
 {$else}
@@ -21939,9 +22456,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp TLua.InternalAddArrayEx
 end;
@@ -21951,16 +22470,21 @@ function TLua.RegSet(const TypeInfo: PTypeInfo): PLuaSetInfo;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
-  Result := InternalAddSet(TypeInfo);
+  FFrames := nil;
+  Result := InternalAddSet(TypeInfo, True);
 end;
 {$else}
 asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
+  mov ecx, 1
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
+  mov r8d, 1
   {$endif}
   jmp TLua.InternalAddSet
 end;
@@ -21969,7 +22493,7 @@ end;
 procedure __TLuaRegUniversalProc(const Lua: TLua; const ProcName: LuaString;
   const Proc: TLuaProcCallback; const MinArgsCount, MaxArgsCount: Word);
 begin
-  Lua.InternalAddMethod(nil, ProcName, @Proc, mkStatic, LUA_POINTER_INVALID, MinArgsCount, MaxArgsCount);
+  Lua.InternalAddMethod(nil, ProcName, @Proc, mkStatic, LUA_POINTER_INVALID, True, MinArgsCount, MaxArgsCount);
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Callback: TLuaProcCallback;
@@ -21977,6 +22501,7 @@ procedure TLua.RegProc(const ProcName: LuaString; const Callback: TLuaProcCallba
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegUniversalProc(Self, ProcName, Callback, MinArgsCount, MaxArgsCount);
 end;
 {$else}
@@ -21985,9 +22510,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegUniversalProc
 end;
@@ -21995,15 +22522,21 @@ end;
 
 procedure __TLuaRegRTIIProc(const Lua: TLua; const ProcName: LuaString;
   const Address: Pointer; const TypeInfo: PTypeInfo);
+var
+  Invokable: __luapointer;
 begin
-  Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
-    Lua.InternalBuildInvokable(nil, TypeInfo, mkStatic));
+  Invokable := Lua.InternalBuildInvokable(nil, TypeInfo, mkStatic, True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Lua.InternalAddMethod(nil, ProcName, Address, mkStatic, Invokable, True);
+  end;
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Address: Pointer; const TypeInfo: PTypeInfo);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegRTIIProc(Self, ProcName, Address, TypeInfo);
 end;
 {$else}
@@ -22012,9 +22545,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegRTIIProc
 end;
@@ -22022,9 +22557,14 @@ end;
 
 procedure __TLuaRegCustomProc(const Lua: TLua; const ProcName: LuaString; const Address: Pointer;
   const Params: array of TLuaProcParam; const ResultType: PTypeInfo; const CallConv: TCallConv);
+var
+  Invokable: __luapointer;
 begin
-  Lua.InternalAddMethod(nil, ProcName, Address, mkStatic,
-    Lua.InternalBuildInvokable(nil, Params, ResultType, mkStatic, CallConv));
+  Invokable := Lua.InternalBuildInvokable(nil, ProcName, Params, ResultType, mkStatic, CallConv, True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Lua.InternalAddMethod(nil, ProcName, Address, mkStatic, Invokable, True);
+  end;
 end;
 
 procedure TLua.RegProc(const ProcName: LuaString; const Address: Pointer;
@@ -22032,6 +22572,7 @@ procedure TLua.RegProc(const ProcName: LuaString; const Address: Pointer;
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegCustomProc(Self, ProcName, Address, Params, ResultType, CallConv);
 end;
 {$else}
@@ -22040,9 +22581,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegCustomProc
 end;
@@ -22052,8 +22595,8 @@ procedure __TLuaRegUniversalClassMethod(const Lua: TLua; const AClass: TClass;
   const MethodName: LuaString; const Method: TLuaMethodCallback;
   const MinArgsCount, MaxArgsCount: Word; const MethodKind: TLuaMethodKind);
 begin
-  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False), MethodName, @Method,
-    MethodKind, LUA_POINTER_INVALID, MinArgsCount, MaxArgsCount);
+  Lua.InternalAddMethod(Lua.InternalAddClass(AClass, False, True), MethodName, @Method,
+    MethodKind, LUA_POINTER_INVALID, True, MinArgsCount, MaxArgsCount);
 end;
 
 procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; const Callback: TLuaMethodCallback;
@@ -22061,6 +22604,7 @@ procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; cons
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegUniversalClassMethod(Self, AClass, MethodName, Callback, MinArgsCount, MaxArgsCount, MethodKind);
 end;
 {$else}
@@ -22069,9 +22613,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegUniversalClassMethod
 end;
@@ -22082,10 +22628,14 @@ procedure __TLuaRegRTIIClassMethod(const Lua: TLua; const AClass: TClass;
   const MethodKind: TLuaMethodKind);
 var
   ClassInfo: PLuaClassInfo;
+  Invokable: __luapointer;
 begin
-  ClassInfo := Lua.InternalAddClass(AClass, False);
-  Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind,
-    Lua.InternalBuildInvokable(ClassInfo, TypeInfo, MethodKind));
+  ClassInfo := Lua.InternalAddClass(AClass, False, True);
+  Invokable := Lua.InternalBuildInvokable(ClassInfo, TypeInfo, MethodKind, True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind, Invokable, True);
+  end;
 end;
 
 procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; const Address: Pointer;
@@ -22093,6 +22643,7 @@ procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; cons
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegRTIIClassMethod(Self, AClass, MethodName, Address, TypeInfo, MethodKind);
 end;
 {$else}
@@ -22101,9 +22652,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegRTIIClassMethod
 end;
@@ -22114,10 +22667,14 @@ procedure __TLuaRegCustomClassMethod(const Lua: TLua; const AClass: TClass; cons
   const MethodKind: TLuaMethodKind; const CallConv: TCallConv);
 var
   ClassInfo: PLuaClassInfo;
+  Invokable: __luapointer;
 begin
-  ClassInfo := Lua.InternalAddClass(AClass, False);
-  Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind,
-    Lua.InternalBuildInvokable(ClassInfo, Params, ResultType, mkStatic, CallConv));
+  ClassInfo := Lua.InternalAddClass(AClass, False, True);
+  Invokable := Lua.InternalBuildInvokable(ClassInfo, MethodName, Params, ResultType, mkStatic, CallConv, True);
+  if (Invokable <> LUA_POINTER_INVALID) then
+  begin
+    Lua.InternalAddMethod(ClassInfo, MethodName, Address, MethodKind, Invokable, True);
+  end;
 end;
 
 procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; const Address: Pointer;
@@ -22126,6 +22683,7 @@ procedure TLua.RegMethod(const AClass: TClass; const MethodName: LuaString; cons
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegCustomClassMethod(Self, AClass, MethodName, Address, Params, ResultType, MethodKind, CallConv);
 end;
 {$else}
@@ -22134,9 +22692,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegCustomClassMethod
 end;
@@ -22168,7 +22728,7 @@ var
     raise ELua.Create(S) at Self.FReturnAddress;
   end;
 begin
-  ClassInfo := Self.InternalAddClass(AClass, False);
+  ClassInfo := Self.InternalAddClass(AClass, False, True);
   ClassName := ClassInfo.Name;
 
   // flags, property mode
@@ -22315,7 +22875,7 @@ begin
 
   // register class property
   Self.InternalAddProperty(ClassInfo, Name, TypeInfo, Default, False,
-    Getter, Setter, Flags, IndexParams);
+    Getter, Setter, Flags, IndexParams, True);
 end;
 
 procedure TLua.RegProperty(const AClass: TClass; const Name: LuaString; const TypeInfo: PTypeInfo;
@@ -22325,6 +22885,7 @@ procedure TLua.RegProperty(const AClass: TClass; const Name: LuaString; const Ty
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegProperty(Self, AClass, Name, TypeInfo, Getter, Setter, GetterPtr, SetterPtr,
     Params, Default, ConstRef, Index);
 end;
@@ -22334,9 +22895,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegProperty
 end;
@@ -22358,7 +22921,7 @@ begin
   if (IsConst) then Flags := Flags or PROP_CONSTREF_MODE;
 
   Self.InternalAddProperty(nil, Name, TypeInfo, False, False, Ptr, Ptr, Flags,
-    Low(Integer));
+    Low(Integer), True);
 end;
 
 procedure TLua.RegVariable(const Name: LuaString; const Instance; const TypeInfo: PTypeInfo;
@@ -22366,6 +22929,7 @@ procedure TLua.RegVariable(const Name: LuaString; const Instance; const TypeInfo
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegVariable(Self, Name, Instance, TypeInfo, IsConst);
 end;
 {$else}
@@ -22374,9 +22938,11 @@ asm
   pop ebp
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegVariable
 end;
@@ -22407,6 +22973,7 @@ procedure TLua.RegConst(const Name: LuaString; const Value: Variant);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegConstVariant(Self, Name, Value);
 end;
 {$else}
@@ -22414,9 +22981,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegConstVariant
 end;
@@ -22447,6 +23016,7 @@ procedure TLua.RegConst(const Name: LuaString; const Value: TLuaArg);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
+  FFrames := nil;
   __TLuaRegConstLuaArg(Self, Name, Value);
 end;
 {$else}
@@ -22454,9 +23024,11 @@ asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
   {$endif}
   jmp __TLuaRegConstLuaArg
 end;
@@ -22466,18 +23038,23 @@ procedure TLua.RegEnum(const TypeInfo: PTypeInfo);
 {$ifNdef CPUINTEL}
 begin
   FReturnAddress := ReturnAddress;
-  __TLuaRegEnum(Self, TypeInfo);
+  FFrames := nil;
+  InternalAddEnum(TypeInfo, True);
 end;
 {$else}
 asm
   {$ifdef CPUX86}
   push [esp]
   pop [EAX].TLua.FReturnAddress
+  mov [EAX].TLua.FFrames, 0
+  mov ecx, 1
   {$else .CPUX64} .NOFRAME
   push [rsp]
   pop [RCX].TLua.FReturnAddress
+  mov [RCX].TLua.FFrames, 0
+  mov r8d, 1
   {$endif}
-  jmp __TLuaRegEnum
+  jmp TLua.InternalAddEnum
 end;
 {$endif}
 

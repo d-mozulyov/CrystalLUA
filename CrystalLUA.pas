@@ -133,7 +133,7 @@ type
     TExtended80Rec = Extended;
     PExtended80Rec = ^TExtended80Rec;
   {$ifend}
-  TBytes = array of Byte;
+  TBytes = {$if (not Defined(FPC)) and (CompilerVersion >= 23)}TArray<Byte>{$else}array of Byte{$ifend};
   PBytes = ^TBytes;
   {$ifNdef EXTENDEDRTTI}
     TCallConv = (ccReg, ccCdecl, ccPascal, ccStdCall, ccSafeCall);
